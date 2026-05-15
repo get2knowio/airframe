@@ -33,7 +33,7 @@ if str(REPO_ROOT / "src") not in sys.path:
 from pydantic import BaseModel  # noqa: E402
 
 from airframe.adapters.codex import CodexRuntime  # noqa: E402
-from airframe.tiers import ProviderModel  # noqa: E402
+from airframe.protocol import ProviderModel  # noqa: E402
 
 
 class Result(BaseModel):

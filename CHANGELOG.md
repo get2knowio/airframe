@@ -15,7 +15,7 @@ through five migration phases.
 
 - `AgentRuntime` protocol with `execute / reset / aclose /
   validate_binding`.
-- `RuntimeResult`, `CostRecord`, `ProviderModel`, `Tier` data types.
+- `RuntimeResult`, `CostRecord`, `ProviderModel` data types.
 - Vendor-agnostic error hierarchy: `AgentRuntimeError` base plus
   `RuntimeAuthError`, `RuntimeModelNotFoundError`,
   `RuntimeTransientError`, `RuntimeStructuredOutputError`,

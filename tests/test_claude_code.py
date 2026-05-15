@@ -32,8 +32,7 @@ from airframe.errors import (
     RuntimeStructuredOutputError,
     RuntimeTransientError,
 )
-from airframe.protocol import UnsupportedBindingError
-from airframe.tiers import ProviderModel
+from airframe.protocol import ProviderModel, UnsupportedBindingError
 
 
 class _Schema(BaseModel):

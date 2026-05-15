@@ -67,10 +67,10 @@ from airframe.errors import (
 )
 from airframe.protocol import (
     AgentRuntime,
+    ProviderModel,
     RuntimeResult,
     UnsupportedBindingError,
 )
-from airframe.tiers import ProviderModel
 
 logger = logging.getLogger(__name__)
 

@@ -1,9 +1,9 @@
 # airframe
 
-**One protocol, pluggable adapters.** Vendor-neutral agent runtime
-for Python — write your agent against a small `AgentRuntime`
-protocol and switch between Claude Code, GitHub Copilot, OpenAI
-Codex, or OpenCode Zen by swapping a single object.
+**JDBC for LLM agent SDKs.** Vendor-neutral agent runtime for
+Python — write your agent against a small `AgentRuntime` protocol
+and switch between Claude Code, GitHub Copilot, OpenAI Codex, or
+OpenCode Zen by swapping a single object.
 
 ```python
 from airframe import ClaudeCodeRuntime, ProviderModel
@@ -47,15 +47,18 @@ the opencode-go Zen gateway speaks OpenAI-compatible HTTP. Each has
 its own auth chain, error taxonomy, cost-reporting shape, and
 structured-output mechanism. Airframe collapses those differences
 behind one `execute / reset / aclose / validate_binding` interface,
-classifies every vendor's failures into a single hierarchy
-(`RuntimeAuthError`, `RuntimeTransientError`,
-`RuntimeStructuredOutputError`, etc.), and produces a single
-`CostRecord` shape regardless of the vendor.
+classifies every vendor's failures into a single hierarchy, and
+produces a single `CostRecord` shape regardless of the vendor.
 
 The protocol is intentionally narrow. The four methods are the
 contract; everything else (auth chains, session caching, tool-call
 forcing, JSON-schema mode, envelope unwrapping) lives inside each
 adapter, where vendor-specific behaviour belongs.
+
+Anything *above* the protocol — retry policy, fallback across
+vendors, conversation memory, multi-agent orchestration — is left to
+the consumer. Airframe is the driver layer; the application
+composes its own behaviour on top.
 
 ## Install
 
@@ -117,9 +120,30 @@ class AgentRuntime(Protocol):
   (typically between tasks). Runtime-wide resources (subprocess
   pool, HTTP client) survive.
 * **`aclose`** — full teardown. Idempotent; never raises.
-* **`validate_binding`** — quick check the runtime can serve a given
-  `(provider_id, model_id)`. Cascade machinery uses this to skip
-  bindings before attempting them.
+* **`validate_binding`** — predicate: does this runtime serve a
+  given `(provider_id, model_id)`? Cheap and non-async; suitable for
+  filtering bindings before attempting them.
+
+### Errors
+
+Adapters classify vendor failures into a small hierarchy so consumer
+`except` clauses don't need vendor-specific knowledge:
+
+| Error | What it means |
+| --- | --- |
+| `RuntimeAuthError` | Credentials bad / expired / missing. |
+| `RuntimeModelNotFoundError` | Server doesn't serve that model on this binding. |
+| `RuntimeTransientError` | 5xx, rate limit, brief outage. Call was attempted; failure was recoverable. |
+| `RuntimeStructuredOutputError` | Transport succeeded but model didn't produce a payload matching the schema. |
+| `RuntimeContextOverflowError` | Prompt exceeded the model's context window. |
+| `RuntimeProtocolError` | Adapter saw something it can't interpret (adapter / SDK bug). |
+| `RuntimeServerStartError` | Adapter couldn't bring its backend up at all. |
+| `RuntimeCancelledError` | Caller-initiated abort. |
+
+What to *do* with each — retry, fall back to another binding,
+surface to the user, escalate to a larger model — is consumer
+policy. Airframe doesn't ship a retry / fallback engine; consumers
+compose their own from these primitives.
 
 See [docs/architecture.md](docs/architecture.md) for the design
 rationale and the operational landmines each adapter mitigates.

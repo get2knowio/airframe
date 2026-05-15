@@ -40,8 +40,12 @@ from airframe.errors import (
     RuntimeStructuredOutputError,
     RuntimeTransientError,
 )
-from airframe.protocol import AgentRuntime, RuntimeResult, UnsupportedBindingError
-from airframe.tiers import ProviderModel, Tier
+from airframe.protocol import (
+    AgentRuntime,
+    ProviderModel,
+    RuntimeResult,
+    UnsupportedBindingError,
+)
 
 __version__ = "0.1.0"
 
@@ -72,7 +76,6 @@ __all__ = [
     "RuntimeServerStartError",
     "RuntimeStructuredOutputError",
     "RuntimeTransientError",
-    "Tier",
     "UnsupportedBindingError",
     "__version__",
 ]

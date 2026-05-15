@@ -1,30 +1,31 @@
 """``AgentRuntime`` protocol — vendor-agnostic agent transport.
 
-Agents talk to LLMs through a thin :class:`AgentRuntime` protocol.
-Implementations live under :mod:`airframe.adapters` and wrap each
-vendor's preferred Python SDK (Claude Agent SDK, GitHub Copilot Python
-SDK, OpenAI Codex SDK, OpenCode Zen HTTP, etc.). A consumer receives
-an :class:`AgentRuntime` at construction and never sees a
-vendor-specific type at the call site.
+Think of airframe as JDBC for LLM agent SDKs: one interface, many
+drivers. Agents talk to LLMs through a thin :class:`AgentRuntime`
+protocol; implementations live under :mod:`airframe.adapters` and
+wrap each vendor's preferred Python SDK (Claude Agent SDK, GitHub
+Copilot Python SDK, OpenAI Codex SDK, OpenCode Zen HTTP, etc.). A
+consumer receives an :class:`AgentRuntime` at construction and never
+sees a vendor-specific type at the call site.
 
 Design principles:
 
 1. **Runtime owns its lifecycle.** Subprocesses, HTTP pools, auth
-   tokens, session state, retry logic — all hidden behind the
-   protocol. The consumer interface is :meth:`execute`,
-   :meth:`reset`, :meth:`aclose`.
+   tokens, session state — all hidden behind the protocol. The
+   consumer interface is :meth:`execute`, :meth:`reset`,
+   :meth:`aclose`.
 2. **No opaque handles in the consumer interface.** Avoid
    ``session_id``-juggling. The runtime hides any session state
    inside its own instance.
 3. **Scope is explicit, sessions are implicit.** A runtime MAY hold
    context warmth across consecutive :meth:`execute` calls so the
    provider's prompt cache hits accrue within a scope (typically one
-   "task" or "bead"). :meth:`reset` drops that scope.
+   "task"). :meth:`reset` drops that scope.
 4. **Errors are vendor-agnostic.** Adapters classify failures into
-   the :mod:`airframe.errors` hierarchy (:class:`RuntimeAuthError`,
-   :class:`RuntimeTransientError`,
-   :class:`RuntimeStructuredOutputError`, etc.) so cascade /
-   retry logic doesn't need to know which adapter raised what.
+   the :mod:`airframe.errors` hierarchy so consumer code can
+   ``except`` on a neutral type. What to *do* with each error —
+   retry, surface, escalate — is consumer policy; airframe doesn't
+   prescribe it.
 """
 
 from __future__ import annotations
@@ -35,7 +36,33 @@ from typing import Any, Protocol, runtime_checkable
 from pydantic import BaseModel
 
 from airframe.cost import CostRecord
-from airframe.tiers import ProviderModel
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderModel:
+    """One ``(provider_id, model_id)`` binding.
+
+    The two-string pair is airframe's primitive for identifying which
+    vendor + model a call should target. Adapters decide whether they
+    can serve a binding by matching on ``provider_id`` (and sometimes
+    filtering on ``model_id``) via :meth:`AgentRuntime.validate_binding`.
+
+    Attributes:
+        provider_id: Vendor identifier — ``"anthropic"``, ``"openai"``,
+            ``"copilot"``, ``"opencode"``, etc.
+        model_id: The model identifier the vendor recognises
+            (e.g. ``"claude-haiku-4-5"``, ``"gpt-5-mini"``).
+    """
+
+    provider_id: str
+    model_id: str
+
+    @property
+    def label(self) -> str:
+        return f"{self.provider_id}/{self.model_id}"
+
+    def to_dict(self) -> dict[str, str]:
+        return {"providerID": self.provider_id, "modelID": self.model_id}
 
 
 @dataclass(frozen=True, slots=True)
@@ -123,8 +150,8 @@ class AgentRuntime(Protocol):
                 agent profile); others ignore it.
             model: When non-None, pin this binding for this call.
                 Implementations that can't serve the binding raise
-                :class:`UnsupportedBindingError`. A cascade should
-                call :meth:`validate_binding` first to avoid this.
+                :class:`UnsupportedBindingError`. Callers can check
+                :meth:`validate_binding` first to avoid this.
             timeout: Hard wall-clock budget for the call.
 
         Returns:
@@ -136,8 +163,8 @@ class AgentRuntime(Protocol):
             RuntimeStructuredOutputError, RuntimeContextOverflowError,
             RuntimeTransientError, RuntimeProtocolError,
             RuntimeServerStartError: classified failures from
-            :mod:`airframe.errors`. The cascade decides what to do
-            based on the exception type.
+            :mod:`airframe.errors`. The caller decides what to do
+            with each.
         """
         ...
 
@@ -169,11 +196,13 @@ class AgentRuntime(Protocol):
         Adapters typically match on ``binding.provider_id`` against a
         :attr:`SUPPORTED_PROVIDER_IDS` frozenset and may further filter
         on ``binding.model_id`` (e.g. ``CopilotRuntime`` rejects
-        ``model_id`` starting with ``claude-`` per the Phase 0 spike
-        finding that Claude-on-Copilot doesn't honour tool calls).
+        ``model_id`` starting with ``claude-`` because Claude served
+        through Copilot Chat Completions doesn't honour tool calls
+        and so can't satisfy the structured-output contract).
 
-        Used by cascade machinery to short-circuit — bindings a
-        runtime can't serve are skipped without attempting them.
+        Cheap and non-async — suitable for predicate checks before
+        attempting :meth:`execute`. Calling :meth:`execute` with an
+        unsupported binding raises :class:`UnsupportedBindingError`.
         """
         ...
 
@@ -182,9 +211,15 @@ class UnsupportedBindingError(Exception):
     """Raised when a runtime is asked to serve a binding it can't serve.
 
     Distinct from :class:`airframe.errors.AgentRuntimeError` — this
-    is a programming error (the caller should have checked
-    :meth:`AgentRuntime.validate_binding` first), not a runtime failure.
+    is a programming error (the caller passed a binding this adapter
+    doesn't support; :meth:`AgentRuntime.validate_binding` would
+    have returned ``False``), not a runtime failure.
     """
 
 
-__all__ = ["AgentRuntime", "RuntimeResult", "UnsupportedBindingError"]
+__all__ = [
+    "AgentRuntime",
+    "ProviderModel",
+    "RuntimeResult",
+    "UnsupportedBindingError",
+]

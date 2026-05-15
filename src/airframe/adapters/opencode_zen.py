@@ -58,10 +58,10 @@ from airframe.errors import (
 )
 from airframe.protocol import (
     AgentRuntime,
+    ProviderModel,
     RuntimeResult,
     UnsupportedBindingError,
 )
-from airframe.tiers import ProviderModel
 
 logger = logging.getLogger(__name__)
 
@@ -335,8 +335,9 @@ class OpenCodeZenRuntime(AgentRuntime):
         if isinstance(exc, NotFoundError):
             return RuntimeModelNotFoundError(f"opencode_zen: model not found: {exc}")
         if isinstance(exc, BadRequestError):
-            # Many "your schema is bad" / "your input is bad" errors land
-            # here; classify as structured-output so the cascade falls over.
+            # Most BadRequest failures here are "your schema is bad" / "your
+            # input is bad" — i.e. a capability/instruction-following gap on
+            # this model, not a transport problem. Classify accordingly.
             return RuntimeStructuredOutputError(
                 f"opencode_zen: bad request: {exc}",
                 body=getattr(exc, "body", None),

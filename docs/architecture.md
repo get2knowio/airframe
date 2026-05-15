@@ -6,8 +6,8 @@ Modern Python agent code wants to:
 
 1. Send a prompt and a Pydantic schema; get back a validated object.
 2. Track cost telemetry (tokens, USD) per call.
-3. Recover gracefully when a provider fails (auth, rate limit,
-   transient 5xx, structured-output capability gap).
+3. Get useful information back when something fails (was it auth?
+   rate limit? capability gap? schema mismatch?).
 4. Switch vendors without rewriting agent logic.
 
 Each vendor ships an SDK that solves a *subset* of this and uses
@@ -19,6 +19,11 @@ call "the model identifier") disagree.
 Hand-rolling the bridge once per project is tractable. Doing it
 across multiple projects, and keeping them in sync as each vendor
 SDK evolves, is not.
+
+The mental model is JDBC: one driver-manager interface, many vendor
+drivers behind it. Airframe is the driver layer. What an application
+*does* with that layer — retry policy, vendor fallback, conversation
+memory, multi-agent orchestration — is outside the protocol.
 
 ## The shape
 
@@ -54,10 +59,11 @@ Every vendor lives behind it.
                                           per turn)
 ```
 
-Agent code never sees a vendor type. The cascade machinery (when one
-binding fails, fall over to the next) lives in the *consumer* —
-airframe ships the data types and the per-failure-mode error classes,
-and the consumer decides retry / cascade policy.
+Agent code never sees a vendor type. Anything *above* the protocol —
+retry, fallback across vendors, conversation memory, multi-agent
+orchestration — is the consumer's responsibility; airframe ships the
+primitives (typed results, classified errors, binding-validity
+predicates) and stays out of the way.
 
 ## Why the protocol looks like this
 
@@ -66,37 +72,44 @@ and the consumer decides retry / cascade policy.
   text is the fallback when `schema=None`.
 * **`reset` exists separately from `aclose`.** Reset is "drop the
   conversation, keep the connection"; aclose is "drop everything."
-  In practice consumers call `reset()` between bead/task boundaries
-  to keep the vendor's prompt-cache fresh within a scope while
-  dropping it between scopes.
+  In practice consumers call `reset()` between task boundaries to
+  keep the vendor's prompt-cache fresh within a scope while dropping
+  it between scopes.
 * **No `session_id` in the consumer interface.** Sessions exist
   inside the adapter; the consumer just sends prompts and resets.
-  This was the lesson from the OpenCode HTTP runtime — opaque
-  handles in the consumer interface leak across abstractions.
+  Opaque handles in the consumer interface leak across abstractions.
 * **`validate_binding` is non-async and cheap.** It's a "would you
-  serve this?" predicate, evaluated by cascade machinery before
-  attempting the call. Adapters check `provider_id` + maybe a
-  pattern on `model_id`; they don't dial home.
+  serve this?" predicate the caller can evaluate before attempting
+  the call. Adapters check `provider_id` + maybe a pattern on
+  `model_id`; they don't dial home.
 
 ## Why errors are vendor-agnostic
 
-The cascade decision is the same regardless of vendor: "is this
-recoverable on the same binding? on the next binding? not at all?"
-That maps cleanly to seven classes:
+Failure modes that *look* the same across vendors should *raise* the
+same exception type. That lets consumer code `except` on a neutral
+type without needing per-adapter knowledge. The hierarchy carves
+the failure modes that have meaningfully different shapes:
 
-| Error | Cascade decision |
+| Error | What it means |
 | --- | --- |
-| `RuntimeAuthError` | next binding (re-auth here won't help) |
-| `RuntimeModelNotFoundError` | next binding |
-| `RuntimeStructuredOutputError` | next binding (capability gap) |
-| `RuntimeTransientError` | same binding, backoff retry |
-| `RuntimeContextOverflowError` | **escalate to larger context model** (cascading down is wrong) |
-| `RuntimeProtocolError` | surface as bug; don't retry |
-| `RuntimeServerStartError` | fatal; surface to caller |
+| `RuntimeAuthError` | Credential is bad / expired / missing. |
+| `RuntimeModelNotFoundError` | Server doesn't serve that model on this binding. |
+| `RuntimeTransientError` | Call was attempted; server (or network) returned a recoverable failure (5xx, rate limit). |
+| `RuntimeStructuredOutputError` | Transport succeeded but the model didn't produce a payload matching the schema. |
+| `RuntimeContextOverflowError` | Prompt exceeded the model's context window. |
+| `RuntimeProtocolError` | Adapter saw something it can't interpret (adapter / SDK bug). |
+| `RuntimeServerStartError` | Adapter couldn't bring its backend up at all. |
+| `RuntimeCancelledError` | Caller-initiated abort. |
 
 Adapters classify their vendor's failures into these buckets at the
-adapter boundary. The consumer's cascade logic doesn't need
-adapter-specific knowledge to react correctly.
+adapter boundary. What to *do* with each — retry, fall back to a
+different binding, surface to the user, escalate to a larger model
+— is consumer policy. Airframe doesn't prescribe it.
+
+A consumer that wants a cascade can implement one on top of these
+primitives (`validate_binding` to filter, `except` clauses to react
+to each error class). Maverick — airframe's first consumer — does
+exactly that. But it's a layer above the protocol, not part of it.
 
 ## Operational landmines (and what each adapter does about them)
 
@@ -120,7 +133,8 @@ These are the sharp edges the adapters absorb so you don't have to.
 * **Claude served via Copilot Chat Completions is broken** for
   structured output. The model emits markdown-fenced JSON instead
   of calling the tool. `CopilotRuntime.validate_binding` rejects
-  every `claude-*` model ID so the cascade never tries this path.
+  every `claude-*` model ID so callers filtering bindings by
+  `validate_binding` skip this combination before attempting it.
   Route Claude through `ClaudeCodeRuntime` instead.
 * Session lifecycle: `create_session` bakes the model + tools +
   system message in. The adapter caches sessions by
