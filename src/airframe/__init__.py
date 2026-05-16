@@ -61,6 +61,13 @@ from airframe.models import (
     CAPABILITY_VISION,
     ModelInfo,
 )
+from airframe.options import (
+    ClaudeOptions,
+    CodexOptions,
+    CopilotOptions,
+    OpenAICompatOptions,
+    ProviderOptions,
+)
 from airframe.protocol import (
     AgentRuntime,
     ProviderModel,
@@ -88,13 +95,18 @@ __all__ = [
     "CAPABILITY_TOOLS",
     "CAPABILITY_VISION",
     "ClaudeCodeRuntime",
+    "ClaudeOptions",
+    "CodexOptions",
     "CodexRuntime",
+    "CopilotOptions",
     "CopilotRuntime",
     "CostRecord",
     "Feature",
     "ModelInfo",
+    "OpenAICompatOptions",
     "OpenCodeZenRuntime",
     "ProviderModel",
+    "ProviderOptions",
     "RuntimeAuthError",
     "RuntimeCancelledError",
     "RuntimeContextOverflowError",
