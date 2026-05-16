@@ -71,6 +71,7 @@ from airframe.errors import (
     RuntimeStructuredOutputError,
     RuntimeTransientError,
 )
+from airframe.models import ModelInfo
 from airframe.protocol import (
     AgentRuntime,
     ProviderModel,
@@ -88,20 +89,24 @@ DEFAULT_CODEX_MODEL = "gpt-5-codex"
 #: Path to the opencode auth file when present.
 DEFAULT_AUTH_PATH = Path.home() / ".local" / "share" / "opencode" / "auth.json"
 
-#: Provider IDs this runtime claims to serve. ``openai`` is the
-#: canonical name; ``codex`` is an alias for users who configure
-#: their tier as ``codex/gpt-5-codex``.
-SUPPORTED_PROVIDER_IDS: frozenset[str] = frozenset({"openai", "codex"})
+#: Canonical provider ID this adapter serves. Distinguished from a
+#: hypothetical ``openai`` provider (direct OpenAI API) — the codex
+#: route goes through the codex CLI subprocess.
+PROVIDER_ID = "codex"
 
-#: Stub pricing map — USD per 1K tokens (input, output). Real
-#: per-(provider, model) pricing migrates to a dedicated pricing
-#: module in a later release. Models not in the map report
-#: ``cost_usd=None`` (tokens are always populated).
-_PRICING: dict[str, tuple[float, float]] = {
-    "gpt-5-codex": (0.0015, 0.0060),
-    "gpt-5-codex-mini": (0.00025, 0.0010),
-    "o5-codex": (0.0030, 0.0120),
+#: Per-model metadata enrichment. Pricing covers the codex tier; the
+#: live OpenAI ``/v1/models`` endpoint surfaces *every* model the
+#: account can access (gpt-4, gpt-5, embeddings, etc.) — we only enrich
+#: the codex-shaped subset here, and ``list_models()`` filters to that.
+_CODEX_METADATA: dict[str, tuple[str, int, float, float]] = {
+    # id → (display_name, context_window, input_per_1k, output_per_1k)
+    "gpt-5-codex": ("GPT-5 Codex", 256_000, 0.0015, 0.0060),
+    "gpt-5-codex-mini": ("GPT-5 Codex Mini", 128_000, 0.00025, 0.0010),
+    "o5-codex": ("o5 Codex", 200_000, 0.0030, 0.0120),
 }
+
+#: Legacy pricing alias kept for ``_compute_cost_usd``.
+_PRICING: dict[str, tuple[float, float]] = {k: (v[2], v[3]) for k, v in _CODEX_METADATA.items()}
 
 
 def _resolve_api_key(api_key: str | None) -> str | None:
@@ -166,7 +171,14 @@ class CodexRuntime(AgentRuntime):
 
     label = "codex"
 
-    SUPPORTED_PROVIDER_IDS: ClassVar[frozenset[str]] = SUPPORTED_PROVIDER_IDS
+    #: Canonical provider ID for this adapter.
+    PROVIDER_ID: ClassVar[str] = PROVIDER_ID
+
+    #: Vendor SDK that must be importable for this adapter to work.
+    REQUIRES_PACKAGE: ClassVar[str] = "openai_codex_sdk"
+
+    #: pip extra that brings the vendor SDK in.
+    EXTRA_NAME: ClassVar[str] = "codex"
 
     def __init__(
         self,
@@ -262,11 +274,56 @@ class CodexRuntime(AgentRuntime):
         self._client = None
 
     def validate_binding(self, binding: ProviderModel) -> bool:
-        if binding.provider_id not in self.SUPPORTED_PROVIDER_IDS:
+        if binding.provider_id != self.PROVIDER_ID:
             return False
         # Codex is OpenAI-only. Anthropic bindings route through
         # ClaudeCodeRuntime / AnthropicRuntime.
         return not binding.model_id.startswith("claude-")
+
+    async def list_models(self) -> list[ModelInfo]:
+        """Return the codex-tier models from OpenAI's models endpoint.
+
+        Hits OpenAI's ``/v1/models`` via :class:`AsyncOpenAI` using
+        whichever API key the codex auth chain resolved. Filters to
+        IDs we recognise as codex variants (the bare endpoint returns
+        every model the account has access to, including ones the
+        codex CLI doesn't actually run); the rest are dropped.
+        """
+        from openai import AsyncOpenAI
+
+        api_key = _resolve_api_key(self._api_key_override)
+        if api_key is None:
+            raise RuntimeAuthError(
+                "CodexRuntime.list_models() needs an OpenAI API key. "
+                "Set OPENAI_API_KEY or pass api_key= explicitly."
+            )
+        client = AsyncOpenAI(api_key=api_key)
+        try:
+            try:
+                page = await client.models.list()
+            except Exception as exc:
+                raise self._classify_openai_exception(exc) from exc
+
+            out: list[ModelInfo] = []
+            for entry in page.data:
+                if entry.id not in _CODEX_METADATA:
+                    continue
+                display, ctx, in_per_1k, out_per_1k = _CODEX_METADATA[entry.id]
+                out.append(
+                    ModelInfo(
+                        id=entry.id,
+                        display_name=display,
+                        provider_id=self.PROVIDER_ID,
+                        context_window=ctx,
+                        pricing_input_per_1k_usd=in_per_1k,
+                        pricing_output_per_1k_usd=out_per_1k,
+                        capabilities=frozenset(),
+                        raw=entry,
+                    )
+                )
+            return out
+        finally:
+            await client.close()
 
     # --- Internals ---------------------------------------------------------
 
@@ -276,7 +333,7 @@ class CodexRuntime(AgentRuntime):
         if not self.validate_binding(model):
             raise UnsupportedBindingError(
                 f"CodexRuntime cannot serve {model.label!r}; "
-                f"provider must be one of {sorted(self.SUPPORTED_PROVIDER_IDS)} "
+                f"provider must be {self.PROVIDER_ID!r} "
                 f"and the model_id must not start with 'claude-'"
             )
         return model.model_id
@@ -318,7 +375,7 @@ class CodexRuntime(AgentRuntime):
     def _cost_from_usage(self, usage: Any, *, model_id: str) -> CostRecord:
         if usage is None:
             return CostRecord(
-                provider_id="openai",
+                provider_id=self.PROVIDER_ID,
                 model_id=model_id,
                 cost_usd=None,
                 input_tokens=0,
@@ -331,7 +388,7 @@ class CodexRuntime(AgentRuntime):
         output_tokens = int(getattr(usage, "output_tokens", 0) or 0)
         cache_read = int(getattr(usage, "cached_input_tokens", 0) or 0)
         return CostRecord(
-            provider_id="openai",
+            provider_id=self.PROVIDER_ID,
             model_id=model_id,
             cost_usd=_compute_cost_usd(
                 model_id, input_tokens=input_tokens, output_tokens=output_tokens
@@ -342,6 +399,36 @@ class CodexRuntime(AgentRuntime):
             cache_write_tokens=0,  # Codex SDK doesn't expose cache-write counts.
             finish="stop",
         )
+
+    def _classify_openai_exception(self, exc: BaseException) -> Exception:
+        """Map ``openai`` SDK exceptions raised by ``list_models()``.
+
+        ``execute()`` uses the codex SDK and never sees these; ``list_models()``
+        uses ``AsyncOpenAI`` directly against ``/v1/models``, so the openai
+        SDK's exception taxonomy needs its own mapping.
+        """
+        from openai import (
+            APIConnectionError,
+            APIStatusError,
+            APITimeoutError,
+            AuthenticationError,
+            NotFoundError,
+            PermissionDeniedError,
+            RateLimitError,
+        )
+
+        if isinstance(exc, AuthenticationError | PermissionDeniedError):
+            return RuntimeAuthError(f"codex: auth: {exc}")
+        if isinstance(exc, NotFoundError):
+            return AgentRuntimeError(f"codex: models endpoint not found: {exc}")
+        if isinstance(exc, RateLimitError | APITimeoutError | APIConnectionError):
+            return RuntimeTransientError(f"codex: transient: {exc}")
+        if isinstance(exc, APIStatusError):
+            status = getattr(exc, "status_code", None)
+            if status is not None and 500 <= status < 600:
+                return RuntimeTransientError(f"codex: 5xx: {exc}")
+            return AgentRuntimeError(f"codex: api error: {exc}")
+        return AgentRuntimeError(f"codex: unexpected {type(exc).__name__}: {exc}")
 
     def _classify_exception(self, exc: BaseException) -> Exception:
         """Map Codex SDK exceptions onto Maverick's runtime hierarchy."""

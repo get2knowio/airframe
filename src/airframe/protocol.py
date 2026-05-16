@@ -31,11 +31,14 @@ Design principles:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from pydantic import BaseModel
 
 from airframe.cost import CostRecord
+
+if TYPE_CHECKING:
+    from airframe.models import ModelInfo
 
 
 @dataclass(frozen=True, slots=True)
@@ -193,9 +196,9 @@ class AgentRuntime(Protocol):
     def validate_binding(self, binding: ProviderModel) -> bool:
         """Return ``True`` if this runtime can satisfy the binding.
 
-        Adapters typically match on ``binding.provider_id`` against a
-        :attr:`SUPPORTED_PROVIDER_IDS` frozenset and may further filter
-        on ``binding.model_id`` (e.g. ``CopilotRuntime`` rejects
+        Adapters match on ``binding.provider_id`` against their
+        :attr:`PROVIDER_ID` class attribute and may further filter on
+        ``binding.model_id`` (e.g. ``CopilotRuntime`` rejects
         ``model_id`` starting with ``claude-`` because Claude served
         through Copilot Chat Completions doesn't honour tool calls
         and so can't satisfy the structured-output contract).
@@ -203,6 +206,27 @@ class AgentRuntime(Protocol):
         Cheap and non-async — suitable for predicate checks before
         attempting :meth:`execute`. Calling :meth:`execute` with an
         unsupported binding raises :class:`UnsupportedBindingError`.
+        """
+        ...
+
+    async def list_models(self) -> list[ModelInfo]:
+        """Return the live list of models the consumer can pick from.
+
+        Hits the vendor's models endpoint with the user's resolved
+        credentials, enriches each entry with whatever metadata
+        the adapter knows (context window, pricing, capability flags),
+        and returns a list suitable for driving a UI menu.
+
+        The call requires auth and network. A failure (missing
+        credentials, vendor down) raises one of:
+
+        Raises:
+            RuntimeAuthError: when no usable credentials were found.
+            RuntimeTransientError: vendor 5xx / rate-limit / timeout.
+            RuntimeProtocolError: vendor returned an unexpected shape.
+
+        Consumers should surface these to the user *before* letting
+        them commit to a model selection.
         """
         ...
 

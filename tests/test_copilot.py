@@ -182,16 +182,19 @@ def mock_sdk(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def test_validate_binding_accepts_copilot_providers() -> None:
+def test_validate_binding_accepts_canonical_provider() -> None:
+    """v0.2.0 dropped the `copilot` / `github` aliases — just `github-copilot`."""
     rt = CopilotRuntime()
-    assert rt.validate_binding(ProviderModel("copilot", "gpt-5-mini"))
     assert rt.validate_binding(ProviderModel("github-copilot", "gpt-4o"))
-    assert rt.validate_binding(ProviderModel("github", "o5"))
 
 
-def test_validate_binding_rejects_non_copilot_providers() -> None:
+def test_validate_binding_rejects_aliases_and_others() -> None:
     rt = CopilotRuntime()
-    assert not rt.validate_binding(ProviderModel("anthropic", "claude-haiku-4-5"))
+    # Legacy aliases dropped.
+    assert not rt.validate_binding(ProviderModel("copilot", "gpt-4o"))
+    assert not rt.validate_binding(ProviderModel("github", "o5"))
+    # Other providers.
+    assert not rt.validate_binding(ProviderModel("claude", "claude-haiku-4-5"))
     assert not rt.validate_binding(ProviderModel("openai", "gpt-5-mini"))
     assert not rt.validate_binding(ProviderModel("opencode", "gpt-5-nano"))
 
@@ -199,7 +202,6 @@ def test_validate_binding_rejects_non_copilot_providers() -> None:
 def test_validate_binding_rejects_claude_models_on_copilot() -> None:
     """Phase 0 finding: Claude served via Copilot can't honour tool calls."""
     rt = CopilotRuntime()
-    assert not rt.validate_binding(ProviderModel("copilot", "claude-sonnet-4.6"))
     assert not rt.validate_binding(ProviderModel("github-copilot", "claude-opus-4.7"))
 
 
@@ -233,7 +235,7 @@ async def test_execute_rejects_claude_on_copilot() -> None:
         await rt.execute(
             "hi",
             schema=_Schema,
-            model=ProviderModel("copilot", "claude-opus-4.7"),
+            model=ProviderModel("github-copilot", "claude-opus-4.7"),
         )
 
 
@@ -262,7 +264,7 @@ async def test_execute_captures_structured_output(mock_sdk: dict[str, Any]) -> N
     result = await rt.execute(
         "say hi",
         schema=_Schema,
-        model=ProviderModel("copilot", "gpt-5-mini"),
+        model=ProviderModel("github-copilot", "gpt-5-mini"),
     )
 
     assert result.structured == {"summary": "ok", "count": 42}

@@ -114,23 +114,25 @@ def mock_sdk(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def test_validate_binding_accepts_codex_providers() -> None:
+def test_validate_binding_accepts_canonical_provider() -> None:
+    """v0.2.0 dropped the `openai` alias — just `codex`."""
     rt = CodexRuntime()
-    assert rt.validate_binding(ProviderModel("openai", "gpt-5-codex"))
     assert rt.validate_binding(ProviderModel("codex", "gpt-5-codex"))
-    assert rt.validate_binding(ProviderModel("openai", "o5-codex"))
+    assert rt.validate_binding(ProviderModel("codex", "o5-codex"))
 
 
-def test_validate_binding_rejects_non_codex_providers() -> None:
+def test_validate_binding_rejects_aliases_and_others() -> None:
     rt = CodexRuntime()
-    assert not rt.validate_binding(ProviderModel("anthropic", "claude-haiku-4-5"))
-    assert not rt.validate_binding(ProviderModel("copilot", "gpt-5-mini"))
+    # `openai` reserved for a future direct-API OpenAIRuntime.
+    assert not rt.validate_binding(ProviderModel("openai", "gpt-5-codex"))
+    assert not rt.validate_binding(ProviderModel("claude", "claude-haiku-4-5"))
+    assert not rt.validate_binding(ProviderModel("github-copilot", "gpt-5-mini"))
     assert not rt.validate_binding(ProviderModel("opencode", "gpt-5-nano"))
 
 
 def test_validate_binding_rejects_claude_models_on_codex() -> None:
     rt = CodexRuntime()
-    assert not rt.validate_binding(ProviderModel("openai", "claude-sonnet-4.6"))
+    assert not rt.validate_binding(ProviderModel("codex", "claude-sonnet-4.6"))
     assert not rt.validate_binding(ProviderModel("codex", "claude-opus-4.7"))
 
 
@@ -164,7 +166,7 @@ async def test_execute_rejects_claude_on_codex() -> None:
         await rt.execute(
             "hi",
             schema=_Schema,
-            model=ProviderModel("openai", "claude-sonnet-4.6"),
+            model=ProviderModel("codex", "claude-sonnet-4.6"),
         )
 
 
@@ -180,7 +182,7 @@ async def test_execute_captures_structured_output(mock_sdk: dict[str, Any]) -> N
     result = await rt.execute(
         "What is 17 + 25?",
         schema=_Schema,
-        model=ProviderModel("openai", "gpt-5-codex"),
+        model=ProviderModel("codex", "gpt-5-codex"),
     )
 
     assert result.structured == {"summary": "ok", "count": 42}
@@ -191,7 +193,7 @@ async def test_execute_captures_structured_output(mock_sdk: dict[str, Any]) -> N
     assert result.cost.output_tokens == 240
     assert result.cost.cache_read_tokens == 30
     assert result.cost.cache_write_tokens == 0
-    assert result.cost.provider_id == "openai"
+    assert result.cost.provider_id == "codex"
     assert result.cost.model_id == "gpt-5-codex"
 
 
@@ -419,7 +421,7 @@ async def test_cost_record_returns_zero_when_no_usage(mock_sdk: dict[str, Any]) 
     assert result.cost.cost_usd is None
     assert result.cost.input_tokens == 0
     assert result.cost.output_tokens == 0
-    assert result.cost.provider_id == "openai"
+    assert result.cost.provider_id == "codex"
 
 
 @pytest.mark.asyncio
@@ -476,8 +478,8 @@ async def test_thread_reused_when_model_matches(mock_sdk: dict[str, Any]) -> Non
 @pytest.mark.asyncio
 async def test_thread_recreated_when_model_changes(mock_sdk: dict[str, Any]) -> None:
     rt = CodexRuntime()
-    await rt.execute("hi", schema=_Schema, model=ProviderModel("openai", "gpt-5-codex"))
-    await rt.execute("hi", schema=_Schema, model=ProviderModel("openai", "o5-codex"))
+    await rt.execute("hi", schema=_Schema, model=ProviderModel("codex", "gpt-5-codex"))
+    await rt.execute("hi", schema=_Schema, model=ProviderModel("codex", "o5-codex"))
 
     assert mock_sdk["client"].start_thread.call_count == 2
 

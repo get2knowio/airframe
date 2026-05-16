@@ -43,6 +43,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+from dataclasses import dataclass, field
 from typing import Any, ClassVar
 
 from pydantic import BaseModel
@@ -56,6 +57,7 @@ from airframe.errors import (
     RuntimeStructuredOutputError,
     RuntimeTransientError,
 )
+from airframe.models import ModelInfo
 from airframe.protocol import (
     AgentRuntime,
     ProviderModel,
@@ -74,6 +76,33 @@ DEFAULT_CLAUDE_MODEL = "claude-haiku-4-5"
 DEFAULT_MAX_TURNS = 60
 
 
+@dataclass(frozen=True, slots=True)
+class _ModelMeta:
+    """Per-model enrichment for the live ``/v1/models`` response."""
+
+    display_name: str
+    context_window: int | None = None
+    input_per_1k: float | None = None
+    output_per_1k: float | None = None
+    capabilities: frozenset[str] = field(default_factory=frozenset)
+
+
+#: Curated metadata for known Claude models. The live API returns IDs
+#: and display names; this table layers context window + pricing on
+#: top. Unknown IDs come back without enrichment.
+_METADATA: dict[str, _ModelMeta] = {
+    "claude-haiku-4-5": _ModelMeta(
+        "Claude Haiku 4.5", context_window=200_000, input_per_1k=0.0010, output_per_1k=0.0050
+    ),
+    "claude-sonnet-4-6": _ModelMeta(
+        "Claude Sonnet 4.6", context_window=200_000, input_per_1k=0.0030, output_per_1k=0.0150
+    ),
+    "claude-opus-4-7": _ModelMeta(
+        "Claude Opus 4.7", context_window=200_000, input_per_1k=0.0150, output_per_1k=0.0750
+    ),
+}
+
+
 class ClaudeCodeRuntime(AgentRuntime):
     """One Claude Agent SDK client per runtime instance.
 
@@ -90,9 +119,14 @@ class ClaudeCodeRuntime(AgentRuntime):
 
     label = "claude_code"
 
-    SUPPORTED_PROVIDER_IDS: ClassVar[frozenset[str]] = frozenset(
-        {"anthropic", "claude", "claude-code", "claude-sdk"}
-    )
+    #: Canonical provider ID this adapter serves.
+    PROVIDER_ID: ClassVar[str] = "claude"
+
+    #: Vendor SDK that must be importable for this adapter to work.
+    REQUIRES_PACKAGE: ClassVar[str] = "claude_agent_sdk"
+
+    #: pip extra that brings the vendor SDK in.
+    EXTRA_NAME: ClassVar[str] = "claude"
 
     def __init__(
         self,
@@ -197,7 +231,76 @@ class ClaudeCodeRuntime(AgentRuntime):
         await self.reset()
 
     def validate_binding(self, binding: ProviderModel) -> bool:
-        return binding.provider_id in self.SUPPORTED_PROVIDER_IDS
+        return binding.provider_id == self.PROVIDER_ID
+
+    async def list_models(self) -> list[ModelInfo]:
+        """Return live Claude models from Anthropic's ``/v1/models``.
+
+        Hits ``GET https://api.anthropic.com/v1/models`` directly via
+        :mod:`httpx`. The Claude Agent SDK doesn't surface this; we use
+        the API key the SDK would have used (``ANTHROPIC_API_KEY``).
+        OAuth bearer tokens (Claude Max subscription) work for the
+        Messages API but not for ``/v1/models``, so we require an API
+        key here.
+        """
+        import httpx
+
+        api_key = self._api_key_override or os.environ.get("ANTHROPIC_API_KEY")
+        if not api_key:
+            raise RuntimeAuthError(
+                "ClaudeCodeRuntime.list_models() needs ANTHROPIC_API_KEY. "
+                "OAuth subscription tokens don't work for /v1/models."
+            )
+        headers = {"x-api-key": api_key, "anthropic-version": "2023-06-01"}
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response = await client.get("https://api.anthropic.com/v1/models", headers=headers)
+                response.raise_for_status()
+                payload = response.json()
+        except httpx.HTTPStatusError as exc:
+            status = exc.response.status_code
+            if status in (401, 403):
+                raise RuntimeAuthError(f"claude_code: auth: {exc}") from exc
+            if status in (429, 502, 503, 504):
+                raise RuntimeTransientError(f"claude_code: transient {status}") from exc
+            raise RuntimeProtocolError(
+                f"claude_code: /v1/models returned {status}", body=exc.response.text[:500]
+            ) from exc
+        except httpx.HTTPError as exc:
+            raise RuntimeTransientError(f"claude_code: network: {exc}") from exc
+
+        from airframe.models import (
+            CAPABILITY_STREAMING,
+            CAPABILITY_STRUCTURED_OUTPUT,
+            CAPABILITY_TOOLS,
+            CAPABILITY_VISION,
+        )
+
+        out: list[ModelInfo] = []
+        for entry in payload.get("data", []):
+            model_id = entry["id"]
+            meta = _METADATA.get(model_id, _ModelMeta(entry.get("display_name", model_id)))
+            out.append(
+                ModelInfo(
+                    id=model_id,
+                    display_name=meta.display_name,
+                    provider_id=self.PROVIDER_ID,
+                    context_window=meta.context_window,
+                    pricing_input_per_1k_usd=meta.input_per_1k,
+                    pricing_output_per_1k_usd=meta.output_per_1k,
+                    capabilities=meta.capabilities
+                    | frozenset(
+                        {
+                            CAPABILITY_TOOLS,
+                            CAPABILITY_STRUCTURED_OUTPUT,
+                            CAPABILITY_STREAMING,
+                            CAPABILITY_VISION,
+                        }
+                    ),
+                    raw=entry,
+                )
+            )
+        return out
 
     # --- Internals ---------------------------------------------------------
 
@@ -207,7 +310,7 @@ class ClaudeCodeRuntime(AgentRuntime):
         if not self.validate_binding(model):
             raise UnsupportedBindingError(
                 f"ClaudeCodeRuntime cannot serve {model.label!r}; "
-                f"provider must be one of {sorted(self.SUPPORTED_PROVIDER_IDS)}"
+                f"provider must be {self.PROVIDER_ID!r}"
             )
         return model.model_id
 
@@ -265,7 +368,7 @@ class ClaudeCodeRuntime(AgentRuntime):
     def _cost_from_result(self, result_msg: Any, *, model_id: str) -> CostRecord:
         usage = result_msg.usage or {}
         return CostRecord(
-            provider_id="anthropic",
+            provider_id=self.PROVIDER_ID,
             model_id=model_id,
             cost_usd=result_msg.total_cost_usd,
             input_tokens=int(usage.get("input_tokens") or 0),

@@ -17,7 +17,7 @@ runtime = ClaudeCodeRuntime()
 result = await runtime.execute(
     "Brief me on the project structure.",
     schema=Brief,
-    model=ProviderModel("anthropic", "claude-haiku-4-5"),
+    model=ProviderModel("claude", "claude-haiku-4-5"),
 )
 print(result.structured)     # {"summary": "...", "risks": [...]}
 print(result.cost.cost_usd)  # 0.0042
@@ -33,8 +33,26 @@ runtime = CopilotRuntime()
 result = await runtime.execute(
     "Brief me on the project structure.",
     schema=Brief,
-    model=ProviderModel("copilot", "gpt-5-mini"),
+    model=ProviderModel("github-copilot", "gpt-5-mini"),
 )
+```
+
+Discover providers and models at runtime (for menus, config UIs,
+"what can I install / which models can I pick?"):
+
+```python
+from airframe import list_providers, runtime_for
+
+# Filtered by which pip extras the consumer has installed.
+for provider_id in list_providers():
+    runtime_cls = runtime_for(provider_id)
+    runtime = runtime_cls()
+    try:
+        models = await runtime.list_models()
+        for m in models:
+            print(provider_id, m.id, m.display_name, m.context_window)
+    finally:
+        await runtime.close()
 ```
 
 ## Why?
@@ -66,12 +84,19 @@ The base package ships only the protocol + error types. Each
 adapter's SDK is an optional extra so you only pull what you need:
 
 ```bash
-pip install airframe-agents[claude]        # ClaudeCodeRuntime
-pip install airframe-agents[copilot]       # CopilotRuntime
-pip install airframe-agents[codex]         # CodexRuntime
-pip install airframe-agents[opencode-zen]  # OpenCodeZenRuntime
-pip install airframe-agents[all]           # Everything
+pip install airframe-agents[claude]         # ClaudeCodeRuntime
+pip install airframe-agents[copilot]        # CopilotRuntime
+pip install airframe-agents[codex]          # CodexRuntime
+pip install airframe-agents[openai-compat]  # OpenCodeZenRuntime (+ future OAI-compat)
+pip install airframe-agents[all]            # Everything
 ```
+
+`list_providers()` filters by which extras you installed:
+``pip install airframe-agents[copilot]`` makes ``list_providers()``
+return ``["github-copilot"]``; the other adapters are silently filtered
+so menus stay honest about what the local install can serve. Pass
+``installed_only=False`` to see every built-in provider regardless of
+SDK presence (useful for documentation UIs).
 
 The import name is `airframe`. The PyPI dist name is
 `airframe-agents` (the unqualified `airframe` slot on PyPI was taken
@@ -79,12 +104,27 @@ by an unrelated abandoned project).
 
 ## The four adapters
 
-| Adapter | Vendor SDK | Auth | Structured output | Subprocess? |
-| --- | --- | --- | --- | --- |
-| `ClaudeCodeRuntime` | `claude-agent-sdk` | Claude Max OAuth → `~/.claude/credentials.json` → `ANTHROPIC_API_KEY` | Forced `submit_result` MCP tool | yes, per-runtime |
-| `CopilotRuntime` | `github-copilot-sdk` | `GITHUB_TOKEN` → `gh auth` | Forced `submit_result` tool | yes, per-runtime |
-| `CodexRuntime` | `openai-codex-sdk` | `OPENAI_API_KEY` → opencode `auth.json` → `~/.codex/auth.json` | Native JSON-schema flag (`--output-schema`) | yes, per-turn |
-| `OpenCodeZenRuntime` | `openai` (HTTP) | `OPENCODE_API_KEY` → opencode `auth.json` | `response_format={type: "json_schema"}` | no (direct HTTP) |
+| Adapter | `PROVIDER_ID` | Vendor SDK | Auth | Structured output | Subprocess? |
+| --- | --- | --- | --- | --- | --- |
+| `ClaudeCodeRuntime` | `claude` | `claude-agent-sdk` | Claude Max OAuth → `~/.claude/credentials.json` → `ANTHROPIC_API_KEY` | Native `output_format={"type":"json_schema",...}` | yes, per-runtime |
+| `CopilotRuntime` | `github-copilot` | `github-copilot-sdk` | `GITHUB_TOKEN` → `gh auth` | Forced `submit_result` tool (Copilot's native `define_tool`) | yes, per-runtime |
+| `CodexRuntime` | `codex` | `openai-codex-sdk` | `OPENAI_API_KEY` → opencode `auth.json` → `~/.codex/auth.json` | Native JSON-schema flag (`--output-schema`) | yes, per-turn |
+| `OpenCodeZenRuntime` | `opencode` | `openai` (HTTP) | `OPENCODE_API_KEY` → opencode `auth.json` | `response_format={"type":"json_schema",...}` | no (direct HTTP) |
+
+The OpenAI-compatible family (`OpenCodeZenRuntime` today; Together /
+Groq / Fireworks / OpenRouter as future siblings) shares the
+`OpenAICompatibleRuntime` base class and the single `[openai-compat]`
+pip extra. Subclasses are ~30 lines: declare `PROVIDER_ID`, a default
+base URL + model, a per-model metadata table, and a vendor-specific
+`_resolve_api_key()` hook — everything else (HTTP execute, structured
+output, `list_models`, error classification) is inherited.
+
+The provider IDs are deliberately strict: one canonical ID per
+adapter, no aliases. ``"anthropic"`` is reserved for a future direct-
+API `AnthropicRuntime`; ``"openai"`` is reserved for a future direct-
+API `OpenAIRuntime`. The current adapters cover the *subscription*
+paths (Claude Max, Copilot, ChatGPT Plus, opencode-go) — API-key-only
+direct-vendor adapters can land later without breaking these IDs.
 
 `ClaudeCodeRuntime` is the only adapter that accepts Claude bindings.
 `CopilotRuntime.validate_binding` *rejects* Claude bindings on
@@ -112,6 +152,7 @@ class AgentRuntime(Protocol):
     async def reset(self) -> None: ...
     async def close(self) -> None: ...
     def validate_binding(self, binding: ProviderModel) -> bool: ...
+    async def list_models(self) -> list[ModelInfo]: ...
 ```
 
 * **`execute`** — send one prompt, get back a `RuntimeResult` with
@@ -123,6 +164,13 @@ class AgentRuntime(Protocol):
 * **`validate_binding`** — predicate: does this runtime serve a
   given `(provider_id, model_id)`? Cheap and non-async; suitable for
   filtering bindings before attempting them.
+* **`list_models`** — hit the vendor's models endpoint with the
+  user's resolved credentials, return a list of `ModelInfo` (id,
+  display name, context window, pricing, capability flags). Drives
+  UI menus. Async + auth-aware; raises `RuntimeAuthError` /
+  `RuntimeTransientError` so the consumer can surface the failure
+  before letting the user pick a model that would later fail to
+  execute.
 
 ### Errors
 
@@ -154,10 +202,12 @@ Probe scripts under `examples/` exercise each adapter end-to-end
 against a real CLI / HTTP endpoint:
 
 ```bash
-uv run python examples/probe_claude_code.py
-uv run python examples/probe_copilot.py
-uv run python examples/probe_codex.py
-uv run python examples/probe_opencode_zen.py
+uv run python tests/probe_claude_code.py
+uv run python tests/probe_copilot.py
+uv run python tests/probe_codex.py
+uv run python tests/probe_opencode_zen.py
+uv run python tests/probe_list_models.py             # menu probe across every installed adapter
+uv run python tests/probe_list_models.py --provider claude
 ```
 
 ## Adding an adapter
@@ -173,12 +223,21 @@ A new adapter is one class implementing `AgentRuntime`:
 4. Populate a `CostRecord` from the vendor's usage report. Use the
    per-model pricing table when the vendor doesn't return cost
    directly.
-5. Add `SUPPORTED_PROVIDER_IDS` and implement `validate_binding`.
+5. Declare `PROVIDER_ID`, `REQUIRES_PACKAGE`, and `EXTRA_NAME` as
+   ClassVars; implement `validate_binding`.
+6. Implement `list_models()` against the vendor's models endpoint;
+   enrich each entry with whatever metadata the adapter knows
+   (context window, pricing, capability flags).
 
-See `src/airframe/adapters/opencode_zen.py` for the simplest example
-(stateless HTTP, no subprocess), and `src/airframe/adapters/claude_code.py`
-for the most complex (subprocess + MCP tool registration + session
-caching).
+**OpenAI-compatible HTTP vendor?** Subclass `OpenAICompatibleRuntime`
+instead — the base implements `execute`, `list_models`, `reset`,
+`close`, error classification, and envelope-unwrap. The subclass is
+~30 lines: ClassVars + `_resolve_api_key()`. See
+`src/airframe/adapters/opencode_zen.py`.
+
+**SDK-based vendor (subprocess / native types)?** Inherit
+`AgentRuntime` directly and implement all five methods. See
+`src/airframe/adapters/claude_code.py` for the canonical example.
 
 ## Development
 

@@ -16,11 +16,22 @@ Quick start::
     result = await runtime.execute(
         "Brief me on the project structure.",
         schema=Brief,
-        model=ProviderModel("anthropic", "claude-haiku-4-5"),
+        model=ProviderModel("claude", "claude-haiku-4-5"),
     )
     print(result.structured)         # {"summary": "...", "risks": [...]}
     print(result.cost.cost_usd)      # 0.0042
     await runtime.close()
+
+Discovery for UI menus::
+
+    from airframe import list_providers, runtime_for
+
+    for provider in list_providers():
+        rt_cls = runtime_for(provider)
+        runtime = rt_cls()
+        models = await runtime.list_models()
+        for m in models:
+            print(provider, m.id, m.display_name, m.context_window)
 
 Each adapter's SDK is an optional install (``pip install
 airframe-agents[claude]``); see the README for the full extras matrix.
@@ -29,6 +40,7 @@ airframe-agents[claude]``); see the README for the full extras matrix.
 from __future__ import annotations
 
 from airframe.cost import CostRecord
+from airframe.discovery import list_providers, runtime_for
 from airframe.errors import (
     AgentRuntimeError,
     RuntimeAuthError,
@@ -40,6 +52,14 @@ from airframe.errors import (
     RuntimeStructuredOutputError,
     RuntimeTransientError,
 )
+from airframe.models import (
+    CAPABILITY_REASONING_EFFORT,
+    CAPABILITY_STREAMING,
+    CAPABILITY_STRUCTURED_OUTPUT,
+    CAPABILITY_TOOLS,
+    CAPABILITY_VISION,
+    ModelInfo,
+)
 from airframe.protocol import (
     AgentRuntime,
     ProviderModel,
@@ -47,7 +67,7 @@ from airframe.protocol import (
     UnsupportedBindingError,
 )
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 # Adapter imports live at the top level for ergonomic use, but the
 # adapter modules themselves lazy-import their underlying SDK so
@@ -61,10 +81,16 @@ from airframe.adapters.opencode_zen import OpenCodeZenRuntime
 __all__ = [
     "AgentRuntime",
     "AgentRuntimeError",
+    "CAPABILITY_REASONING_EFFORT",
+    "CAPABILITY_STREAMING",
+    "CAPABILITY_STRUCTURED_OUTPUT",
+    "CAPABILITY_TOOLS",
+    "CAPABILITY_VISION",
     "ClaudeCodeRuntime",
     "CodexRuntime",
     "CopilotRuntime",
     "CostRecord",
+    "ModelInfo",
     "OpenCodeZenRuntime",
     "ProviderModel",
     "RuntimeAuthError",
@@ -78,4 +104,6 @@ __all__ = [
     "RuntimeTransientError",
     "UnsupportedBindingError",
     "__version__",
+    "list_providers",
+    "runtime_for",
 ]

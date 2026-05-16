@@ -21,12 +21,8 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from pydantic import BaseModel
 
-from airframe.adapters.opencode_zen import (
-    OpenCodeZenRuntime,
-    _compute_cost_usd,
-    _resolve_api_key,
-    _unwrap_envelope,
-)
+from airframe.adapters.openai_compatible import _unwrap_envelope
+from airframe.adapters.opencode_zen import OpenCodeZenRuntime
 from airframe.cost import CostRecord
 from airframe.errors import (
     AgentRuntimeError,
@@ -37,6 +33,18 @@ from airframe.errors import (
     RuntimeTransientError,
 )
 from airframe.protocol import ProviderModel, UnsupportedBindingError
+
+
+# Backward-compat helpers for tests that exercised the old module-level
+# functions before they moved onto the OpenAICompatibleRuntime base.
+def _resolve_api_key(api_key: str | None) -> str:
+    return OpenCodeZenRuntime()._resolve_api_key(api_key)
+
+
+def _compute_cost_usd(model_id: str, *, input_tokens: int, output_tokens: int) -> float | None:
+    return OpenCodeZenRuntime()._compute_cost_usd(
+        model_id, input_tokens=input_tokens, output_tokens=output_tokens
+    )
 
 
 class _Schema(BaseModel):
@@ -159,15 +167,17 @@ def test_compute_cost_usd_unknown_model_is_none() -> None:
 # --- validate_binding ---------------------------------------------------------
 
 
-def test_validate_binding_accepts_opencode_variants() -> None:
+def test_validate_binding_accepts_canonical_provider() -> None:
+    """v0.2.0 dropped the `opencode-go` / `opencode-zen` aliases — just `opencode`."""
     rt = OpenCodeZenRuntime()
     assert rt.validate_binding(ProviderModel("opencode", "gpt-5-nano"))
-    assert rt.validate_binding(ProviderModel("opencode-go", "qwen3.6-plus"))
-    assert rt.validate_binding(ProviderModel("opencode-zen", "big-pickle"))
 
 
-def test_validate_binding_rejects_others() -> None:
+def test_validate_binding_rejects_aliases_and_others() -> None:
+    """Legacy aliases (`opencode-go`, `opencode-zen`) no longer accepted."""
     rt = OpenCodeZenRuntime()
+    assert not rt.validate_binding(ProviderModel("opencode-go", "qwen3.6-plus"))
+    assert not rt.validate_binding(ProviderModel("opencode-zen", "big-pickle"))
     assert not rt.validate_binding(ProviderModel("anthropic", "claude-haiku-4-5"))
     assert not rt.validate_binding(ProviderModel("github-copilot", "gpt-5.3-codex"))
 

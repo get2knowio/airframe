@@ -65,6 +65,7 @@ from airframe.errors import (
     RuntimeStructuredOutputError,
     RuntimeTransientError,
 )
+from airframe.models import ModelInfo
 from airframe.protocol import (
     AgentRuntime,
     ProviderModel,
@@ -82,8 +83,8 @@ DEFAULT_COPILOT_MODEL = "gpt-5-mini"
 #: Canonical name for the hidden structured-output tool.
 SUBMIT_RESULT_TOOL = "submit_result"
 
-#: Provider IDs this runtime claims to serve.
-SUPPORTED_PROVIDER_IDS: frozenset[str] = frozenset({"copilot", "github-copilot", "github"})
+#: Canonical provider ID this adapter serves.
+PROVIDER_ID = "github-copilot"
 
 
 class CopilotRuntime(AgentRuntime):
@@ -102,7 +103,14 @@ class CopilotRuntime(AgentRuntime):
 
     label = "copilot"
 
-    SUPPORTED_PROVIDER_IDS: ClassVar[frozenset[str]] = SUPPORTED_PROVIDER_IDS
+    #: Canonical provider ID for this adapter.
+    PROVIDER_ID: ClassVar[str] = PROVIDER_ID
+
+    #: Vendor SDK that must be importable for this adapter to work.
+    REQUIRES_PACKAGE: ClassVar[str] = "copilot"
+
+    #: pip extra that brings the vendor SDK in.
+    EXTRA_NAME: ClassVar[str] = "copilot"
 
     def __init__(
         self,
@@ -220,12 +228,60 @@ class CopilotRuntime(AgentRuntime):
             logger.debug("copilot_runtime.close_failed error=%s", exc)
 
     def validate_binding(self, binding: ProviderModel) -> bool:
-        if binding.provider_id not in self.SUPPORTED_PROVIDER_IDS:
+        if binding.provider_id != self.PROVIDER_ID:
             return False
         # Phase 0 spike finding: Claude served via Copilot Chat Completions
         # emits markdown-fenced JSON instead of calling tools. Route Claude
         # bindings through ClaudeCodeRuntime / AnthropicRuntime instead.
         return not binding.model_id.startswith("claude-")
+
+    async def list_models(self) -> list[ModelInfo]:
+        """Return the live model menu from Copilot's CLI.
+
+        Copilot's SDK exposes :meth:`CopilotClient.list_models` natively
+        with rich metadata: display name, context window, vision /
+        reasoning-effort support, and a billing multiplier. We surface
+        everything as :class:`ModelInfo` and skip the metadata-table
+        fallback (Copilot tells us everything we need).
+        """
+        client = await self._ensure_client()
+        try:
+            sdk_models = await client.list_models()
+        except Exception as exc:
+            raise self._classify_exception(exc) from exc
+
+        from airframe.models import (
+            CAPABILITY_REASONING_EFFORT,
+            CAPABILITY_STREAMING,
+            CAPABILITY_STRUCTURED_OUTPUT,
+            CAPABILITY_TOOLS,
+            CAPABILITY_VISION,
+        )
+
+        out: list[ModelInfo] = []
+        for m in sdk_models:
+            caps: set[str] = set()
+            if m.capabilities.supports.vision:
+                caps.add(CAPABILITY_VISION)
+            if m.capabilities.supports.reasoning_effort:
+                caps.add(CAPABILITY_REASONING_EFFORT)
+            # Copilot CLI runtimes all support tools and structured output
+            # via the SDK's define_tool / forced-tool pattern; streaming is
+            # also universal. Declare these statically.
+            caps.update({CAPABILITY_TOOLS, CAPABILITY_STRUCTURED_OUTPUT, CAPABILITY_STREAMING})
+            out.append(
+                ModelInfo(
+                    id=m.id,
+                    display_name=m.name,
+                    provider_id=self.PROVIDER_ID,
+                    context_window=m.capabilities.limits.max_context_window_tokens,
+                    pricing_input_per_1k_usd=None,  # Copilot is subscription-priced
+                    pricing_output_per_1k_usd=None,
+                    capabilities=frozenset(caps),
+                    raw=m,
+                )
+            )
+        return out
 
     # --- Internals ---------------------------------------------------------
 
@@ -235,7 +291,7 @@ class CopilotRuntime(AgentRuntime):
         if not self.validate_binding(model):
             raise UnsupportedBindingError(
                 f"CopilotRuntime cannot serve {model.label!r}; "
-                f"provider must be one of {sorted(self.SUPPORTED_PROVIDER_IDS)} "
+                f"provider must be {self.PROVIDER_ID!r} "
                 f"and the model_id must not start with 'claude-'"
             )
         return model.model_id
@@ -344,7 +400,7 @@ class CopilotRuntime(AgentRuntime):
     def _cost_from_usage(self, usage: Any, *, model_id: str) -> CostRecord:
         if usage is None:
             return CostRecord(
-                provider_id="github-copilot",
+                provider_id=self.PROVIDER_ID,
                 model_id=model_id,
                 cost_usd=None,
                 input_tokens=0,
@@ -354,7 +410,7 @@ class CopilotRuntime(AgentRuntime):
                 finish="stop",
             )
         return CostRecord(
-            provider_id="github-copilot",
+            provider_id=self.PROVIDER_ID,
             model_id=model_id,
             cost_usd=float(usage.cost) if usage.cost is not None else None,
             input_tokens=int(usage.input_tokens or 0),

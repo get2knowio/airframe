@@ -96,15 +96,17 @@ def mock_sdk(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     }
 
 
-def test_validate_binding_accepts_claude_providers() -> None:
+def test_validate_binding_accepts_canonical_provider() -> None:
+    """v0.2.0 canonical provider is `claude`; aliases dropped."""
     rt = ClaudeCodeRuntime()
-    assert rt.validate_binding(ProviderModel("anthropic", "claude-haiku-4-5"))
-    assert rt.validate_binding(ProviderModel("claude-code", "claude-sonnet-4.6"))
-    assert rt.validate_binding(ProviderModel("claude-sdk", "claude-opus-4.7"))
+    assert rt.validate_binding(ProviderModel("claude", "claude-haiku-4-5"))
 
 
-def test_validate_binding_rejects_non_claude_providers() -> None:
+def test_validate_binding_rejects_aliases_and_others() -> None:
     rt = ClaudeCodeRuntime()
+    # `anthropic` reserved for a future direct-API AnthropicRuntime.
+    assert not rt.validate_binding(ProviderModel("anthropic", "claude-haiku-4-5"))
+    assert not rt.validate_binding(ProviderModel("claude-code", "claude-sonnet-4.6"))
     assert not rt.validate_binding(ProviderModel("github-copilot", "gpt-5.3-codex"))
     assert not rt.validate_binding(ProviderModel("openai", "gpt-5.5"))
 
@@ -143,7 +145,7 @@ async def test_execute_returns_structured_output(mock_sdk: dict[str, MagicMock])
     result = await rt.execute(
         "say hi",
         schema=_Schema,
-        model=ProviderModel("anthropic", "claude-haiku-4-5"),
+        model=ProviderModel("claude", "claude-haiku-4-5"),
     )
 
     assert result.structured == expected
@@ -153,7 +155,7 @@ async def test_execute_returns_structured_output(mock_sdk: dict[str, MagicMock])
     assert result.cost.output_tokens == 200
     assert result.cost.cache_read_tokens == 50
     assert result.cost.cache_write_tokens == 10
-    assert result.cost.provider_id == "anthropic"
+    assert result.cost.provider_id == "claude"
     assert result.cost.model_id == "claude-haiku-4-5"
 
 
