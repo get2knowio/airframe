@@ -52,6 +52,7 @@ from airframe.errors import (
     RuntimeStructuredOutputError,
     RuntimeTransientError,
 )
+from airframe.features import Feature
 from airframe.models import (
     CAPABILITY_REASONING_EFFORT,
     CAPABILITY_STREAMING,
@@ -60,6 +61,13 @@ from airframe.models import (
     CAPABILITY_VISION,
     ModelInfo,
 )
+from airframe.options import (
+    ClaudeOptions,
+    CodexOptions,
+    CopilotOptions,
+    OpenAICompatOptions,
+    ProviderOptions,
+)
 from airframe.protocol import (
     AgentRuntime,
     ProviderModel,
@@ -67,7 +75,7 @@ from airframe.protocol import (
     UnsupportedBindingError,
 )
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 # Adapter imports live at the top level for ergonomic use, but the
 # adapter modules themselves lazy-import their underlying SDK so
@@ -87,12 +95,18 @@ __all__ = [
     "CAPABILITY_TOOLS",
     "CAPABILITY_VISION",
     "ClaudeCodeRuntime",
+    "ClaudeOptions",
+    "CodexOptions",
     "CodexRuntime",
+    "CopilotOptions",
     "CopilotRuntime",
     "CostRecord",
+    "Feature",
     "ModelInfo",
+    "OpenAICompatOptions",
     "OpenCodeZenRuntime",
     "ProviderModel",
+    "ProviderOptions",
     "RuntimeAuthError",
     "RuntimeCancelledError",
     "RuntimeContextOverflowError",

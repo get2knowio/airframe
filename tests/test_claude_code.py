@@ -123,10 +123,140 @@ async def test_execute_rejects_unsupported_binding() -> None:
 
 
 @pytest.mark.asyncio
-async def test_execute_text_only_not_implemented() -> None:
+async def test_execute_plain_text_returns_text(mock_sdk: dict[str, MagicMock]) -> None:
+    """``schema=None`` honours the protocol's plain-text contract.
+
+    ``ResultMessage.result`` carries the concatenated final assistant
+    text in plain-text mode; ``structured_output`` is absent. The
+    adapter must return text on ``RuntimeResult.text`` and leave
+    ``structured`` as ``None``.
+    """
     rt = ClaudeCodeRuntime()
-    with pytest.raises(NotImplementedError):
-        await rt.execute("hello")
+    final = _FakeResultMessage(
+        result="The answer is 42.",
+        structured_output=None,
+        stop_reason="end_turn",
+    )
+
+    async def fake_receive() -> Any:
+        yield final
+
+    mock_sdk["client"].receive_response = fake_receive
+
+    result = await rt.execute(
+        "ask something",
+        model=ProviderModel("claude", "claude-haiku-4-5"),
+    )
+
+    assert result.text == "The answer is 42."
+    assert result.structured is None
+    assert result.finish == "end_turn"
+    assert result.cost.input_tokens == 100
+    assert result.cost.output_tokens == 200
+    assert result.cost.provider_id == "claude"
+
+
+@pytest.mark.asyncio
+async def test_execute_plain_text_does_not_set_output_format(
+    mock_sdk: dict[str, MagicMock],
+) -> None:
+    """No ``output_format`` on ClaudeAgentOptions when schema is None.
+
+    The whole point of plain-text mode: the SDK isn't asked to
+    enforce a JSON schema. The legacy structured-output forcing must
+    not leak into the schema=None path.
+    """
+    import claude_agent_sdk as sdk
+
+    captured_kwargs: dict[str, Any] = {}
+
+    def capturing_options(**kwargs: Any) -> MagicMock:
+        captured_kwargs.update(kwargs)
+        return MagicMock()
+
+    final = _FakeResultMessage(result="hi", structured_output=None)
+
+    async def fake_receive() -> Any:
+        yield final
+
+    mock_sdk["client"].receive_response = fake_receive
+
+    with patch.object(sdk, "ClaudeAgentOptions", side_effect=capturing_options):
+        rt = ClaudeCodeRuntime()
+        await rt.execute("hi")
+
+    assert "output_format" not in captured_kwargs
+
+
+@pytest.mark.asyncio
+async def test_execute_plain_text_forwards_system_prompt(
+    mock_sdk: dict[str, MagicMock],
+) -> None:
+    """``system=`` lands in ClaudeAgentOptions.system_prompt verbatim.
+
+    The load-bearing test: every downstream persona depends on the
+    caller-supplied system prompt actually reaching the model in
+    text mode.
+    """
+    import claude_agent_sdk as sdk
+
+    captured_kwargs: dict[str, Any] = {}
+
+    def capturing_options(**kwargs: Any) -> MagicMock:
+        captured_kwargs.update(kwargs)
+        return MagicMock()
+
+    final = _FakeResultMessage(result="ok", structured_output=None)
+
+    async def fake_receive() -> Any:
+        yield final
+
+    mock_sdk["client"].receive_response = fake_receive
+
+    with patch.object(sdk, "ClaudeAgentOptions", side_effect=capturing_options):
+        rt = ClaudeCodeRuntime()
+        await rt.execute("hi", system="You are the navigator.")
+
+    assert captured_kwargs.get("system_prompt") == "You are the navigator."
+
+
+@pytest.mark.asyncio
+async def test_execute_plain_text_ignores_persona(mock_sdk: dict[str, MagicMock]) -> None:
+    """``persona=`` is accepted but unused by ClaudeCodeRuntime.
+
+    Per the protocol docstring: "Some adapters honour it; others
+    ignore it." Claude ignores it. The contract is just that
+    passing a value doesn't crash.
+    """
+    rt = ClaudeCodeRuntime()
+    final = _FakeResultMessage(result="ok", structured_output=None)
+
+    async def fake_receive() -> Any:
+        yield final
+
+    mock_sdk["client"].receive_response = fake_receive
+
+    result = await rt.execute("hi", persona="navigator")
+    assert result.text == "ok"
+
+
+@pytest.mark.asyncio
+async def test_execute_plain_text_classifies_auth_error(
+    mock_sdk: dict[str, MagicMock],
+) -> None:
+    """Auth errors classify the same way in text mode as in schema mode.
+
+    Same code path through ``_classify_exception``; this test pins
+    the contract that the classification doesn't depend on the
+    presence of a schema.
+    """
+    from claude_agent_sdk import ClaudeSDKError
+
+    rt = ClaudeCodeRuntime()
+    mock_sdk["client"].connect.side_effect = ClaudeSDKError("401 unauthorized")
+
+    with pytest.raises(RuntimeAuthError):
+        await rt.execute("hi")
 
 
 @pytest.mark.asyncio

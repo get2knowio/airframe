@@ -43,7 +43,7 @@ import json
 import logging
 import os
 from dataclasses import dataclass, field
-from typing import Any, ClassVar
+from typing import Any, ClassVar, TypeVar
 
 from pydantic import BaseModel
 
@@ -56,6 +56,7 @@ from airframe.errors import (
     RuntimeStructuredOutputError,
     RuntimeTransientError,
 )
+from airframe.features import Feature
 from airframe.models import ModelInfo
 from airframe.protocol import (
     AgentRuntime,
@@ -65,6 +66,8 @@ from airframe.protocol import (
 )
 
 logger = logging.getLogger(__name__)
+
+T = TypeVar("T")
 
 
 @dataclass(frozen=True, slots=True)
@@ -118,6 +121,20 @@ class OpenAICompatibleRuntime(AgentRuntime):
     #: :class:`ModelMeta`. Drives ``list_models()`` enrichment and
     #: ``cost_usd`` computation.
     METADATA: ClassVar[dict[str, ModelMeta]] = {}
+
+    #: Features this runtime family exposes today. Phase 0 declares
+    #: only structured output (already wired via
+    #: ``response_format={"type":"json_schema",...}``). MCP-as-tool is
+    #: OpenAI Responses-only; the Chat Completions surface this base
+    #: targets does NOT support it, and that won't change.
+    #: ``STRUCTURED_OUTPUT_STRICT`` stays False even though the SDK
+    #: accepts ``strict: True`` — the base passes ``strict: False`` for
+    #: compat-vendor portability (Together / Groq / Fireworks /
+    #: OpenRouter coverage is uneven). Phase 2 may add an explicit
+    #: opt-in.
+    SUPPORTED_FEATURES: ClassVar[frozenset[Feature]] = frozenset(
+        {Feature.STRUCTURED_OUTPUT_JSON_SCHEMA}
+    )
 
     #: Tag used in structured-log rows (``runtime=opencode_zen`` etc.).
     label: str = "openai_compatible"
@@ -216,6 +233,22 @@ class OpenAICompatibleRuntime(AgentRuntime):
 
     def validate_binding(self, binding: ProviderModel) -> bool:
         return binding.provider_id == self.PROVIDER_ID
+
+    def supports(self, feature: Feature, model: ProviderModel | None = None) -> bool:
+        return feature in self.SUPPORTED_FEATURES
+
+    def unwrap(self, cls: type[T]) -> T:
+        from openai import AsyncOpenAI
+
+        if isinstance(self, cls):
+            return self  # type: ignore[return-value]
+        if cls is AsyncOpenAI:
+            # Build lazily — same pattern execute() / list_models() use.
+            return self._ensure_client()  # type: ignore[return-value]
+        raise TypeError(
+            f"{type(self).__name__} cannot unwrap to {cls!r}; supported types are "
+            f"{type(self).__name__} and openai.AsyncOpenAI."
+        )
 
     async def list_models(self) -> list[ModelInfo]:
         """Return the live model menu from the vendor.

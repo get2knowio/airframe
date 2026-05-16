@@ -31,14 +31,17 @@ Design principles:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, TypeVar, runtime_checkable
 
 from pydantic import BaseModel
 
 from airframe.cost import CostRecord
 
 if TYPE_CHECKING:
+    from airframe.features import Feature
     from airframe.models import ModelInfo
+
+T = TypeVar("T")
 
 
 @dataclass(frozen=True, slots=True)
@@ -227,6 +230,81 @@ class AgentRuntime(Protocol):
 
         Consumers should surface these to the user *before* letting
         them commit to a model selection.
+        """
+        ...
+
+    def unwrap(self, cls: type[T]) -> T:
+        """Return the underlying vendor object cast to ``cls``.
+
+        The documented escape hatch around airframe's portable surface,
+        modelled on JDBC 4.0's :class:`java.sql.Wrapper` interface.
+        When the portable protocol doesn't expose a vendor-specific
+        capability, the consumer reaches the native client (or session,
+        or thread) directly through ``unwrap(NativeType)``.
+
+        Per-adapter mappings (Phase 0):
+
+        * :class:`ClaudeCodeRuntime` accepts
+          ``unwrap(ClaudeSDKClient)`` — returns the live SDK client
+          when one exists (after the first ``execute()``); raises
+          :class:`TypeError` if requested before a client is built.
+        * :class:`CopilotRuntime` accepts ``unwrap(CopilotClient)`` and
+          ``unwrap(CopilotSession)``.
+        * :class:`CodexRuntime` accepts ``unwrap(Codex)`` and
+          ``unwrap(Thread)``.
+        * :class:`OpenAICompatibleRuntime` accepts ``unwrap(AsyncOpenAI)``.
+
+        Every adapter additionally accepts ``unwrap(type(self))`` and
+        returns ``self`` — the trivial case that keeps the contract
+        consistent across runtimes.
+
+        Args:
+            cls: The native type the caller wants to reach. Use a real
+                type (e.g. ``from claude_agent_sdk import ClaudeSDKClient;
+                runtime.unwrap(ClaudeSDKClient)``), not a string name.
+
+        Returns:
+            The underlying vendor object.
+
+        Raises:
+            TypeError: when this runtime can't satisfy ``cls`` (the
+                requested type isn't one of the runtime's native
+                objects, or the lazily-constructed object hasn't
+                been built yet).
+        """
+        ...
+
+    def supports(self, feature: Feature, model: ProviderModel | None = None) -> bool:
+        """Return ``True`` if this runtime exposes ``feature``.
+
+        Capability negotiation predicate, modelled on JDBC's
+        :class:`DatabaseMetaData` ``supportsXxx()`` family and
+        SQLAlchemy's ``Dialect.supports_*`` flags. The contract:
+
+        1. **Cheap and pure.** No network, no SDK version sniffing,
+           no subprocess probe. A static lookup table on the adapter.
+        2. **Agrees with execute().** If this returns ``True``,
+           calling the API associated with ``feature`` must not raise
+           :class:`UnsupportedBindingError` purely on capability
+           grounds. The TCK in :mod:`airframe.testing.contracts`
+           verifies this for every adapter.
+        3. **False is the safe default.** Adapters declare what they
+           *do* support; everything else is False. Consumers branching
+           on ``supports()`` get correct behaviour even when running
+           against a future runtime that adds new
+           :class:`Feature` enum members.
+
+        Args:
+            feature: The :class:`Feature` enum member to query.
+            model: Optional :class:`ProviderModel` for per-model
+                differentiation. ``None`` asks the runtime-wide
+                capability (true for the default model). Most features
+                are runtime-wide today and adapters ignore this
+                argument; per-model gating arrives later as needed.
+
+        Returns:
+            ``True`` when calling the API associated with ``feature``
+            on this runtime succeeds; ``False`` otherwise.
         """
         ...
 

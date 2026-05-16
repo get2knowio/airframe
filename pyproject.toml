@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "airframe-agents"
-version = "0.2.0"
+version = "0.3.0"
 description = "Vendor-neutral agent runtime: one protocol, pluggable adapters for Claude Code, GitHub Copilot, OpenAI Codex, and OpenCode Zen."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -41,6 +41,13 @@ codex = ["openai-codex-sdk>=0.1.11"]
 # OpenAI-compatible subclass (Together, Groq, Fireworks, OpenRouter, ...).
 # All share the same `openai` SDK underneath.
 openai-compat = ["openai>=1.50,<3"]
+# Brings in pytest for adapter authors that want to run the shared
+# `airframe.testing.contracts` conformance suite against their own
+# adapter. The main package does not depend on pytest.
+testing = [
+    "pytest>=8.2.0,<9",
+    "pytest-asyncio>=0.24.0,<1",
+]
 # "Batteries included" — installs every adapter family's SDK.
 all = [
     "claude-agent-sdk>=0.2.0,<1",

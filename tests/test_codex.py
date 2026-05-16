@@ -142,10 +142,108 @@ def test_validate_binding_rejects_claude_models_on_codex() -> None:
 
 
 @pytest.mark.asyncio
-async def test_execute_text_only_not_implemented() -> None:
+async def test_execute_plain_text_returns_text(mock_sdk: dict[str, Any]) -> None:
+    """``schema=None`` honours the protocol's plain-text contract.
+
+    The Codex CLI's ``Turn.final_response`` is the free-form text
+    answer when no ``outputSchema`` constraint is applied. The
+    adapter must return it on ``RuntimeResult.text`` with
+    ``structured=None``.
+    """
     rt = CodexRuntime()
-    with pytest.raises(NotImplementedError):
-        await rt.execute("hello")
+    mock_sdk["thread"].run = AsyncMock(return_value=_FakeTurn(final_response="The answer is 42."))
+
+    result = await rt.execute(
+        "ask something",
+        model=ProviderModel("codex", "gpt-5-codex"),
+    )
+
+    assert result.text == "The answer is 42."
+    assert result.structured is None
+    assert result.cost.input_tokens == 120
+    assert result.cost.output_tokens == 240
+    assert result.cost.provider_id == "codex"
+
+
+@pytest.mark.asyncio
+async def test_execute_plain_text_omits_output_schema(mock_sdk: dict[str, Any]) -> None:
+    """No ``outputSchema`` on TurnOptions when schema is None.
+
+    The Codex CLI sees no JSON-schema constraint and produces
+    free-form output. Confirms the plain-text path doesn't leak the
+    structured-output constraint.
+    """
+    rt = CodexRuntime()
+    mock_sdk["thread"].run = AsyncMock(return_value=_FakeTurn(final_response="hi"))
+
+    await rt.execute("hello")
+
+    call_args = mock_sdk["thread"].run.call_args
+    _prompt, turn_options = call_args.args
+    assert "outputSchema" not in turn_options
+
+
+@pytest.mark.asyncio
+async def test_execute_plain_text_forwards_system_via_prompt(
+    mock_sdk: dict[str, Any],
+) -> None:
+    """``system=`` lands prepended to the prompt (Codex SDK shape).
+
+    Codex has no SDK-level system-message slot; the adapter
+    concatenates ``system`` and the user prompt with a blank line.
+    Same shape as the structured path — text mode must not drop the
+    persona.
+    """
+    rt = CodexRuntime()
+    mock_sdk["thread"].run = AsyncMock(return_value=_FakeTurn(final_response="ok"))
+
+    await rt.execute("user prompt", system="You are the navigator.")
+
+    call_args = mock_sdk["thread"].run.call_args
+    prompt_arg, _opts = call_args.args
+    assert prompt_arg == "You are the navigator.\n\nuser prompt"
+
+
+@pytest.mark.asyncio
+async def test_execute_plain_text_ignores_persona(mock_sdk: dict[str, Any]) -> None:
+    """``persona=`` accepted but unused by CodexRuntime."""
+    rt = CodexRuntime()
+    mock_sdk["thread"].run = AsyncMock(return_value=_FakeTurn(final_response="ok"))
+
+    result = await rt.execute("hi", persona="navigator")
+    assert result.text == "ok"
+
+
+@pytest.mark.asyncio
+async def test_execute_plain_text_empty_response_is_not_an_error(
+    mock_sdk: dict[str, Any],
+) -> None:
+    """Empty ``final_response`` is acceptable in plain-text mode.
+
+    Differs from the structured-output path: a tool-only turn that
+    writes files and stops without an agent message is a legitimate
+    outcome in plain-text mode, not a contract violation.
+    """
+    rt = CodexRuntime()
+    mock_sdk["thread"].run = AsyncMock(return_value=_FakeTurn(final_response=""))
+
+    result = await rt.execute("do the work")
+    assert result.text == ""
+    assert result.structured is None
+
+
+@pytest.mark.asyncio
+async def test_execute_plain_text_classifies_auth_error(
+    mock_sdk: dict[str, Any],
+) -> None:
+    """Auth-classified Codex errors propagate the same in text mode."""
+    from openai_codex_sdk.errors import CodexAuthError
+
+    rt = CodexRuntime()
+    mock_sdk["thread"].run = AsyncMock(side_effect=CodexAuthError("no auth.json found"))
+
+    with pytest.raises(RuntimeAuthError):
+        await rt.execute("hi")
 
 
 @pytest.mark.asyncio

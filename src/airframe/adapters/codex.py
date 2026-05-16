@@ -59,7 +59,7 @@ import json
 import logging
 import os
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import Any, ClassVar, TypeVar
 
 from pydantic import BaseModel
 
@@ -71,6 +71,7 @@ from airframe.errors import (
     RuntimeStructuredOutputError,
     RuntimeTransientError,
 )
+from airframe.features import Feature
 from airframe.models import ModelInfo
 from airframe.protocol import (
     AgentRuntime,
@@ -80,6 +81,8 @@ from airframe.protocol import (
 )
 
 logger = logging.getLogger(__name__)
+
+T = TypeVar("T")
 
 #: Default Codex model when no binding is specified. ``gpt-5-codex``
 #: is the v0 default — the standard codex model. Selected per-call
@@ -180,6 +183,13 @@ class CodexRuntime(AgentRuntime):
     #: pip extra that brings the vendor SDK in.
     EXTRA_NAME: ClassVar[str] = "codex"
 
+    #: Features this runtime exposes today. Phase 0 declares only the
+    #: native ``--output-schema`` flow that's already wired through
+    #: ``execute(schema=...)``; later phases flip more bits on.
+    SUPPORTED_FEATURES: ClassVar[frozenset[Feature]] = frozenset(
+        {Feature.STRUCTURED_OUTPUT_JSON_SCHEMA}
+    )
+
     def __init__(
         self,
         *,
@@ -213,12 +223,6 @@ class CodexRuntime(AgentRuntime):
         model: ProviderModel | None = None,
         timeout: float = 600.0,
     ) -> RuntimeResult:
-        if schema is None:
-            raise NotImplementedError(
-                "CodexRuntime: plain-text execute() is not wired in v0; "
-                "every consumer currently expects a typed payload"
-            )
-
         model_id = self._resolve_model(model)
         thread = await self._ensure_thread(model=model_id)
 
@@ -227,7 +231,12 @@ class CodexRuntime(AgentRuntime):
         # persona instructions onto the prompt.
         full_prompt = prompt if not system else f"{system}\n\n{prompt}"
 
-        turn_options = {"outputSchema": schema.model_json_schema()}
+        # ``outputSchema`` is the JSON-schema constraint the Codex CLI
+        # applies to the final response. Omitted in plain-text mode so
+        # the CLI returns free-form text rather than enforcing JSON.
+        turn_options: dict[str, Any] = {}
+        if schema is not None:
+            turn_options["outputSchema"] = schema.model_json_schema()
 
         try:
             turn = await asyncio.wait_for(
@@ -240,6 +249,20 @@ class CodexRuntime(AgentRuntime):
             raise self._classify_exception(exc) from exc
 
         final = turn.final_response or ""
+
+        if schema is None:
+            # Plain-text mode: ``final_response`` is the free-form
+            # answer string. Empty is a legitimate outcome (e.g. a
+            # tool-only turn that wrote files and finished), so don't
+            # treat it as an error here.
+            return RuntimeResult(
+                text=final,
+                structured=None,
+                cost=self._cost_from_usage(turn.usage, model_id=model_id),
+                finish="stop",
+                raw=turn,
+            )
+
         if not final:
             raise RuntimeStructuredOutputError(
                 "codex: turn completed with empty final_response",
@@ -279,6 +302,31 @@ class CodexRuntime(AgentRuntime):
         # Codex is OpenAI-only. Anthropic bindings route through
         # ClaudeCodeRuntime / AnthropicRuntime.
         return not binding.model_id.startswith("claude-")
+
+    def supports(self, feature: Feature, model: ProviderModel | None = None) -> bool:
+        return feature in self.SUPPORTED_FEATURES
+
+    def unwrap(self, cls: type[T]) -> T:
+        from openai_codex_sdk import Codex, Thread
+
+        if isinstance(self, cls):
+            return self  # type: ignore[return-value]
+        if cls is Codex:
+            if self._client is None:
+                raise TypeError(
+                    "CodexRuntime.unwrap(Codex): no client exists yet — call execute() first."
+                )
+            return self._client  # type: ignore[return-value]
+        if cls is Thread:
+            if self._thread is None:
+                raise TypeError(
+                    "CodexRuntime.unwrap(Thread): no thread exists yet — call execute() first."
+                )
+            return self._thread  # type: ignore[return-value]
+        raise TypeError(
+            f"CodexRuntime cannot unwrap to {cls!r}; supported types are "
+            f"CodexRuntime, openai_codex_sdk.Codex, and openai_codex_sdk.Thread."
+        )
 
     async def list_models(self) -> list[ModelInfo]:
         """Return the codex-tier models from OpenAI's models endpoint.

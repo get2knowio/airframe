@@ -36,6 +36,14 @@ class CostRecord:
         output_tokens: Completion tokens generated.
         cache_read_tokens: Prompt tokens served from the provider's cache.
         cache_write_tokens: Prompt tokens written to the provider's cache.
+        reasoning_tokens: Hidden reasoning / extended-thinking tokens
+            the model consumed *in addition to* ``output_tokens``. Each
+            SDK reports these under a different name (Claude SDK's
+            ``thinking_tokens``, OpenAI's
+            ``completion_tokens_details.reasoning_tokens``, Codex
+            stretches ``output_tokens``); canonicalised here. ``0`` when
+            the model didn't reason, the adapter doesn't expose the
+            counter, or the SDK hasn't wired it yet.
         finish: Provider-reported stop reason (``"stop"``, ``"length"``,
             ``"tool_calls"``, ``"end_turn"``, ...). ``None`` if not
             reported.
@@ -49,6 +57,7 @@ class CostRecord:
     cache_read_tokens: int
     cache_write_tokens: int
     finish: str | None
+    reasoning_tokens: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         """Render as a structured-log payload."""
@@ -60,6 +69,7 @@ class CostRecord:
             "output_tokens": self.output_tokens,
             "cache_read_tokens": self.cache_read_tokens,
             "cache_write_tokens": self.cache_write_tokens,
+            "reasoning_tokens": self.reasoning_tokens,
             "finish": self.finish,
         }
 
