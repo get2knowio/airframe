@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "airframe-agents"
-version = "0.2.0"
+version = "0.3.0"
 description = "Vendor-neutral agent runtime: one protocol, pluggable adapters for Claude Code, GitHub Copilot, OpenAI Codex, and OpenCode Zen."
 readme = "README.md"
 requires-python = ">=3.11"

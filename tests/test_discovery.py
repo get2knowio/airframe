@@ -228,9 +228,7 @@ class _NoProviderIdRuntime:
     """Malformed — missing PROVIDER_ID."""
 
 
-def _stub_entry_points(
-    monkeypatch: pytest.MonkeyPatch, entries: list[_FakeEntryPoint]
-) -> None:
+def _stub_entry_points(monkeypatch: pytest.MonkeyPatch, entries: list[_FakeEntryPoint]) -> None:
     """Stub ``importlib.metadata.entry_points`` for the discovery module."""
 
     def fake_entry_points(*, group: str) -> list[_FakeEntryPoint]:
@@ -303,9 +301,7 @@ def test_entry_point_load_error_is_logged_and_skipped(
     of the consumer's menu shouldn't disappear because one plugin is
     broken.
     """
-    broken = _FakeEntryPoint(
-        "broken", "broken_pkg:does_not_exist", ImportError("boom")
-    )
+    broken = _FakeEntryPoint("broken", "broken_pkg:does_not_exist", ImportError("boom"))
     good = _FakeEntryPoint("good", "fake_pkg:Runtime", _GoodThirdPartyRuntime)
     _stub_entry_points(monkeypatch, [broken, good])
 

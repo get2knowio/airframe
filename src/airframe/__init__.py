@@ -75,7 +75,7 @@ from airframe.protocol import (
     UnsupportedBindingError,
 )
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 # Adapter imports live at the top level for ergonomic use, but the
 # adapter modules themselves lazy-import their underlying SDK so

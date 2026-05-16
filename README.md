@@ -229,6 +229,55 @@ Each probe surfaces auth / network issues as classified
 `Runtime*Error` so you can see exactly what would happen in production
 if credentials were misconfigured.
 
+## Capability negotiation
+
+Each adapter declares which protocol features it implements via
+`runtime.supports(Feature.X)`. The `Feature` enum ships the whole
+forward-looking set as of v0.3.0; later releases flip more bits on as
+each phase lands its corresponding API:
+
+```python
+from airframe import ClaudeCodeRuntime, Feature
+
+runtime = ClaudeCodeRuntime()
+if runtime.supports(Feature.STRUCTURED_OUTPUT_JSON_SCHEMA):
+    result = await runtime.execute(prompt, schema=MySchema)
+```
+
+Today only `Feature.STRUCTURED_OUTPUT_JSON_SCHEMA` returns `True` —
+every other capability (`STREAMING`, `SESSION_RESUME`,
+`REASONING_EFFORT`, `TOOLS_FUNCTION`, `TOOLS_MCP_*`, …) returns
+`False` and will flip on in its respective phase. See
+[docs/implementation-plan.md](docs/implementation-plan.md) for the
+phasing.
+
+Run `uv run python examples/probe_supports.py` for the live
+Feature × adapter matrix.
+
+## Escape hatch: `runtime.unwrap()`
+
+When the portable surface doesn't expose a vendor-specific knob,
+reach the native SDK object directly via JDBC-`Wrapper`-style
+`unwrap()`:
+
+```python
+from claude_agent_sdk import ClaudeSDKClient
+
+runtime = ClaudeCodeRuntime()
+await runtime.execute("hello", schema=Brief)
+
+# Now reach the underlying SDK for vendor-specific behaviour:
+client: ClaudeSDKClient = runtime.unwrap(ClaudeSDKClient)
+await client.interrupt()
+```
+
+Each adapter accepts `unwrap(type(self))` (returning `self`) plus
+its native types: `ClaudeCodeRuntime.unwrap(ClaudeSDKClient)`,
+`CopilotRuntime.unwrap(CopilotClient | CopilotSession)`,
+`CodexRuntime.unwrap(Codex | Thread)`,
+`OpenAICompatibleRuntime.unwrap(AsyncOpenAI)`. Unsupported types
+raise `TypeError`.
+
 ## Adding an adapter
 
 A new adapter is one class implementing `AgentRuntime`:
@@ -257,6 +306,55 @@ instead — the base implements `execute`, `list_models`, `reset`,
 **SDK-based vendor (subprocess / native types)?** Inherit
 `AgentRuntime` directly and implement all five methods. See
 `src/airframe/adapters/claude_code.py` for the canonical example.
+
+## Third-party adapters
+
+Adapters can live in their own package and be discovered via the
+`airframe.adapters` entry-point group:
+
+```toml
+# pyproject.toml of, say, airframe-adapters-together
+[project.entry-points."airframe.adapters"]
+together = "airframe_adapters_together:TogetherRuntime"
+```
+
+Once installed, `airframe.list_providers()` picks the runtime up
+automatically — same pip-extras filtering applies as for built-ins.
+
+To run the shared conformance contracts against a third-party
+adapter:
+
+```bash
+pip install airframe-agents[testing]
+```
+
+Then in the adapter's test suite:
+
+```python
+# tests/test_my_adapter_conformance.py
+import pytest
+from airframe.testing.contracts import (
+    test_close_is_idempotent,
+    test_close_on_fresh_runtime,
+    test_unwrap_returns_self,
+    test_unwrap_unrelated_type_raises_typeerror,
+    test_supports_returns_bool_for_every_feature,
+    test_supports_is_idempotent,
+    test_supports_structured_output_json_schema_is_true,
+    test_supports_accepts_model_kwarg,
+    test_validate_binding_returns_bool,
+)
+from airframe_adapters_together import TogetherRuntime
+
+@pytest.fixture
+def adapter_runtime():
+    return TogetherRuntime(api_key="test-key")
+```
+
+Pytest collects the imported test functions and runs them against
+the local fixture. Modelled on SQLAlchemy's `testing.suite` pattern.
+See `tests/test_claude_code_conformance.py` for the canonical
+in-tree example.
 
 ## Development
 

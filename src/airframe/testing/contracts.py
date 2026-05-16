@@ -158,9 +158,7 @@ def test_supports_accepts_model_kwarg(adapter_runtime: Any) -> None:
     # provider-mismatch logic the binding may eventually carry.
     binding = ProviderModel(adapter_runtime.PROVIDER_ID, "some-model")
     runtime_wide = adapter_runtime.supports(Feature.STRUCTURED_OUTPUT_JSON_SCHEMA)
-    with_model = adapter_runtime.supports(
-        Feature.STRUCTURED_OUTPUT_JSON_SCHEMA, model=binding
-    )
+    with_model = adapter_runtime.supports(Feature.STRUCTURED_OUTPUT_JSON_SCHEMA, model=binding)
     # Both call forms succeed; their answer agrees for the universal
     # feature today. Per-model gating in later phases may diverge them
     # for other features, but the universal one stays consistent.

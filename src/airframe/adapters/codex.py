@@ -301,15 +301,13 @@ class CodexRuntime(AgentRuntime):
         if cls is Codex:
             if self._client is None:
                 raise TypeError(
-                    "CodexRuntime.unwrap(Codex): no client exists yet — "
-                    "call execute() first."
+                    "CodexRuntime.unwrap(Codex): no client exists yet — call execute() first."
                 )
             return self._client  # type: ignore[return-value]
         if cls is Thread:
             if self._thread is None:
                 raise TypeError(
-                    "CodexRuntime.unwrap(Thread): no thread exists yet — "
-                    "call execute() first."
+                    "CodexRuntime.unwrap(Thread): no thread exists yet — call execute() first."
                 )
             return self._thread  # type: ignore[return-value]
         raise TypeError(

@@ -6,6 +6,97 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-05-16
+
+Phase 0 of the [implementation plan](docs/implementation-plan.md):
+foundations that lock the shape of every extension point Phases 1–6
+will use. No new vendor features yet — the surface is the scaffold
+later phases build on.
+
+### Added
+
+- `airframe.Feature` enum — capability-negotiation predicates
+  modelled on JDBC `DatabaseMetaData.supportsXxx()` and SQLAlchemy
+  `Dialect.supports_*`. Ships the whole forward-looking set (19
+  members covering Phases 1–6); later phases flip `True` bits onto
+  each adapter without adding new members. Enum string values are
+  public surface and snapshotted in tests.
+- `AgentRuntime.supports(feature, model=None) -> bool` — pure,
+  cheap lookup against an adapter's `SUPPORTED_FEATURES` class set.
+  Today every in-tree adapter declares only
+  `Feature.STRUCTURED_OUTPUT_JSON_SCHEMA`; Phase 1+ adds more.
+- `AgentRuntime.unwrap(cls) -> cls` — JDBC-`Wrapper`-style escape
+  hatch to the native SDK object. Each adapter accepts
+  `unwrap(type(self))` plus its native types
+  (`ClaudeCodeRuntime.unwrap(ClaudeSDKClient)`,
+  `CopilotRuntime.unwrap(CopilotClient | CopilotSession)`,
+  `CodexRuntime.unwrap(Codex | Thread)`,
+  `OpenAICompatibleRuntime.unwrap(AsyncOpenAI)`). Unsupported types
+  raise `TypeError`.
+- `airframe.options` module with four empty frozen dataclasses
+  (`ClaudeOptions`, `CopilotOptions`, `CodexOptions`,
+  `OpenAICompatOptions`) and a `ProviderOptions` tagged-union alias.
+  Vercel-style namespaced extension points for the
+  `ClaudeAgentOptions`-sprawl problem; Phase 2+ populates each as
+  features land. Not wired anywhere in v0.3.0 — Phase 1 attaches them
+  to `runtime.session(provider_options=...)`.
+- `CostRecord.reasoning_tokens: int` (default `0`) — canonicalises
+  hidden reasoning / extended-thinking tokens across vendors. Phase 2
+  wires real population from each SDK's native counter.
+- Third-party adapter discovery via the `airframe.adapters`
+  entry-point group. Third-party packages declare their runtime in
+  `pyproject.toml` and `airframe.list_providers()` picks it up
+  automatically. Modelled on SLF4J's `ServiceLoader` binding
+  discovery; same pip-extras filtering applies. Built-ins shadow
+  third-party entries with the same `PROVIDER_ID`. Malformed plugins
+  (import errors, missing `PROVIDER_ID`, collisions) log a warning
+  and are skipped — discovery never crashes.
+- `discovery.ENTRY_POINT_GROUP = "airframe.adapters"` constant —
+  public surface, snapshotted in tests.
+- `airframe.testing` submodule with shared conformance contracts.
+  Adapter authors import test functions from
+  `airframe.testing.contracts` and provide an `adapter_runtime`
+  pytest fixture; pytest collects the imported tests under the local
+  fixture. SQLAlchemy `testing.suite` pattern. Nine structural
+  contracts covering `close()` idempotency,
+  `unwrap(type(self))` returning self, `supports()` purity, and
+  `validate_binding` behaviour.
+- New `[testing]` pyproject extra brings pytest + pytest-asyncio for
+  adapter authors running the conformance suite. The main package
+  does not depend on pytest.
+- Per-adapter conformance test files (`tests/test_*_conformance.py`)
+  for all four in-tree adapters — canonical examples for third-party
+  authors.
+- `examples/probe_supports.py` — capability matrix probe printing
+  the live Feature × adapter truth table.
+- `docs/feature-roadmap.md` — feature audit of the four native SDKs
+  airframe wraps, prioritised list of cross-vendor features, and
+  abstraction patterns borrowed from JDBC / SLF4J / OpenTelemetry /
+  SQLAlchemy / JAAS.
+- `docs/implementation-plan.md` — phased plan (Phase 0–6) ordered
+  by dependency, with version targets, irreversible-shape-lock
+  gating points, and adapter migration tables.
+
+### Changed
+
+- `AgentRuntime` protocol now requires two additional methods:
+  `supports()` and `unwrap()`. Built-in adapters all implement them;
+  external implementations of the protocol (none known) would need
+  to add them.
+- `CostRecord` constructor accepts an additional optional kwarg
+  (`reasoning_tokens=0`); the structured-log dict via `to_dict()`
+  always includes the key.
+
+### Deferred
+
+- Behavioural conformance contracts (401 → `RuntimeAuthError`,
+  schema= round-trip, `input_tokens > 0` on a successful call)
+  require live vendor credentials and naturally co-locate with
+  Phase 1 streaming/multi-turn integration test infrastructure. The
+  existing `examples/probe_*.py` scripts already exercise these
+  end-to-end against real vendors. Will land as
+  `airframe.testing.integration` in v0.4.0.
+
 ## [0.2.0] — 2026-05-16
 
 Model discovery API + an OpenAI-compatible base class. The headline

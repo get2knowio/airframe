@@ -102,8 +102,7 @@ def _entry_point_runtime_classes() -> list[type[AgentRuntime]]:
             continue
         if not isinstance(target, type):
             logger.warning(
-                "airframe.discovery: entry point %r (%s) resolved to %r, "
-                "not a class; skipping",
+                "airframe.discovery: entry point %r (%s) resolved to %r, not a class; skipping",
                 ep.name,
                 ep.value,
                 target,
@@ -112,8 +111,7 @@ def _entry_point_runtime_classes() -> list[type[AgentRuntime]]:
         provider_id = getattr(target, "PROVIDER_ID", None)
         if not isinstance(provider_id, str) or not provider_id:
             logger.warning(
-                "airframe.discovery: entry point %r (%s) has no PROVIDER_ID "
-                "ClassVar; skipping",
+                "airframe.discovery: entry point %r (%s) has no PROVIDER_ID ClassVar; skipping",
                 ep.name,
                 target.__name__,
             )
