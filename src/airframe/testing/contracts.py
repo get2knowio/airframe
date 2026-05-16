@@ -166,6 +166,63 @@ def test_supports_accepts_model_kwarg(adapter_runtime: Any) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Plain-text execute() contract
+# ---------------------------------------------------------------------------
+
+
+def test_plain_text_execute_path_is_wired(adapter_runtime: Any) -> None:
+    """The ``schema=None`` path must be wired per the protocol docstring.
+
+    The :meth:`AgentRuntime.execute` docstring promises::
+
+        schema: None means plain text — text answer on RuntimeResult.text,
+                structured=None.
+
+    This Phase 0 contract verifies the path is *implemented*, not its
+    *behaviour*. The structural checks:
+
+    1. The ``execute()`` signature accepts ``schema=None`` as the
+       default — protocol-required.
+    2. The implementation does not carry the legacy
+       ``"plain-text execute() is not wired in v0"``
+       :class:`NotImplementedError` gate. (Three of the four built-in
+       adapters historically refused ``schema=None`` with that exact
+       message; v0.3.0 wired them.)
+
+    A behavioural contract that validates the *returned* text shape
+    requires live vendor credentials and lives in
+    :mod:`airframe.testing.integration` (deferred to v0.4.0 along
+    with the other network-required contracts called out in the
+    v0.3.0 release notes).
+
+    Adapter authors implementing plain-text differently from the
+    historical refusal pattern still satisfy this contract — the
+    source check is specifically targeting the legacy gate string.
+    """
+    import inspect
+
+    sig = inspect.signature(type(adapter_runtime).execute)
+    schema_param = sig.parameters.get("schema")
+    assert schema_param is not None, (
+        f"{type(adapter_runtime).__name__}.execute() must accept a `schema=` "
+        f"keyword per the AgentRuntime protocol"
+    )
+    assert schema_param.default is None, (
+        f"{type(adapter_runtime).__name__}.execute(schema=...) must default to None "
+        f"per the protocol; got default {schema_param.default!r}"
+    )
+
+    source = inspect.getsource(type(adapter_runtime).execute)
+    legacy_gate = "plain-text execute() is not wired"
+    assert legacy_gate not in source, (
+        f"{type(adapter_runtime).__name__}.execute() still carries the legacy "
+        f"plain-text-not-wired NotImplementedError gate. The protocol docstring "
+        f"promises plain-text support; drop the gate and wire the schema=None "
+        f"path through the vendor SDK."
+    )
+
+
+# ---------------------------------------------------------------------------
 # validate_binding() contracts
 # ---------------------------------------------------------------------------
 
@@ -195,6 +252,7 @@ def test_validate_binding_returns_bool(adapter_runtime: Any) -> None:
 __all__ = [
     "test_close_is_idempotent",
     "test_close_on_fresh_runtime",
+    "test_plain_text_execute_path_is_wired",
     "test_supports_accepts_model_kwarg",
     "test_supports_is_idempotent",
     "test_supports_returns_bool_for_every_feature",

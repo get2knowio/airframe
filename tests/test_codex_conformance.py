@@ -8,6 +8,7 @@ from airframe.adapters.codex import CodexRuntime
 from airframe.testing.contracts import (  # noqa: F401
     test_close_is_idempotent,
     test_close_on_fresh_runtime,
+    test_plain_text_execute_path_is_wired,
     test_supports_accepts_model_kwarg,
     test_supports_is_idempotent,
     test_supports_returns_bool_for_every_feature,
