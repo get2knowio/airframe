@@ -10,8 +10,39 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 Phase 0 of the [implementation plan](docs/implementation-plan.md):
 foundations that lock the shape of every extension point Phases 1–6
-will use. No new vendor features yet — the surface is the scaffold
-later phases build on.
+will use, plus a v0 contract-gap fix that wires plain-text
+`execute(schema=None)` across every built-in adapter.
+
+### Fixed
+
+- Plain-text `execute(schema=None)` is honoured on every built-in
+  adapter, closing a v0 contract gap. The
+  `AgentRuntime.execute()` docstring has always promised
+  "`None` means plain text — text answer on `RuntimeResult.text`,
+  `structured=None`," but `ClaudeCodeRuntime`, `CopilotRuntime`, and
+  `CodexRuntime` refused with `NotImplementedError`.
+  (`OpenAICompatibleRuntime` / `OpenCodeZenRuntime` were already
+  correct.) Per-adapter wiring:
+  - `ClaudeCodeRuntime` — omits `output_format` from
+    `ClaudeAgentOptions` when `schema is None`;
+    `ResultMessage.result` carries the final assistant text. Cache
+    key uses a `"__plain_text__"` sentinel so plain-text and
+    structured sessions don't collide on `(model, system)`.
+  - `CopilotRuntime` — doesn't register the `submit_result` tool
+    when `schema is None`; doesn't prepend the forced-tool prefix
+    to the system message; caller-supplied `system=` passes
+    through verbatim.
+  - `CodexRuntime` — omits `outputSchema` from `TurnOptions` when
+    `schema is None`; `turn.final_response` is the free-form text.
+    Empty `final_response` is a legitimate outcome rather than a
+    structured-output violation.
+
+  Motivation: a downstream consumer codebase (Maverick) just
+  migrated five long-running personas onto airframe, each of
+  which grew a single-field Pydantic schema purely to satisfy the
+  `schema is None` gate. With the gate gone, those wrappers
+  vanish and personas call
+  `runtime.execute(prompt, system=PERSONA_SYSTEM_PROMPT)` directly.
 
 ### Added
 
@@ -57,10 +88,12 @@ later phases build on.
   Adapter authors import test functions from
   `airframe.testing.contracts` and provide an `adapter_runtime`
   pytest fixture; pytest collects the imported tests under the local
-  fixture. SQLAlchemy `testing.suite` pattern. Nine structural
+  fixture. SQLAlchemy `testing.suite` pattern. Ten structural
   contracts covering `close()` idempotency,
-  `unwrap(type(self))` returning self, `supports()` purity, and
-  `validate_binding` behaviour.
+  `unwrap(type(self))` returning self, `supports()` purity,
+  `validate_binding` behaviour, and the plain-text `execute()`
+  path being wired
+  (`test_plain_text_execute_path_is_wired`).
 - New `[testing]` pyproject extra brings pytest + pytest-asyncio for
   adapter authors running the conformance suite. The main package
   does not depend on pytest.
@@ -90,9 +123,10 @@ later phases build on.
 ### Deferred
 
 - Behavioural conformance contracts (401 → `RuntimeAuthError`,
-  schema= round-trip, `input_tokens > 0` on a successful call)
-  require live vendor credentials and naturally co-locate with
-  Phase 1 streaming/multi-turn integration test infrastructure. The
+  schema= round-trip, `input_tokens > 0` on a successful call,
+  plain-text round-trip returns non-empty `text`) require live
+  vendor credentials and naturally co-locate with Phase 1
+  streaming/multi-turn integration test infrastructure. The
   existing `examples/probe_*.py` scripts already exercise these
   end-to-end against real vendors. Will land as
   `airframe.testing.integration` in v0.4.0.

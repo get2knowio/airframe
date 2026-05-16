@@ -312,9 +312,7 @@ async def test_execute_plain_text_classifies_session_auth_error(
     rt = CopilotRuntime()
 
     async def fake_send_and_wait(prompt: str, *, timeout: float = 60.0) -> Any:
-        rt._on_event(
-            _FakeEvent(_FakeSessionError(message="bad token", status_code=401))
-        )
+        rt._on_event(_FakeEvent(_FakeSessionError(message="bad token", status_code=401)))
 
     mock_sdk["session"].send_and_wait = fake_send_and_wait
 

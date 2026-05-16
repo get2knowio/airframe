@@ -43,6 +43,18 @@ result = await runtime.execute(
 )
 ```
 
+Plain text works too — omit `schema=` and read `result.text`:
+
+```python
+runtime = ClaudeCodeRuntime()
+result = await runtime.execute(
+    "Summarise this in two paragraphs of free-form markdown.",
+    system="You are a thoughtful technical writer.",
+)
+print(result.text)            # free-form markdown
+assert result.structured is None
+```
+
 Discover providers and models at runtime (for menus, config UIs,
 "what can I install / which models can I pick?"):
 

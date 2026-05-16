@@ -305,6 +305,30 @@ not need to switch on `provider_id` to use it.
 Ordered by ratio of (consumer pain today) × (cross-vendor coverage) ÷
 (abstraction cost).
 
+### Already closed in v0.3.0 — plain-text `execute(schema=None)`
+
+Not a feature addition; a v0 contract-gap fix folded into Phase 0.
+The `AgentRuntime.execute()` docstring promised
+"`None` means plain text — text answer on `RuntimeResult.text`,
+`structured=None`," but three of the four built-in adapters
+(`ClaudeCodeRuntime`, `CopilotRuntime`, `CodexRuntime`) refused
+with `NotImplementedError`. The OpenAI-compatible family was
+correct already. v0.3.0 wires the missing three and adds a
+conformance check (`test_plain_text_execute_path_is_wired` in
+`airframe.testing.contracts`) that every adapter must pass.
+
+**Motivation.** A downstream consumer codebase (Maverick) just
+migrated five long-running personas onto airframe. Each grew a
+single-field Pydantic schema (`Payload(text: str)`) purely to
+satisfy the `schema is None` gate — markdown summaries, free-form
+analyses, agents that write files via tools and only need a "done"
+signal all paid the schema-wrapper tax. With the gate gone, those
+wrappers vanish and personas call
+`runtime.execute(prompt, system=PERSONA_SYSTEM_PROMPT)` directly.
+
+See [implementation-plan.md §"Phase 0 — Foundations" #7](./implementation-plan.md)
+for the per-adapter wiring notes.
+
 ### P0 — Streaming responses
 
 **Why now.** Three of four SDKs are streaming-native. Without a

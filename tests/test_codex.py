@@ -151,9 +151,7 @@ async def test_execute_plain_text_returns_text(mock_sdk: dict[str, Any]) -> None
     ``structured=None``.
     """
     rt = CodexRuntime()
-    mock_sdk["thread"].run = AsyncMock(
-        return_value=_FakeTurn(final_response="The answer is 42.")
-    )
+    mock_sdk["thread"].run = AsyncMock(return_value=_FakeTurn(final_response="The answer is 42."))
 
     result = await rt.execute(
         "ask something",
@@ -242,9 +240,7 @@ async def test_execute_plain_text_classifies_auth_error(
     from openai_codex_sdk.errors import CodexAuthError
 
     rt = CodexRuntime()
-    mock_sdk["thread"].run = AsyncMock(
-        side_effect=CodexAuthError("no auth.json found")
-    )
+    mock_sdk["thread"].run = AsyncMock(side_effect=CodexAuthError("no auth.json found"))
 
     with pytest.raises(RuntimeAuthError):
         await rt.execute("hi")

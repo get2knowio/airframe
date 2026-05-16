@@ -102,6 +102,59 @@ these primitives existing.
    deferred per §6.15 #6 until a third-party adapter author
    actually asks.
 
+7. **Plain-text `execute(schema=None)` across all built-in adapters**
+   — closes a v0 contract gap where the
+   `AgentRuntime.execute()` docstring promised
+   "`None` means plain text — text answer on `RuntimeResult.text`,
+   `structured=None`" but `ClaudeCodeRuntime`,
+   `CopilotRuntime`, and `CodexRuntime` refused with
+   `NotImplementedError`. `OpenAICompatibleRuntime` (and therefore
+   `OpenCodeZenRuntime`) already honoured the contract — only the
+   conformance test ratifying it is new for that adapter.
+
+   **Motivation.** A downstream consumer codebase (Maverick) just
+   migrated five long-running personas onto airframe. Each grew a
+   single-field Pydantic schema (`Payload(text: str)`) purely to
+   satisfy the `schema is None` gate — markdown summaries, free-form
+   analyses, agents that write files via tools and only need a
+   "done" signal all paid the schema-wrapper tax. Once the gate is
+   gone, those wrappers vanish and personas call
+   `runtime.execute(prompt, system=PERSONA_SYSTEM_PROMPT)` directly.
+
+   **Per-adapter implementation notes:**
+
+   * `ClaudeCodeRuntime` — don't pass `output_format` on
+     `ClaudeAgentOptions` when `schema is None`.
+     `ResultMessage.result` already carries the concatenated final
+     assistant text. The `_ensure_client` cache key uses the literal
+     sentinel `"__plain_text__"` so plain-text and structured
+     sessions don't collide on `(model, system)`.
+   * `CopilotRuntime` — don't register the `submit_result` tool
+     when `schema is None`; don't prepend the forced-tool prefix to
+     the system message. The final `AssistantMessageData.content`
+     event lands on `RuntimeResult.text`. Caller-supplied
+     `system=` passes through verbatim — load-bearing for
+     downstream personas.
+   * `CodexRuntime` — omit `outputSchema` from `TurnOptions` when
+     `schema is None`. `turn.final_response` is the free-form text.
+     Empty `final_response` is a legitimate outcome (tool-only
+     turn that wrote files and stopped) rather than a
+     structured-output violation.
+   * `OpenAICompatibleRuntime` — already correct (the body short-
+     circuits on `schema is not None` before building
+     `response_format`); only the conformance test is added.
+
+   **Conformance.** `airframe.testing.contracts` gains
+   `test_plain_text_execute_path_is_wired` — a structural check that
+   the `execute()` signature accepts `schema=None` (default) and the
+   implementation doesn't carry the historical
+   `"plain-text execute() is not wired in v0"` sentinel. Every
+   in-tree adapter's conformance file imports it and passes. A
+   behavioural variant validating the actual returned text shape
+   needs live vendor credentials and lives in
+   `airframe.testing.integration` (deferred to v0.4.0 alongside the
+   other network-required contracts).
+
 **Non-goals (deferred).**
 
 * No new feature kwargs on `execute()`. The `Feature` enum's initial
@@ -201,21 +254,39 @@ keyed off `Feature` — no network calls, no SDK-version sniffing.
 **Definition of done.**
 
 * All four adapters report capability truth via `supports()`.
+* All four adapters honour the protocol's plain-text contract:
+  `execute(prompt, schema=None)` returns a `RuntimeResult` with
+  `text` populated and `structured=None`; `system=` forwarded to
+  the vendor verbatim; `persona=` accepted (no crash) regardless
+  of whether the adapter consumes it.
 * `airframe.testing.contracts` ships the following test functions
   and every in-tree adapter has a conformance test file that
   imports them, provides an `adapter_runtime` fixture, and passes:
   - `close()` is idempotent.
-  - `validate_binding(b) == True` ⇒ `execute(model=b, ...)` does not
-    raise `UnsupportedBindingError`.
-  - `supports(STRUCTURED_OUTPUT_JSON_SCHEMA)` ⇒ schema round-trip
-    succeeds against a canonical Pydantic model.
-  - 401 from the vendor ⇒ `RuntimeAuthError`.
-  - Successful call ⇒ `CostRecord.input_tokens > 0`.
-  - `unwrap(self.__class__)` returns `self`.
+  - `unwrap(type(self))` returns `self`.
+  - `unwrap(<unrelated>)` raises `TypeError`.
+  - `supports()` returns `bool` for every `Feature` member.
+  - `supports()` is idempotent.
+  - `supports(STRUCTURED_OUTPUT_JSON_SCHEMA)` is `True`.
+  - `supports(feature, model=binding)` accepts the model kwarg.
+  - `validate_binding(binding)` returns `bool`; rejects foreign
+    provider IDs.
+  - `execute()` signature accepts `schema=None` (default) and the
+    plain-text path is wired (no legacy
+    `"plain-text execute() is not wired in v0"` gate).
 * README documents how to register a third-party adapter via the
   `airframe.adapters` entry-point group.
 * New `examples/probe_supports.py` lists every adapter × feature
   combination.
+
+**Deferred to `airframe.testing.integration` (v0.4.0).** The
+behavioural contracts that require live vendor credentials —
+schema round-trip succeeds, 401 ⇒ `RuntimeAuthError`, successful
+call ⇒ `CostRecord.input_tokens > 0`, plain-text round-trip
+returns non-empty `text` — naturally co-locate with Phase 1's
+streaming/multi-turn integration test infrastructure. The
+existing `examples/probe_*.py` scripts already exercise these
+end-to-end against real vendors.
 
 **Version target.** `v0.3.0` (minor bump — pre-1.0, but the new
 protocol methods are large enough to warrant signalling).
@@ -833,7 +904,7 @@ nature.
 
 | Phase | Theme | Version | External unblocks | Major shape-lock decisions |
 | --- | --- | --- | --- | --- |
-| 0 | Foundations | v0.3.0 | ⚡ **Third-party adapters** (entry-points + TCK) | `Feature` enum values; `ProviderOptions` shape |
+| 0 | Foundations + plain-text `execute()` fix | v0.3.0 | ⚡ **Third-party adapters** (entry-points + TCK) | `Feature` enum values; `ProviderOptions` shape |
 | 1 | `AgentSession` + streaming | v0.4.0 | Streaming consumers | `RuntimeEvent` union; session-id optional |
 | 2 | Inputs + reasoning | v0.5.0 | Vision/reasoning consumers | `ThinkingMode` shape |
 | 3 | Function tools | v0.6.0 | Tool-using consumers | `FunctionTool.handler` shape |
