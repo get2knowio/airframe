@@ -306,7 +306,7 @@ async def test_reset_with_no_client_is_noop() -> None:
     rt = ClaudeCodeRuntime()
     # Should not raise even with no client constructed yet.
     await rt.reset()
-    await rt.aclose()
+    await rt.close()
 
 
 def test_api_key_override_passes_through_env(mock_sdk: dict[str, MagicMock]) -> None:

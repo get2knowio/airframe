@@ -11,7 +11,7 @@ subprocess, no real OpenAI calls. Validates:
 * Empty / non-JSON final response → :class:`RuntimeStructuredOutputError`.
 * SDK error classification: auth / install / exec / thread-run.
 * Cost record populated from ``Turn.usage``.
-* Lifecycle: ``reset()`` drops the thread; ``aclose()`` drops the client.
+* Lifecycle: ``reset()`` drops the thread; ``close()`` drops the client.
 * Thread caching by model.
 * Auth resolution chain: explicit key → env → opencode auth.json →
   fall-through.
@@ -447,11 +447,11 @@ async def test_reset_drops_thread(mock_sdk: dict[str, Any]) -> None:
 
 
 @pytest.mark.asyncio
-async def test_aclose_drops_thread_and_client(mock_sdk: dict[str, Any]) -> None:
+async def test_close_drops_thread_and_client(mock_sdk: dict[str, Any]) -> None:
     rt = CodexRuntime()
     await rt.execute("hi", schema=_Schema)
 
-    await rt.aclose()
+    await rt.close()
     assert rt._thread is None
     assert rt._client is None
 
@@ -460,7 +460,7 @@ async def test_aclose_drops_thread_and_client(mock_sdk: dict[str, Any]) -> None:
 async def test_reset_with_no_thread_is_noop() -> None:
     rt = CodexRuntime()
     await rt.reset()
-    await rt.aclose()
+    await rt.close()
 
 
 @pytest.mark.asyncio

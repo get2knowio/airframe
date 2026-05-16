@@ -13,7 +13,7 @@ Design principles:
 1. **Runtime owns its lifecycle.** Subprocesses, HTTP pools, auth
    tokens, session state — all hidden behind the protocol. The
    consumer interface is :meth:`execute`, :meth:`reset`,
-   :meth:`aclose`.
+   :meth:`close`.
 2. **No opaque handles in the consumer interface.** Avoid
    ``session_id``-juggling. The runtime hides any session state
    inside its own instance.
@@ -177,12 +177,12 @@ class AgentRuntime(Protocol):
         adapters can no-op. Cheap to call; never raises.
 
         Runtime-wide resources (subprocess pool, HTTP client, auth
-        tokens) are kept across :meth:`reset`. Use :meth:`aclose`
+        tokens) are kept across :meth:`reset`. Use :meth:`close`
         for full teardown.
         """
         ...
 
-    async def aclose(self) -> None:
+    async def close(self) -> None:
         """Release runtime-wide resources.
 
         Idempotent. Implementations must not raise — teardown errors

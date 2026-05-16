@@ -9,7 +9,7 @@ Mocks the ``openai`` SDK at the boundary — no real Zen calls. Validates:
 * Error classification (auth, rate-limit, 5xx, bad-request).
 * Cost record from response.usage.
 * Cost computation against the stub pricing map.
-* aclose() closes the underlying client.
+* close() closes the underlying client.
 """
 
 from __future__ import annotations
@@ -374,19 +374,19 @@ async def test_reset_is_noop() -> None:
 
 
 @pytest.mark.asyncio
-async def test_aclose_closes_client(mock_client: MagicMock) -> None:
+async def test_close_closes_client(mock_client: MagicMock) -> None:
     rt = OpenCodeZenRuntime(api_key="sk-test")
     await rt.execute("hi", schema=_Schema)
     assert rt._client is not None  # noqa: SLF001
-    await rt.aclose()
+    await rt.close()
     assert rt._client is None  # noqa: SLF001
     mock_client.close.assert_awaited_once()
 
 
 @pytest.mark.asyncio
-async def test_aclose_without_client_is_noop() -> None:
+async def test_close_without_client_is_noop() -> None:
     rt = OpenCodeZenRuntime(api_key="sk-test")
-    await rt.aclose()  # Should not raise.
+    await rt.close()  # Should not raise.
 
 
 # --- Sanity check on CostRecord shape ----------------------------------------

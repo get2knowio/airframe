@@ -38,7 +38,7 @@ as JSON — no tool-forcing pattern needed.
 drains its JSONL event stream, and returns a typed ``Turn``. So
 there's no persistent server to manage. ``reset()`` drops the
 current thread (the next ``execute()`` starts a fresh one);
-``aclose()`` is equivalent.
+``close()`` is equivalent.
 
 **Claude is not routed here.** Codex is OpenAI-only by design.
 :meth:`validate_binding` rejects any ``model_id`` starting with
@@ -255,7 +255,7 @@ class CodexRuntime(AgentRuntime):
         self._thread = None
         self._thread_key = None
 
-    async def aclose(self) -> None:
+    async def close(self) -> None:
         await self.reset()
         # Codex() holds no persistent resources — no subprocess pool,
         # no HTTP client. Dropping the reference is sufficient.

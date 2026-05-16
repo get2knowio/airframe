@@ -33,7 +33,7 @@ yet report ``cost_usd=None`` — the structured-log row still fires
 with token counts intact.
 
 **Lifecycle.** Stateless HTTP. ``reset()`` is a no-op (no session
-state to drop). ``aclose()`` closes the underlying ``AsyncOpenAI``
+state to drop). ``close()`` closes the underlying ``AsyncOpenAI``
 client's HTTP pool.
 """
 
@@ -217,7 +217,7 @@ class OpenCodeZenRuntime(AgentRuntime):
         """No-op: Zen calls are stateless HTTP."""
         return None
 
-    async def aclose(self) -> None:
+    async def close(self) -> None:
         client = self._client
         self._client = None
         if client is None:

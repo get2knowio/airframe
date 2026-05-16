@@ -62,7 +62,7 @@ async def main() -> int:
 
         traceback.print_exc()
 
-    await runtime.aclose()
+    await runtime.close()
 
     if err is not None:
         print(f"\nFAIL: {err}")

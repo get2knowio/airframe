@@ -20,7 +20,7 @@ Quick start::
     )
     print(result.structured)         # {"summary": "...", "risks": [...]}
     print(result.cost.cost_usd)      # 0.0042
-    await runtime.aclose()
+    await runtime.close()
 
 Each adapter's SDK is an optional install (``pip install
 airframe-agents[claude]``); see the README for the full extras matrix.

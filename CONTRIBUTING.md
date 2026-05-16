@@ -33,7 +33,7 @@ A new adapter PR should include:
 3. **`tests/test_<vendor>.py`** — unit tests with the SDK mocked at
    the boundary. Cover binding validation, structured-output happy
    path, missing structured output, full error classification matrix,
-   timeout, lifecycle (`reset` / `aclose`), and cost.
+   timeout, lifecycle (`reset` / `close`), and cost.
 4. **`examples/probe_<vendor>.py`** — end-to-end probe against the
    real vendor. Required to verify the adapter works against the
    actual SDK; the unit tests prove the contract, the probe proves

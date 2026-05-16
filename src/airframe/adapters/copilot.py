@@ -37,7 +37,7 @@ session recreation because the tool list, model, and system message
 are baked into ``create_session()`` at session-creation time.
 Subsequent ``execute()`` calls on the same triple reuse the session.
 ``reset()`` destroys the session; the next ``execute()`` creates a
-fresh one. ``aclose()`` destroys the session and disconnects the
+fresh one. ``close()`` destroys the session and disconnects the
 underlying client.
 
 **Cost.** The SDK emits one ``AssistantUsageData`` event per model
@@ -208,7 +208,7 @@ class CopilotRuntime(AgentRuntime):
         except Exception as exc:  # noqa: BLE001 — teardown never raises
             logger.debug("copilot_runtime.reset_failed error=%s", exc)
 
-    async def aclose(self) -> None:
+    async def close(self) -> None:
         await self.reset()
         client = self._client
         self._client = None

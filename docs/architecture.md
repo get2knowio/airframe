@@ -41,7 +41,7 @@ Every vendor lives behind it.
                 │     AgentRuntime         │
                 │  • execute()             │
                 │  • reset()               │
-                │  • aclose()              │
+                │  • close()              │
                 │  • validate_binding()    │
                 └──────────────────────────┘
                               │
@@ -70,8 +70,8 @@ predicates) and stays out of the way.
 * **`execute` takes a `schema` keyword.** Structured output is
   first-class because that's how typed agent payloads work. Plain
   text is the fallback when `schema=None`.
-* **`reset` exists separately from `aclose`.** Reset is "drop the
-  conversation, keep the connection"; aclose is "drop everything."
+* **`reset` exists separately from `close`.** Reset is "drop the
+  conversation, keep the connection"; close is "drop everything."
   In practice consumers call `reset()` between task boundaries to
   keep the vendor's prompt-cache fresh within a scope while dropping
   it between scopes.
@@ -166,9 +166,9 @@ These are the sharp edges the adapters absorb so you don't have to.
 
 ## Lifecycle contract
 
-`aclose()` is idempotent and never raises. Teardown errors get
+`close()` is idempotent and never raises. Teardown errors get
 logged at debug level and swallowed. This matters because
-`aclose()` is called from `finally` blocks and async-context-manager
+`close()` is called from `finally` blocks and async-context-manager
 `__aexit__` — the last thing those should do is shadow the real
 exception.
 

@@ -12,7 +12,7 @@ subprocess, no real GitHub Copilot calls. Validates:
   (auth / model-not-found / transient / protocol).
 * CLI-not-found → :class:`RuntimeServerStartError`.
 * Cost record populated from :class:`AssistantUsageData` event.
-* ``reset()`` destroys the session; ``aclose()`` also disconnects.
+* ``reset()`` destroys the session; ``close()`` also disconnects.
 """
 
 from __future__ import annotations
@@ -498,7 +498,7 @@ async def test_reset_destroys_session(mock_sdk: dict[str, Any]) -> None:
 
 
 @pytest.mark.asyncio
-async def test_aclose_destroys_session_and_disconnects_client(
+async def test_close_destroys_session_and_disconnects_client(
     mock_sdk: dict[str, Any],
 ) -> None:
     rt = CopilotRuntime()
@@ -509,7 +509,7 @@ async def test_aclose_destroys_session_and_disconnects_client(
     mock_sdk["session"].send_and_wait = fake_send_and_wait
     await rt.execute("hi", schema=_Schema)
 
-    await rt.aclose()
+    await rt.close()
     assert rt._client is None
     assert rt._session is None
     assert mock_sdk["client"].stop.await_count >= 1
@@ -519,7 +519,7 @@ async def test_aclose_destroys_session_and_disconnects_client(
 async def test_reset_with_no_session_is_noop() -> None:
     rt = CopilotRuntime()
     await rt.reset()
-    await rt.aclose()
+    await rt.close()
 
 
 # ---------------------------------------------------------------------------

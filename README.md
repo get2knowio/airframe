@@ -21,7 +21,7 @@ result = await runtime.execute(
 )
 print(result.structured)     # {"summary": "...", "risks": [...]}
 print(result.cost.cost_usd)  # 0.0042
-await runtime.aclose()
+await runtime.close()
 ```
 
 Swap the adapter, keep the schema:
@@ -46,7 +46,7 @@ OpenAI's Codex SDK passes a JSON Schema flag to a CLI subprocess;
 the opencode-go Zen gateway speaks OpenAI-compatible HTTP. Each has
 its own auth chain, error taxonomy, cost-reporting shape, and
 structured-output mechanism. Airframe collapses those differences
-behind one `execute / reset / aclose / validate_binding` interface,
+behind one `execute / reset / close / validate_binding` interface,
 classifies every vendor's failures into a single hierarchy, and
 produces a single `CostRecord` shape regardless of the vendor.
 
@@ -110,7 +110,7 @@ class AgentRuntime(Protocol):
     ) -> RuntimeResult: ...
 
     async def reset(self) -> None: ...
-    async def aclose(self) -> None: ...
+    async def close(self) -> None: ...
     def validate_binding(self, binding: ProviderModel) -> bool: ...
 ```
 
@@ -119,7 +119,7 @@ class AgentRuntime(Protocol):
 * **`reset`** — drop accumulated context for a fresh scope
   (typically between tasks). Runtime-wide resources (subprocess
   pool, HTTP client) survive.
-* **`aclose`** — full teardown. Idempotent; never raises.
+* **`close`** — full teardown. Idempotent; never raises.
 * **`validate_binding`** — predicate: does this runtime serve a
   given `(provider_id, model_id)`? Cheap and non-async; suitable for
   filtering bindings before attempting them.

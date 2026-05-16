@@ -83,7 +83,7 @@ async def main() -> int:
             "    2. `export OPENAI_API_KEY=sk-...`\n"
             "  Then re-run this probe."
         )
-        await runtime.aclose()
+        await runtime.close()
         return 0
 
     # --- Probe 1: structured output ----------------------------------------
@@ -107,7 +107,7 @@ async def main() -> int:
 
         traceback.print_exc()
 
-    await runtime.aclose()
+    await runtime.close()
 
     if err is not None:
         print(f"\nFAIL: {err}")

@@ -13,7 +13,7 @@ through five migration phases.
 
 ### Added
 
-- `AgentRuntime` protocol with `execute / reset / aclose /
+- `AgentRuntime` protocol with `execute / reset / close /
   validate_binding`.
 - `RuntimeResult`, `CostRecord`, `ProviderModel` data types.
 - Vendor-agnostic error hierarchy: `AgentRuntimeError` base plus

@@ -35,7 +35,7 @@ change to that triple forces a reconnect because the MCP tool's
 ``input_schema`` is baked into ``ClaudeAgentOptions`` at connect time.
 Subsequent ``execute()`` calls reuse the subprocess (warm cache
 accrues). ``reset()`` disconnects; the next ``execute()`` reconnects.
-``aclose()`` is equivalent to ``reset()`` here.
+``close()`` is equivalent to ``reset()`` here.
 
 **Cost.** The SDK exposes ``total_cost_usd`` on the
 ``ResultMessage`` — populated directly into the
@@ -210,7 +210,7 @@ class ClaudeCodeRuntime(AgentRuntime):
         except Exception as exc:  # noqa: BLE001 — teardown never raises
             logger.debug("claude_code_runtime.reset_failed error=%s", exc)
 
-    async def aclose(self) -> None:
+    async def close(self) -> None:
         await self.reset()
 
     def validate_binding(self, binding: ProviderModel) -> bool:
