@@ -51,7 +51,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-from typing import Any, ClassVar
+from typing import Any, ClassVar, TypeVar
 
 from pydantic import BaseModel, ValidationError
 
@@ -75,6 +75,8 @@ from airframe.protocol import (
 )
 
 logger = logging.getLogger(__name__)
+
+T = TypeVar("T")
 
 #: Default Copilot model when no binding is specified. GPT-5 mini is
 #: the v0 default because it's the cheapest stable tier on the
@@ -245,6 +247,31 @@ class CopilotRuntime(AgentRuntime):
 
     def supports(self, feature: Feature, model: ProviderModel | None = None) -> bool:
         return feature in self.SUPPORTED_FEATURES
+
+    def unwrap(self, cls: type[T]) -> T:
+        from copilot import CopilotClient
+        from copilot.session import CopilotSession
+
+        if isinstance(self, cls):
+            return self  # type: ignore[return-value]
+        if cls is CopilotClient:
+            if self._client is None:
+                raise TypeError(
+                    "CopilotRuntime.unwrap(CopilotClient): no client exists yet "
+                    "— call execute() first."
+                )
+            return self._client  # type: ignore[return-value]
+        if cls is CopilotSession:
+            if self._session is None:
+                raise TypeError(
+                    "CopilotRuntime.unwrap(CopilotSession): no session exists yet "
+                    "— call execute() first."
+                )
+            return self._session  # type: ignore[return-value]
+        raise TypeError(
+            f"CopilotRuntime cannot unwrap to {cls!r}; supported types are "
+            f"CopilotRuntime, copilot.CopilotClient, and copilot.session.CopilotSession."
+        )
 
     async def list_models(self) -> list[ModelInfo]:
         """Return the live model menu from Copilot's CLI.

@@ -43,7 +43,7 @@ import json
 import logging
 import os
 from dataclasses import dataclass, field
-from typing import Any, ClassVar
+from typing import Any, ClassVar, TypeVar
 
 from pydantic import BaseModel
 
@@ -66,6 +66,8 @@ from airframe.protocol import (
 )
 
 logger = logging.getLogger(__name__)
+
+T = TypeVar("T")
 
 
 @dataclass(frozen=True, slots=True)
@@ -234,6 +236,19 @@ class OpenAICompatibleRuntime(AgentRuntime):
 
     def supports(self, feature: Feature, model: ProviderModel | None = None) -> bool:
         return feature in self.SUPPORTED_FEATURES
+
+    def unwrap(self, cls: type[T]) -> T:
+        from openai import AsyncOpenAI
+
+        if isinstance(self, cls):
+            return self  # type: ignore[return-value]
+        if cls is AsyncOpenAI:
+            # Build lazily — same pattern execute() / list_models() use.
+            return self._ensure_client()  # type: ignore[return-value]
+        raise TypeError(
+            f"{type(self).__name__} cannot unwrap to {cls!r}; supported types are "
+            f"{type(self).__name__} and openai.AsyncOpenAI."
+        )
 
     async def list_models(self) -> list[ModelInfo]:
         """Return the live model menu from the vendor.

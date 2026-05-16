@@ -31,7 +31,7 @@ Design principles:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, TypeVar, runtime_checkable
 
 from pydantic import BaseModel
 
@@ -40,6 +40,8 @@ from airframe.cost import CostRecord
 if TYPE_CHECKING:
     from airframe.features import Feature
     from airframe.models import ModelInfo
+
+T = TypeVar("T")
 
 
 @dataclass(frozen=True, slots=True)
@@ -228,6 +230,47 @@ class AgentRuntime(Protocol):
 
         Consumers should surface these to the user *before* letting
         them commit to a model selection.
+        """
+        ...
+
+    def unwrap(self, cls: type[T]) -> T:
+        """Return the underlying vendor object cast to ``cls``.
+
+        The documented escape hatch around airframe's portable surface,
+        modelled on JDBC 4.0's :class:`java.sql.Wrapper` interface.
+        When the portable protocol doesn't expose a vendor-specific
+        capability, the consumer reaches the native client (or session,
+        or thread) directly through ``unwrap(NativeType)``.
+
+        Per-adapter mappings (Phase 0):
+
+        * :class:`ClaudeCodeRuntime` accepts
+          ``unwrap(ClaudeSDKClient)`` — returns the live SDK client
+          when one exists (after the first ``execute()``); raises
+          :class:`TypeError` if requested before a client is built.
+        * :class:`CopilotRuntime` accepts ``unwrap(CopilotClient)`` and
+          ``unwrap(CopilotSession)``.
+        * :class:`CodexRuntime` accepts ``unwrap(Codex)`` and
+          ``unwrap(Thread)``.
+        * :class:`OpenAICompatibleRuntime` accepts ``unwrap(AsyncOpenAI)``.
+
+        Every adapter additionally accepts ``unwrap(type(self))`` and
+        returns ``self`` — the trivial case that keeps the contract
+        consistent across runtimes.
+
+        Args:
+            cls: The native type the caller wants to reach. Use a real
+                type (e.g. ``from claude_agent_sdk import ClaudeSDKClient;
+                runtime.unwrap(ClaudeSDKClient)``), not a string name.
+
+        Returns:
+            The underlying vendor object.
+
+        Raises:
+            TypeError: when this runtime can't satisfy ``cls`` (the
+                requested type isn't one of the runtime's native
+                objects, or the lazily-constructed object hasn't
+                been built yet).
         """
         ...
 

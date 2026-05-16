@@ -59,7 +59,7 @@ import json
 import logging
 import os
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import Any, ClassVar, TypeVar
 
 from pydantic import BaseModel
 
@@ -81,6 +81,8 @@ from airframe.protocol import (
 )
 
 logger = logging.getLogger(__name__)
+
+T = TypeVar("T")
 
 #: Default Codex model when no binding is specified. ``gpt-5-codex``
 #: is the v0 default — the standard codex model. Selected per-call
@@ -290,6 +292,30 @@ class CodexRuntime(AgentRuntime):
 
     def supports(self, feature: Feature, model: ProviderModel | None = None) -> bool:
         return feature in self.SUPPORTED_FEATURES
+
+    def unwrap(self, cls: type[T]) -> T:
+        from openai_codex_sdk import Codex, Thread
+
+        if isinstance(self, cls):
+            return self  # type: ignore[return-value]
+        if cls is Codex:
+            if self._client is None:
+                raise TypeError(
+                    "CodexRuntime.unwrap(Codex): no client exists yet — "
+                    "call execute() first."
+                )
+            return self._client  # type: ignore[return-value]
+        if cls is Thread:
+            if self._thread is None:
+                raise TypeError(
+                    "CodexRuntime.unwrap(Thread): no thread exists yet — "
+                    "call execute() first."
+                )
+            return self._thread  # type: ignore[return-value]
+        raise TypeError(
+            f"CodexRuntime cannot unwrap to {cls!r}; supported types are "
+            f"CodexRuntime, openai_codex_sdk.Codex, and openai_codex_sdk.Thread."
+        )
 
     async def list_models(self) -> list[ModelInfo]:
         """Return the codex-tier models from OpenAI's models endpoint.

@@ -44,7 +44,7 @@ import asyncio
 import logging
 import os
 from dataclasses import dataclass, field
-from typing import Any, ClassVar
+from typing import Any, ClassVar, TypeVar
 
 from pydantic import BaseModel
 
@@ -67,6 +67,8 @@ from airframe.protocol import (
 )
 
 logger = logging.getLogger(__name__)
+
+T = TypeVar("T")
 
 #: Default Claude model when no binding is specified.
 DEFAULT_CLAUDE_MODEL = "claude-haiku-4-5"
@@ -244,6 +246,27 @@ class ClaudeCodeRuntime(AgentRuntime):
 
     def supports(self, feature: Feature, model: ProviderModel | None = None) -> bool:
         return feature in self.SUPPORTED_FEATURES
+
+    def unwrap(self, cls: type[T]) -> T:
+        # Late-import to avoid pulling claude-agent-sdk during module
+        # load. Users calling unwrap() have already accepted the SDK
+        # dependency by instantiating the runtime.
+        from claude_agent_sdk import ClaudeSDKClient
+
+        if isinstance(self, cls):
+            return self  # type: ignore[return-value]
+        if cls is ClaudeSDKClient:
+            if self._client is None:
+                raise TypeError(
+                    "ClaudeCodeRuntime.unwrap(ClaudeSDKClient): no client "
+                    "exists yet — call execute() first or use the runtime "
+                    "instance directly for setup."
+                )
+            return self._client  # type: ignore[return-value]
+        raise TypeError(
+            f"ClaudeCodeRuntime cannot unwrap to {cls!r}; supported types are "
+            f"ClaudeCodeRuntime and claude_agent_sdk.ClaudeSDKClient."
+        )
 
     async def list_models(self) -> list[ModelInfo]:
         """Return live Claude models from Anthropic's ``/v1/models``.
