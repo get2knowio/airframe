@@ -4,12 +4,14 @@ Mocks :mod:`claude_agent_sdk` at the boundary — no real subprocess, no
 real Anthropic calls. Validates:
 
 * Binding validation (Claude bindings pass; non-Claude bindings rejected).
-* Structured-output happy path captures the tool args.
-* Missing tool call → :class:`RuntimeStructuredOutputError`.
+* Structured-output happy path: ``ResultMessage.structured_output``
+  lands on :attr:`RuntimeResult.structured`.
+* Missing ``structured_output`` → :class:`RuntimeStructuredOutputError`.
 * SDK auth failure → :class:`RuntimeAuthError`.
 * SDK transient → :class:`RuntimeTransientError`.
 * SDK CLI-not-found → :class:`RuntimeServerStartError`.
 * Cost record populated from ``ResultMessage.usage`` + ``total_cost_usd``.
+* ``ClaudeAgentOptions.output_format`` is set to the schema's JSON Schema.
 """
 
 from __future__ import annotations
@@ -20,10 +22,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from pydantic import BaseModel
 
-from airframe.adapters.claude_code import (
-    SUBMIT_RESULT_TOOL,
-    ClaudeCodeRuntime,
-)
+from airframe.adapters.claude_code import ClaudeCodeRuntime
 from airframe.errors import (
     AgentRuntimeError,
     RuntimeAuthError,
@@ -54,6 +53,7 @@ class _FakeResultMessage:
         is_error: bool = False,
         stop_reason: str | None = "end_turn",
         result: str | None = "",
+        structured_output: Any = None,
         total_cost_usd: float | None = 0.05,
         usage: dict[str, Any] | None = None,
         subtype: str | None = None,
@@ -62,6 +62,7 @@ class _FakeResultMessage:
         self.is_error = is_error
         self.stop_reason = stop_reason
         self.result = result
+        self.structured_output = structured_output
         self.total_cost_usd = total_cost_usd
         self.usage = usage or {
             "input_tokens": 100,
@@ -75,10 +76,7 @@ class _FakeResultMessage:
 
 @pytest.fixture
 def mock_sdk(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
-    """Mock the ``claude_agent_sdk`` symbols ``ClaudeCodeRuntime`` imports lazily.
-
-    Returns a dict of the mock objects so tests can program return values.
-    """
+    """Mock the ``claude_agent_sdk`` symbols ``ClaudeCodeRuntime`` imports lazily."""
     import claude_agent_sdk as sdk
 
     mock_client = MagicMock()
@@ -87,25 +85,8 @@ def mock_sdk(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     mock_client.query = AsyncMock()
     mock_client_factory = MagicMock(return_value=mock_client)
 
-    mock_server = MagicMock()
-
-    def fake_tool(
-        name: str,
-        description: str,
-        input_schema: Any,
-    ) -> Any:
-        """Stand-in ``@tool`` decorator that returns the wrapped function."""
-
-        def decorator(fn: Any) -> Any:
-            fn._tool_name = name
-            return fn
-
-        return decorator
-
     monkeypatch.setattr(sdk, "ClaudeSDKClient", mock_client_factory)
     monkeypatch.setattr(sdk, "ClaudeAgentOptions", MagicMock())
-    monkeypatch.setattr(sdk, "create_sdk_mcp_server", MagicMock(return_value=mock_server))
-    monkeypatch.setattr(sdk, "tool", fake_tool)
     monkeypatch.setattr(sdk, "ResultMessage", _FakeResultMessage)
 
     return {
@@ -147,19 +128,14 @@ async def test_execute_text_only_not_implemented() -> None:
 
 
 @pytest.mark.asyncio
-async def test_execute_captures_structured_output(mock_sdk: dict[str, MagicMock]) -> None:
-    """Tool callback fires → captured args land in RuntimeResult.structured."""
+async def test_execute_returns_structured_output(mock_sdk: dict[str, MagicMock]) -> None:
+    """``ResultMessage.structured_output`` lands on ``RuntimeResult.structured``."""
     rt = ClaudeCodeRuntime()
 
-    expected_args = {"summary": "ok", "count": 42}
-    final = _FakeResultMessage()
+    expected = {"summary": "ok", "count": 42}
+    final = _FakeResultMessage(structured_output=expected)
 
     async def fake_receive() -> Any:
-        # Simulate the SDK firing the @sdk_tool callback during the stream.
-        # In production the SDK calls into the user-defined tool via MCP;
-        # for the unit test we invoke the captured closure directly.
-        assert rt._captured_args is None  # noqa: SLF001 — internal-state check
-        rt._captured_args = dict(expected_args)
         yield final
 
     mock_sdk["client"].receive_response = fake_receive
@@ -170,7 +146,7 @@ async def test_execute_captures_structured_output(mock_sdk: dict[str, MagicMock]
         model=ProviderModel("anthropic", "claude-haiku-4-5"),
     )
 
-    assert result.structured == expected_args
+    assert result.structured == expected
     assert result.finish == "end_turn"
     assert result.cost.cost_usd == 0.05
     assert result.cost.input_tokens == 100
@@ -182,16 +158,20 @@ async def test_execute_captures_structured_output(mock_sdk: dict[str, MagicMock]
 
 
 @pytest.mark.asyncio
-async def test_execute_missing_tool_call_raises_structured_output_error(
+async def test_execute_missing_structured_output_raises(
     mock_sdk: dict[str, MagicMock],
 ) -> None:
-    """If the model finishes without calling submit_result, we raise."""
+    """If the SDK returns without a structured_output payload, we raise."""
     rt = ClaudeCodeRuntime()
 
-    final = _FakeResultMessage(stop_reason="end_turn", result="I refuse to call the tool")
+    final = _FakeResultMessage(
+        stop_reason="end_turn",
+        result="I refused to produce structured output",
+        structured_output=None,
+    )
 
     async def fake_receive() -> Any:
-        yield final  # No tool callback fired — captured_args stays None.
+        yield final
 
     mock_sdk["client"].receive_response = fake_receive
 
@@ -285,11 +265,9 @@ async def test_execute_timeout_raises_transient_error(
 @pytest.mark.asyncio
 async def test_reset_disconnects_client(mock_sdk: dict[str, MagicMock]) -> None:
     rt = ClaudeCodeRuntime()
-    # Force a client to exist by running one execute.
-    final = _FakeResultMessage()
+    final = _FakeResultMessage(structured_output={"summary": "x", "count": 1})
 
     async def fake_receive() -> Any:
-        rt._captured_args = {"summary": "x", "count": 1}  # noqa: SLF001
         yield final
 
     mock_sdk["client"].receive_response = fake_receive
@@ -321,12 +299,12 @@ def test_api_key_override_passes_through_env(mock_sdk: dict[str, MagicMock]) -> 
 
     with patch.object(sdk, "ClaudeAgentOptions", side_effect=capturing_options):
         rt = ClaudeCodeRuntime(api_key="sk-ant-test-key")
-        # _ensure_client constructs ClaudeAgentOptions; the api_key
-        # should land in env. Run it directly (sync slice of the path).
         import asyncio
 
         async def go() -> None:
-            await rt._ensure_client(schema=_Schema, system=None, model="claude-haiku-4-5")  # noqa: SLF001
+            await rt._ensure_client(  # noqa: SLF001
+                schema=_Schema, system=None, model="claude-haiku-4-5"
+            )
 
         asyncio.get_event_loop().run_until_complete(go())
 
@@ -334,6 +312,88 @@ def test_api_key_override_passes_through_env(mock_sdk: dict[str, MagicMock]) -> 
     assert env.get("ANTHROPIC_API_KEY") == "sk-ant-test-key"
 
 
-def test_submit_result_tool_name_canonical() -> None:
-    """The MCP tool name is stable — referenced by allowed_tools wiring."""
-    assert SUBMIT_RESULT_TOOL == "submit_result"
+def test_output_format_uses_schema_json_schema(mock_sdk: dict[str, MagicMock]) -> None:
+    """The runtime passes a native json_schema output_format to the SDK."""
+    import claude_agent_sdk as sdk
+
+    captured_kwargs: dict[str, Any] = {}
+
+    def capturing_options(**kwargs: Any) -> MagicMock:
+        captured_kwargs.update(kwargs)
+        return MagicMock()
+
+    with patch.object(sdk, "ClaudeAgentOptions", side_effect=capturing_options):
+        rt = ClaudeCodeRuntime()
+        import asyncio
+
+        async def go() -> None:
+            await rt._ensure_client(  # noqa: SLF001
+                schema=_Schema, system=None, model="claude-haiku-4-5"
+            )
+
+        asyncio.get_event_loop().run_until_complete(go())
+
+    output_format = captured_kwargs.get("output_format")
+    assert output_format == {
+        "type": "json_schema",
+        "schema": _Schema.model_json_schema(),
+    }
+    # No MCP servers / forced tool wiring.
+    assert "mcp_servers" not in captured_kwargs
+    assert "allowed_tools" not in captured_kwargs
+
+
+def test_no_system_prompt_prefix_when_system_is_none(
+    mock_sdk: dict[str, MagicMock],
+) -> None:
+    """Without a caller-supplied system prompt, we don't synthesise one.
+
+    The SDK applies its own default; we no longer prepend a tool-forcing
+    prefix.
+    """
+    import claude_agent_sdk as sdk
+
+    captured_kwargs: dict[str, Any] = {}
+
+    def capturing_options(**kwargs: Any) -> MagicMock:
+        captured_kwargs.update(kwargs)
+        return MagicMock()
+
+    with patch.object(sdk, "ClaudeAgentOptions", side_effect=capturing_options):
+        rt = ClaudeCodeRuntime()
+        import asyncio
+
+        async def go() -> None:
+            await rt._ensure_client(  # noqa: SLF001
+                schema=_Schema, system=None, model="claude-haiku-4-5"
+            )
+
+        asyncio.get_event_loop().run_until_complete(go())
+
+    assert "system_prompt" not in captured_kwargs
+
+
+def test_system_prompt_passes_through_unmodified(mock_sdk: dict[str, MagicMock]) -> None:
+    """Caller-supplied system prompts land in ClaudeAgentOptions verbatim."""
+    import claude_agent_sdk as sdk
+
+    captured_kwargs: dict[str, Any] = {}
+
+    def capturing_options(**kwargs: Any) -> MagicMock:
+        captured_kwargs.update(kwargs)
+        return MagicMock()
+
+    with patch.object(sdk, "ClaudeAgentOptions", side_effect=capturing_options):
+        rt = ClaudeCodeRuntime()
+        import asyncio
+
+        async def go() -> None:
+            await rt._ensure_client(  # noqa: SLF001
+                schema=_Schema,
+                system="You are the navigator.",
+                model="claude-haiku-4-5",
+            )
+
+        asyncio.get_event_loop().run_until_complete(go())
+
+    assert captured_kwargs.get("system_prompt") == "You are the navigator."

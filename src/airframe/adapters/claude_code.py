@@ -1,10 +1,10 @@
 """``ClaudeCodeRuntime`` — :class:`AgentRuntime` over the Claude Agent SDK.
 
-Wraps :class:`claude_agent_sdk.ClaudeSDKClient` to expose Maverick's
-agent layer to Anthropic's Claude family via the official
-``claude-agent-sdk`` package. The SDK spawns and manages the
-``claude`` CLI subprocess; Maverick doesn't allocate ports, juggle
-passwords, validate model IDs at startup, or maintain any client code.
+Wraps :class:`claude_agent_sdk.ClaudeSDKClient` to expose Claude's
+agent family via the official ``claude-agent-sdk`` package. The SDK
+spawns and manages the ``claude`` CLI subprocess; airframe doesn't
+allocate ports, juggle passwords, validate model IDs at startup, or
+maintain any client code.
 
 **Auth.** Three options, checked in order:
 
@@ -14,34 +14,28 @@ passwords, validate model IDs at startup, or maintain any client code.
 2. ``~/.claude/.credentials.json`` — the interactive Claude Code
    OAuth flow's stored token. What you get when you've logged in
    via the ``claude`` CLI on this machine.
-3. ``ANTHROPIC_API_KEY`` env var — pay-per-token API access (rather
-   than subscription draw). Useful for production deployments
-   without a Max subscription.
+3. ``ANTHROPIC_API_KEY`` env var — pay-per-token API access. Useful
+   for production deployments without a Max subscription.
 
-Per Anthropic's Feb 2026 terms update + the licensing relaxation that
-followed, both the OAuth and API-key paths are now permitted for any
-agent use case; OAuth-authenticated calls draw from a separate "Agent
-SDK credit pool" starting June 15, 2026.
-
-**Structured output.** Implemented via a hidden ``submit_result`` MCP
-tool registered with the agent's schema. The model is forced (via
-``allowed_tools`` + system-prompt prefix) to call ``submit_result``
-exactly once with a typed payload; the runtime captures the args and
-returns them as :attr:`RuntimeResult.structured`.
+**Structured output.** Uses the SDK's native
+:attr:`ClaudeAgentOptions.output_format` —
+``{"type": "json_schema", "schema": schema.model_json_schema()}``.
+The CLI enforces the schema server-side and the validated payload
+lands on :attr:`ResultMessage.structured_output`. No tool-forcing,
+no MCP shim, no system-prompt prefix.
 
 **Lifecycle.** ``execute()`` lazily constructs a
 :class:`ClaudeSDKClient` keyed by ``(schema, system, model)`` — any
-change to that triple forces a reconnect because the MCP tool's
-``input_schema`` is baked into ``ClaudeAgentOptions`` at connect time.
-Subsequent ``execute()`` calls reuse the subprocess (warm cache
-accrues). ``reset()`` disconnects; the next ``execute()`` reconnects.
+change to that triple forces a reconnect because ``output_format``
+is baked into ``ClaudeAgentOptions`` at connect time. Subsequent
+``execute()`` calls reuse the subprocess (warm cache accrues).
+``reset()`` disconnects; the next ``execute()`` reconnects.
 ``close()`` is equivalent to ``reset()`` here.
 
 **Cost.** The SDK exposes ``total_cost_usd`` on the
 ``ResultMessage`` — populated directly into the
 :class:`CostRecord`. Token counts come from
 ``ResultMessage.usage``.
-
 """
 
 from __future__ import annotations
@@ -71,21 +65,12 @@ from airframe.protocol import (
 
 logger = logging.getLogger(__name__)
 
-#: Default Claude model when no binding is specified. Haiku is the
-#: v0 default because it's the cheapest tier; opus is for frontier
-#: roles. Selected per-call via ``ProviderModel.model_id``.
+#: Default Claude model when no binding is specified.
 DEFAULT_CLAUDE_MODEL = "claude-haiku-4-5"
-
-#: Canonical name for the hidden structured-output tool. Must match
-#: what the runtime registers under ``ClaudeAgentOptions.mcp_servers``.
-SUBMIT_RESULT_TOOL = "submit_result"
-SUBMIT_RESULT_MCP_NAME = f"mcp__maverick_struct__{SUBMIT_RESULT_TOOL}"
 
 #: Maximum number of agent turns the SDK is allowed to take inside one
 #: ``execute()`` call before the loop is terminated. Briefings / outlines
 #: can take 20-40 turns when the model reads files first; we leave room.
-#: Probe-validated at 60 against the sample project's navigator briefing
-#: which used ~20 turns reading files before calling submit_result.
 DEFAULT_MAX_TURNS = 60
 
 
@@ -128,7 +113,6 @@ class ClaudeCodeRuntime(AgentRuntime):
 
         self._client: Any | None = None  # claude_agent_sdk.ClaudeSDKClient
         self._client_key: str | None = None
-        self._captured_args: dict[str, Any] | None = None
 
     # --- AgentRuntime interface ---------------------------------------------
 
@@ -150,7 +134,6 @@ class ClaudeCodeRuntime(AgentRuntime):
 
         model_id = self._resolve_model(model)
         client = await self._ensure_client(schema=schema, system=system, model=model_id)
-        self._captured_args = None
         try:
             result_msg = await asyncio.wait_for(
                 self._query_and_drain(client, prompt),
@@ -171,17 +154,17 @@ class ClaudeCodeRuntime(AgentRuntime):
                 f"claude_code: is_error subtype={result_msg.subtype} {err_text}"
             )
 
-        structured = self._captured_args
+        structured = getattr(result_msg, "structured_output", None)
         if structured is None:
             preview = (result_msg.result or "")[:300]
             logger.debug(
-                "claude_code.submit_result_missing stop_reason=%s subtype=%s preview=%r",
+                "claude_code.structured_output_missing stop_reason=%s subtype=%s preview=%r",
                 result_msg.stop_reason,
                 getattr(result_msg, "subtype", None),
                 preview,
             )
             raise RuntimeStructuredOutputError(
-                f"claude_code: submit_result was never called "
+                f"claude_code: structured_output was empty "
                 f"(stop_reason={result_msg.stop_reason}, "
                 f"subtype={getattr(result_msg, 'subtype', None)})",
                 body={
@@ -240,43 +223,26 @@ class ClaudeCodeRuntime(AgentRuntime):
             return self._client
         await self.reset()
 
-        from claude_agent_sdk import (
-            ClaudeAgentOptions,
-            ClaudeSDKClient,
-            create_sdk_mcp_server,
-        )
-        from claude_agent_sdk import tool as sdk_tool
+        from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient
 
-        json_schema = schema.model_json_schema()
-
-        @sdk_tool(
-            SUBMIT_RESULT_TOOL,
-            f"Submit the final typed payload as a {schema.__name__}. "
-            f"Call this exactly once with all required fields filled in.",
-            json_schema,
-        )
-        async def _submit(args: dict[str, Any]) -> dict[str, Any]:
-            self._captured_args = dict(args)
-            return {"content": [{"type": "text", "text": "accepted"}]}
-
-        server = create_sdk_mcp_server(name="maverick_struct", tools=[_submit])
-        forced_prefix = (
-            "When you are ready to answer, call the "
-            f"`{SUBMIT_RESULT_TOOL}` tool with the typed payload. "
-            "Do not emit a final assistant message; the tool call is your answer.\n\n"
-        )
         env_override: dict[str, str] = {}
         if self._api_key_override is not None:
             env_override["ANTHROPIC_API_KEY"] = self._api_key_override
-        options = ClaudeAgentOptions(
-            mcp_servers={"maverick_struct": server},
-            allowed_tools=[SUBMIT_RESULT_MCP_NAME],
-            system_prompt=forced_prefix + (system or ""),
-            model=model,
-            max_turns=self._max_turns,
-            permission_mode="bypassPermissions",
-            env=env_override or {},
-        )
+
+        options_kwargs: dict[str, Any] = {
+            "output_format": {
+                "type": "json_schema",
+                "schema": schema.model_json_schema(),
+            },
+            "model": model,
+            "max_turns": self._max_turns,
+            "permission_mode": "bypassPermissions",
+            "env": env_override or {},
+        }
+        if system is not None:
+            options_kwargs["system_prompt"] = system
+
+        options = ClaudeAgentOptions(**options_kwargs)
         try:
             client = ClaudeSDKClient(options=options)
             await client.connect()
@@ -310,7 +276,7 @@ class ClaudeCodeRuntime(AgentRuntime):
         )
 
     def _classify_exception(self, exc: BaseException) -> Exception:
-        """Map Claude SDK exceptions onto Maverick's runtime hierarchy."""
+        """Map Claude SDK exceptions onto airframe's runtime hierarchy."""
         from claude_agent_sdk import (
             ClaudeSDKError,
             CLIConnectionError,
