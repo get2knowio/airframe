@@ -5,6 +5,12 @@ Python — write your agent against a small `AgentRuntime` protocol
 and switch between Claude Code, GitHub Copilot, OpenAI Codex, or
 OpenCode Zen by swapping a single object.
 
+Drives both *execution* (one prompt → typed payload + cost) and
+*discovery* (which providers does this install support? which models
+can the user pick from?). The same five-method protocol covers
+agent-CLI subprocesses, OpenAI-compatible HTTP, and everything in
+between.
+
 ```python
 from airframe import ClaudeCodeRuntime, ProviderModel
 from pydantic import BaseModel
@@ -62,16 +68,19 @@ the Claude Agent SDK exposes a subprocess + JSON-RPC interface;
 GitHub's Copilot SDK exposes a session + tool registration model;
 OpenAI's Codex SDK passes a JSON Schema flag to a CLI subprocess;
 the opencode-go Zen gateway speaks OpenAI-compatible HTTP. Each has
-its own auth chain, error taxonomy, cost-reporting shape, and
-structured-output mechanism. Airframe collapses those differences
-behind one `execute / reset / close / validate_binding` interface,
+its own auth chain, error taxonomy, cost-reporting shape, structured-
+output mechanism, and models-endpoint shape. Airframe collapses those
+differences behind one
+`execute / reset / close / validate_binding / list_models` interface,
 classifies every vendor's failures into a single hierarchy, and
-produces a single `CostRecord` shape regardless of the vendor.
+produces a single `CostRecord` / `ModelInfo` shape regardless of the
+vendor.
 
-The protocol is intentionally narrow. The four methods are the
+The protocol is intentionally narrow. The five methods are the
 contract; everything else (auth chains, session caching, tool-call
-forcing, JSON-schema mode, envelope unwrapping) lives inside each
-adapter, where vendor-specific behaviour belongs.
+forcing, JSON-schema mode, envelope unwrapping, per-model metadata
+joining) lives inside each adapter, where vendor-specific behaviour
+belongs.
 
 Anything *above* the protocol — retry policy, fallback across
 vendors, conversation memory, multi-agent orchestration — is left to
@@ -198,17 +207,27 @@ rationale and the operational landmines each adapter mitigates.
 
 ## Examples
 
-Probe scripts under `examples/` exercise each adapter end-to-end
-against a real CLI / HTTP endpoint:
+Probe scripts under `tests/` exercise each adapter end-to-end against
+a real CLI / HTTP endpoint. They're not part of the unit suite — pytest
+collects `test_*.py` only, so the `probe_*.py` scripts are runnable
+demos that won't be picked up by `make test`.
 
 ```bash
+# Per-adapter execute() probes (require auth for that vendor).
 uv run python tests/probe_claude_code.py
 uv run python tests/probe_copilot.py
 uv run python tests/probe_codex.py
 uv run python tests/probe_opencode_zen.py
-uv run python tests/probe_list_models.py             # menu probe across every installed adapter
+
+# Live model-menu probe across every installed adapter.
+uv run python tests/probe_list_models.py
 uv run python tests/probe_list_models.py --provider claude
+uv run python tests/probe_list_models.py --installed-only=false
 ```
+
+Each probe surfaces auth / network issues as classified
+`Runtime*Error` so you can see exactly what would happen in production
+if credentials were misconfigured.
 
 ## Adding an adapter
 
