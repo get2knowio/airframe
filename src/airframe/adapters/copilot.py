@@ -65,6 +65,7 @@ from airframe.errors import (
     RuntimeStructuredOutputError,
     RuntimeTransientError,
 )
+from airframe.features import Feature
 from airframe.models import ModelInfo
 from airframe.protocol import (
     AgentRuntime,
@@ -111,6 +112,13 @@ class CopilotRuntime(AgentRuntime):
 
     #: pip extra that brings the vendor SDK in.
     EXTRA_NAME: ClassVar[str] = "copilot"
+
+    #: Features this runtime exposes today. Phase 0 declares only
+    #: structured output — wired via the forced ``submit_result`` tool
+    #: pattern. Later phases flip more bits as their APIs land.
+    SUPPORTED_FEATURES: ClassVar[frozenset[Feature]] = frozenset(
+        {Feature.STRUCTURED_OUTPUT_JSON_SCHEMA}
+    )
 
     def __init__(
         self,
@@ -234,6 +242,9 @@ class CopilotRuntime(AgentRuntime):
         # emits markdown-fenced JSON instead of calling tools. Route Claude
         # bindings through ClaudeCodeRuntime / AnthropicRuntime instead.
         return not binding.model_id.startswith("claude-")
+
+    def supports(self, feature: Feature, model: ProviderModel | None = None) -> bool:
+        return feature in self.SUPPORTED_FEATURES
 
     async def list_models(self) -> list[ModelInfo]:
         """Return the live model menu from Copilot's CLI.

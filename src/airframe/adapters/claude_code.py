@@ -57,6 +57,7 @@ from airframe.errors import (
     RuntimeStructuredOutputError,
     RuntimeTransientError,
 )
+from airframe.features import Feature
 from airframe.models import ModelInfo
 from airframe.protocol import (
     AgentRuntime,
@@ -127,6 +128,14 @@ class ClaudeCodeRuntime(AgentRuntime):
 
     #: pip extra that brings the vendor SDK in.
     EXTRA_NAME: ClassVar[str] = "claude"
+
+    #: Features this runtime exposes today. Phase 0 declares only
+    #: the structured-output capability that's already wired through
+    #: ``execute(schema=...)``; later phases flip more bits on as
+    #: their respective APIs land.
+    SUPPORTED_FEATURES: ClassVar[frozenset[Feature]] = frozenset(
+        {Feature.STRUCTURED_OUTPUT_JSON_SCHEMA}
+    )
 
     def __init__(
         self,
@@ -232,6 +241,9 @@ class ClaudeCodeRuntime(AgentRuntime):
 
     def validate_binding(self, binding: ProviderModel) -> bool:
         return binding.provider_id == self.PROVIDER_ID
+
+    def supports(self, feature: Feature, model: ProviderModel | None = None) -> bool:
+        return feature in self.SUPPORTED_FEATURES
 
     async def list_models(self) -> list[ModelInfo]:
         """Return live Claude models from Anthropic's ``/v1/models``.

@@ -71,6 +71,7 @@ from airframe.errors import (
     RuntimeStructuredOutputError,
     RuntimeTransientError,
 )
+from airframe.features import Feature
 from airframe.models import ModelInfo
 from airframe.protocol import (
     AgentRuntime,
@@ -180,6 +181,13 @@ class CodexRuntime(AgentRuntime):
     #: pip extra that brings the vendor SDK in.
     EXTRA_NAME: ClassVar[str] = "codex"
 
+    #: Features this runtime exposes today. Phase 0 declares only the
+    #: native ``--output-schema`` flow that's already wired through
+    #: ``execute(schema=...)``; later phases flip more bits on.
+    SUPPORTED_FEATURES: ClassVar[frozenset[Feature]] = frozenset(
+        {Feature.STRUCTURED_OUTPUT_JSON_SCHEMA}
+    )
+
     def __init__(
         self,
         *,
@@ -279,6 +287,9 @@ class CodexRuntime(AgentRuntime):
         # Codex is OpenAI-only. Anthropic bindings route through
         # ClaudeCodeRuntime / AnthropicRuntime.
         return not binding.model_id.startswith("claude-")
+
+    def supports(self, feature: Feature, model: ProviderModel | None = None) -> bool:
+        return feature in self.SUPPORTED_FEATURES
 
     async def list_models(self) -> list[ModelInfo]:
         """Return the codex-tier models from OpenAI's models endpoint.

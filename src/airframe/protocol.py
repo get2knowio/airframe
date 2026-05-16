@@ -38,6 +38,7 @@ from pydantic import BaseModel
 from airframe.cost import CostRecord
 
 if TYPE_CHECKING:
+    from airframe.features import Feature
     from airframe.models import ModelInfo
 
 
@@ -227,6 +228,40 @@ class AgentRuntime(Protocol):
 
         Consumers should surface these to the user *before* letting
         them commit to a model selection.
+        """
+        ...
+
+    def supports(self, feature: Feature, model: ProviderModel | None = None) -> bool:
+        """Return ``True`` if this runtime exposes ``feature``.
+
+        Capability negotiation predicate, modelled on JDBC's
+        :class:`DatabaseMetaData` ``supportsXxx()`` family and
+        SQLAlchemy's ``Dialect.supports_*`` flags. The contract:
+
+        1. **Cheap and pure.** No network, no SDK version sniffing,
+           no subprocess probe. A static lookup table on the adapter.
+        2. **Agrees with execute().** If this returns ``True``,
+           calling the API associated with ``feature`` must not raise
+           :class:`UnsupportedBindingError` purely on capability
+           grounds. The TCK in :mod:`airframe.testing.contracts`
+           verifies this for every adapter.
+        3. **False is the safe default.** Adapters declare what they
+           *do* support; everything else is False. Consumers branching
+           on ``supports()`` get correct behaviour even when running
+           against a future runtime that adds new
+           :class:`Feature` enum members.
+
+        Args:
+            feature: The :class:`Feature` enum member to query.
+            model: Optional :class:`ProviderModel` for per-model
+                differentiation. ``None`` asks the runtime-wide
+                capability (true for the default model). Most features
+                are runtime-wide today and adapters ignore this
+                argument; per-model gating arrives later as needed.
+
+        Returns:
+            ``True`` when calling the API associated with ``feature``
+            on this runtime succeeds; ``False`` otherwise.
         """
         ...
 

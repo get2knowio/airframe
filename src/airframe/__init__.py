@@ -52,6 +52,7 @@ from airframe.errors import (
     RuntimeStructuredOutputError,
     RuntimeTransientError,
 )
+from airframe.features import Feature
 from airframe.models import (
     CAPABILITY_REASONING_EFFORT,
     CAPABILITY_STREAMING,
@@ -90,6 +91,7 @@ __all__ = [
     "CodexRuntime",
     "CopilotRuntime",
     "CostRecord",
+    "Feature",
     "ModelInfo",
     "OpenCodeZenRuntime",
     "ProviderModel",
