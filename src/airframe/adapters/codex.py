@@ -223,12 +223,6 @@ class CodexRuntime(AgentRuntime):
         model: ProviderModel | None = None,
         timeout: float = 600.0,
     ) -> RuntimeResult:
-        if schema is None:
-            raise NotImplementedError(
-                "CodexRuntime: plain-text execute() is not wired in v0; "
-                "every consumer currently expects a typed payload"
-            )
-
         model_id = self._resolve_model(model)
         thread = await self._ensure_thread(model=model_id)
 
@@ -237,7 +231,12 @@ class CodexRuntime(AgentRuntime):
         # persona instructions onto the prompt.
         full_prompt = prompt if not system else f"{system}\n\n{prompt}"
 
-        turn_options = {"outputSchema": schema.model_json_schema()}
+        # ``outputSchema`` is the JSON-schema constraint the Codex CLI
+        # applies to the final response. Omitted in plain-text mode so
+        # the CLI returns free-form text rather than enforcing JSON.
+        turn_options: dict[str, Any] = {}
+        if schema is not None:
+            turn_options["outputSchema"] = schema.model_json_schema()
 
         try:
             turn = await asyncio.wait_for(
@@ -250,6 +249,20 @@ class CodexRuntime(AgentRuntime):
             raise self._classify_exception(exc) from exc
 
         final = turn.final_response or ""
+
+        if schema is None:
+            # Plain-text mode: ``final_response`` is the free-form
+            # answer string. Empty is a legitimate outcome (e.g. a
+            # tool-only turn that wrote files and finished), so don't
+            # treat it as an error here.
+            return RuntimeResult(
+                text=final,
+                structured=None,
+                cost=self._cost_from_usage(turn.usage, model_id=model_id),
+                finish="stop",
+                raw=turn,
+            )
+
         if not final:
             raise RuntimeStructuredOutputError(
                 "codex: turn completed with empty final_response",

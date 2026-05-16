@@ -282,6 +282,35 @@ async def test_execute_plain_text_does_not_set_response_format(
     assert call.kwargs["response_format"] is None
 
 
+@pytest.mark.asyncio
+async def test_execute_plain_text_forwards_system_message(
+    mock_client: MagicMock,
+) -> None:
+    """``system=`` lands as a ``role: system`` message on the request.
+
+    The load-bearing test: downstream personas pass long instruction
+    system prompts and expect them to land verbatim in the OpenAI
+    Chat Completions messages array.
+    """
+    mock_client.chat.completions.create.return_value = _make_response(content="ok")
+    rt = OpenCodeZenRuntime(api_key="sk-test")
+    await rt.execute("hi", system="You are the navigator.")
+
+    call = mock_client.chat.completions.create.await_args
+    messages = call.kwargs["messages"]
+    assert messages[0] == {"role": "system", "content": "You are the navigator."}
+    assert messages[1] == {"role": "user", "content": "hi"}
+
+
+@pytest.mark.asyncio
+async def test_execute_plain_text_ignores_persona(mock_client: MagicMock) -> None:
+    """``persona=`` accepted but unused by OpenAICompatibleRuntime."""
+    mock_client.chat.completions.create.return_value = _make_response(content="ok")
+    rt = OpenCodeZenRuntime(api_key="sk-test")
+    result = await rt.execute("hi", persona="navigator")
+    assert result.text == "ok"
+
+
 # --- execute(): cost telemetry -----------------------------------------------
 
 

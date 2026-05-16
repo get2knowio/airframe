@@ -211,10 +211,115 @@ def test_validate_binding_rejects_claude_models_on_copilot() -> None:
 
 
 @pytest.mark.asyncio
-async def test_execute_text_only_not_implemented() -> None:
+async def test_execute_plain_text_returns_text(mock_sdk: dict[str, Any]) -> None:
+    """``schema=None`` honours the protocol's plain-text contract.
+
+    The final ``AssistantMessageData`` event's ``content`` lands on
+    ``RuntimeResult.text``; no ``submit_result`` tool is registered;
+    ``structured`` is None.
+    """
     rt = CopilotRuntime()
-    with pytest.raises(NotImplementedError):
-        await rt.execute("hello")
+
+    async def fake_send_and_wait(prompt: str, *, timeout: float = 60.0) -> Any:
+        rt._on_event(_FakeEvent(_FakeAssistantMessage(content="Done.")))
+        rt._on_event(_FakeEvent(_FakeUsage()))
+
+    mock_sdk["session"].send_and_wait = fake_send_and_wait
+
+    result = await rt.execute(
+        "ask something",
+        model=ProviderModel("github-copilot", "gpt-5-mini"),
+    )
+
+    assert result.text == "Done."
+    assert result.structured is None
+    assert result.cost.cost_usd == pytest.approx(0.0034)
+    assert result.cost.input_tokens == 120
+    assert result.cost.output_tokens == 240
+    assert result.cost.provider_id == "github-copilot"
+
+
+@pytest.mark.asyncio
+async def test_execute_plain_text_does_not_register_submit_result_tool(
+    mock_sdk: dict[str, Any],
+) -> None:
+    """No forced ``submit_result`` tool when schema is None.
+
+    Plain text mode hands the conversation to the model unmodified —
+    no JSON-extraction shim, no forced tool, no system-message
+    rewrite. The captured tool list must be empty for this call.
+    """
+    rt = CopilotRuntime()
+
+    async def fake_send_and_wait(prompt: str, *, timeout: float = 60.0) -> Any:
+        rt._on_event(_FakeEvent(_FakeAssistantMessage(content="ok")))
+
+    mock_sdk["session"].send_and_wait = fake_send_and_wait
+    await rt.execute("hi")
+
+    assert mock_sdk["captured_tools"] == []
+    create_kwargs = mock_sdk["client"].create_session.call_args.kwargs
+    # No tools passed; no system_message synthesised either (caller
+    # didn't supply one).
+    assert "tools" not in create_kwargs
+    assert "system_message" not in create_kwargs
+
+
+@pytest.mark.asyncio
+async def test_execute_plain_text_forwards_system_prompt(
+    mock_sdk: dict[str, Any],
+) -> None:
+    """``system=`` reaches the model unmodified in plain-text mode.
+
+    The load-bearing test: downstream personas pass long
+    instruction system prompts and expect them to land verbatim,
+    not wrapped in a ``submit_result`` forcing prefix the way the
+    structured path does.
+    """
+    rt = CopilotRuntime()
+
+    async def fake_send_and_wait(prompt: str, *, timeout: float = 60.0) -> Any:
+        rt._on_event(_FakeEvent(_FakeAssistantMessage(content="ok")))
+
+    mock_sdk["session"].send_and_wait = fake_send_and_wait
+    await rt.execute("hi", system="You are the navigator.")
+
+    kwargs = mock_sdk["client"].create_session.call_args.kwargs
+    sysmsg = kwargs["system_message"]
+    assert sysmsg == {"mode": "append", "content": "You are the navigator."}
+    # No forced-tool framing.
+    assert SUBMIT_RESULT_TOOL not in sysmsg["content"]
+
+
+@pytest.mark.asyncio
+async def test_execute_plain_text_ignores_persona(mock_sdk: dict[str, Any]) -> None:
+    """``persona=`` accepted but unused by CopilotRuntime."""
+    rt = CopilotRuntime()
+
+    async def fake_send_and_wait(prompt: str, *, timeout: float = 60.0) -> Any:
+        rt._on_event(_FakeEvent(_FakeAssistantMessage(content="hello")))
+
+    mock_sdk["session"].send_and_wait = fake_send_and_wait
+    result = await rt.execute("hi", persona="navigator")
+    assert result.text == "hello"
+
+
+@pytest.mark.asyncio
+async def test_execute_plain_text_classifies_session_auth_error(
+    mock_sdk: dict[str, Any],
+) -> None:
+    """Auth-classified session errors propagate the same in text mode."""
+    rt = CopilotRuntime()
+
+    async def fake_send_and_wait(prompt: str, *, timeout: float = 60.0) -> Any:
+        rt._on_event(
+            _FakeEvent(_FakeSessionError(message="bad token", status_code=401))
+        )
+
+    mock_sdk["session"].send_and_wait = fake_send_and_wait
+
+    with pytest.raises(RuntimeAuthError):
+        await rt.execute("hi")
 
 
 @pytest.mark.asyncio

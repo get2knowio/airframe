@@ -159,12 +159,6 @@ class CopilotRuntime(AgentRuntime):
         model: ProviderModel | None = None,
         timeout: float = 600.0,
     ) -> RuntimeResult:
-        if schema is None:
-            raise NotImplementedError(
-                "CopilotRuntime: plain-text execute() is not wired in v0; "
-                "every consumer currently expects a typed payload"
-            )
-
         model_id = self._resolve_model(model)
         session = await self._ensure_session(schema=schema, system=system, model=model_id)
 
@@ -187,22 +181,34 @@ class CopilotRuntime(AgentRuntime):
         if self._captured_error is not None:
             raise self._error_from_session_error(self._captured_error)
 
-        captured = self._captured_payload
-        if captured is None:
-            preview_text = ""
-            msg = self._last_assistant_message
-            if msg is not None and hasattr(msg, "data"):
-                preview_text = (getattr(msg.data, "content", "") or "")[:300]
-            raise RuntimeStructuredOutputError(
-                f"copilot: {SUBMIT_RESULT_TOOL} was never called",
-                body={"assistant_message_preview": preview_text},
-            )
-
         text = ""
         if self._last_assistant_message is not None and hasattr(
             self._last_assistant_message, "data"
         ):
             text = getattr(self._last_assistant_message.data, "content", "") or ""
+
+        if schema is None:
+            # Plain-text mode: no submit_result tool was registered, so
+            # no payload to capture. The final assistant message
+            # content is the result.
+            return RuntimeResult(
+                text=text,
+                structured=None,
+                cost=self._cost_from_usage(self._captured_usage, model_id=model_id),
+                finish="stop",
+                raw={
+                    "usage": self._captured_usage,
+                    "message": self._last_assistant_message,
+                },
+            )
+
+        captured = self._captured_payload
+        if captured is None:
+            preview_text = text[:300]
+            raise RuntimeStructuredOutputError(
+                f"copilot: {SUBMIT_RESULT_TOOL} was never called",
+                body={"assistant_message_preview": preview_text},
+            )
 
         return RuntimeResult(
             text=text,
@@ -337,53 +343,70 @@ class CopilotRuntime(AgentRuntime):
     async def _ensure_session(
         self,
         *,
-        schema: type[BaseModel],
+        schema: type[BaseModel] | None,
         system: str | None,
         model: str,
     ) -> Any:
-        key = f"{model}|{system or ''}|{schema.__name__}|{schema.model_json_schema()}"
+        schema_fragment = (
+            f"{schema.__name__}|{schema.model_json_schema()}"
+            if schema is not None
+            else "__plain_text__"
+        )
+        key = f"{model}|{system or ''}|{schema_fragment}"
         if self._session is not None and self._session_key == key:
             return self._session
         await self.reset()
         client = await self._ensure_client()
 
-        from copilot import define_tool
         from copilot.session import PermissionHandler
 
-        async def _submit_handler(params: schema) -> dict[str, Any]:  # type: ignore[valid-type]
-            self._captured_payload = params
-            return {"ok": True}
+        # Two session shapes share the path:
+        # * schema=None — plain text. No submit_result tool registered;
+        #   no forced-tool prefix on the system message; whatever the
+        #   caller passed as ``system`` reaches the model verbatim.
+        # * schema=Pydantic — structured. submit_result tool registered
+        #   with the schema's JSON shape; system message gets the
+        #   forced-tool prefix telling the model to call it.
+        create_kwargs: dict[str, Any] = {
+            "on_permission_request": PermissionHandler.approve_all,
+            "model": model,
+        }
 
-        # Build the tool with explicit params_type so the SDK generates
-        # the JSON schema from our Pydantic model.
-        submit_tool = define_tool(
-            SUBMIT_RESULT_TOOL,
-            description=(
-                f"Submit the final typed payload as a {schema.__name__}. "
-                "Call this exactly once with all required fields filled in."
-            ),
-            handler=lambda params, inv: _submit_handler(params),
-            params_type=schema,
-            skip_permission=True,
-        )
+        if schema is not None:
+            from copilot import define_tool
 
-        forced_prefix = (
-            "When you are ready to answer, call the "
-            f"`{SUBMIT_RESULT_TOOL}` tool with the typed payload. "
-            "Do not emit a final assistant message; the tool call is your answer.\n\n"
-        )
-        system_content = forced_prefix + (system or "")
+            async def _submit_handler(params: schema) -> dict[str, Any]:  # type: ignore[valid-type]
+                self._captured_payload = params
+                return {"ok": True}
+
+            submit_tool = define_tool(
+                SUBMIT_RESULT_TOOL,
+                description=(
+                    f"Submit the final typed payload as a {schema.__name__}. "
+                    "Call this exactly once with all required fields filled in."
+                ),
+                handler=lambda params, inv: _submit_handler(params),
+                params_type=schema,
+                skip_permission=True,
+            )
+            create_kwargs["tools"] = [submit_tool]
+
+            forced_prefix = (
+                "When you are ready to answer, call the "
+                f"`{SUBMIT_RESULT_TOOL}` tool with the typed payload. "
+                "Do not emit a final assistant message; the tool call is your answer.\n\n"
+            )
+            create_kwargs["system_message"] = {
+                "mode": "append",
+                "content": forced_prefix + (system or ""),
+            }
+        elif system is not None:
+            # Plain text + caller-supplied system prompt: append it
+            # without any forced-tool framing.
+            create_kwargs["system_message"] = {"mode": "append", "content": system}
 
         try:
-            session = await client.create_session(
-                on_permission_request=PermissionHandler.approve_all,
-                model=model,
-                tools=[submit_tool],
-                system_message={
-                    "mode": "append",
-                    "content": system_content,
-                },
-            )
+            session = await client.create_session(**create_kwargs)
         except Exception as exc:
             raise self._classify_exception(exc) from exc
 

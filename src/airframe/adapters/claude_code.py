@@ -171,12 +171,6 @@ class ClaudeCodeRuntime(AgentRuntime):
         model: ProviderModel | None = None,
         timeout: float = 600.0,
     ) -> RuntimeResult:
-        if schema is None:
-            raise NotImplementedError(
-                "ClaudeCodeRuntime: plain-text execute() is not wired in v0; "
-                "every consumer currently expects a typed payload"
-            )
-
         model_id = self._resolve_model(model)
         client = await self._ensure_client(schema=schema, system=system, model=model_id)
         try:
@@ -199,9 +193,23 @@ class ClaudeCodeRuntime(AgentRuntime):
                 f"claude_code: is_error subtype={result_msg.subtype} {err_text}"
             )
 
+        text = result_msg.result or ""
+
+        if schema is None:
+            # Plain-text mode: the SDK's ``ResultMessage.result`` already
+            # carries the concatenated final assistant text. No structured
+            # payload to extract; just return the text.
+            return RuntimeResult(
+                text=text,
+                structured=None,
+                cost=self._cost_from_result(result_msg, model_id=model_id),
+                finish=result_msg.stop_reason,
+                raw=result_msg,
+            )
+
         structured = getattr(result_msg, "structured_output", None)
         if structured is None:
-            preview = (result_msg.result or "")[:300]
+            preview = text[:300]
             logger.debug(
                 "claude_code.structured_output_missing stop_reason=%s subtype=%s preview=%r",
                 result_msg.stop_reason,
@@ -220,7 +228,7 @@ class ClaudeCodeRuntime(AgentRuntime):
             )
 
         return RuntimeResult(
-            text=result_msg.result or "",
+            text=text,
             structured=structured,
             cost=self._cost_from_result(result_msg, model_id=model_id),
             finish=result_msg.stop_reason,
@@ -352,11 +360,22 @@ class ClaudeCodeRuntime(AgentRuntime):
     async def _ensure_client(
         self,
         *,
-        schema: type[BaseModel],
+        schema: type[BaseModel] | None,
         system: str | None,
         model: str,
     ) -> Any:
-        key = f"{model}|{system or ''}|{schema.__name__}|{schema.model_json_schema()}"
+        # Cache key encodes the schema fingerprint when present; the
+        # literal sentinel ``__plain_text__`` distinguishes plain-text
+        # sessions from structured ones with the same (model, system).
+        # Changes to any of (model, system, schema-shape) force a
+        # reconnect because ``output_format`` is baked into
+        # ``ClaudeAgentOptions`` at connect time.
+        schema_fragment = (
+            f"{schema.__name__}|{schema.model_json_schema()}"
+            if schema is not None
+            else "__plain_text__"
+        )
+        key = f"{model}|{system or ''}|{schema_fragment}"
         if self._client is not None and self._client_key == key:
             return self._client
         await self.reset()
@@ -368,15 +387,16 @@ class ClaudeCodeRuntime(AgentRuntime):
             env_override["ANTHROPIC_API_KEY"] = self._api_key_override
 
         options_kwargs: dict[str, Any] = {
-            "output_format": {
-                "type": "json_schema",
-                "schema": schema.model_json_schema(),
-            },
             "model": model,
             "max_turns": self._max_turns,
             "permission_mode": "bypassPermissions",
             "env": env_override or {},
         }
+        if schema is not None:
+            options_kwargs["output_format"] = {
+                "type": "json_schema",
+                "schema": schema.model_json_schema(),
+            }
         if system is not None:
             options_kwargs["system_prompt"] = system
 
