@@ -1178,3 +1178,310 @@ async def test_tools_change_between_turns_rebuilds_session(
     # A fresh session always creates a fresh CopilotSession (sessions
     # don't share state across the factory boundary).
     assert mock_sdk["client"].create_session.await_count > first_create_count
+
+
+# ---------------------------------------------------------------------------
+# External MCP server refs (Phase 4 Iteration C)
+# ---------------------------------------------------------------------------
+
+
+def _mcp_send_factory(mock_sdk: dict[str, Any]) -> Any:
+    """Standard ``send_and_wait`` side effect: fire one usage + one
+    assistant-message event so :meth:`_build_result` succeeds."""
+
+    async def fake_send(prompt: str, *, timeout: float, **_: Any) -> None:
+        _fire(mock_sdk["handlers"], _FakeEvent(_FakeUsage()))
+        _fire(mock_sdk["handlers"], _FakeEvent(_FakeAssistantMessage("ok")))
+
+    return fake_send
+
+
+async def test_mcp_stdio_translates_to_local_dict_with_args(
+    mock_sdk: dict[str, Any],
+) -> None:
+    """``transport='stdio'`` builds ``{type:"local", command, args}`` —
+    Copilot's wire enum is ``local``, not ``stdio``."""
+    from airframe import McpServerRef
+
+    mock_sdk["session"].send_and_wait = AsyncMock(side_effect=_mcp_send_factory(mock_sdk))
+
+    rt = CopilotRuntime()
+    sess = rt.session(
+        mcp_servers=[
+            McpServerRef(
+                name="everything",
+                transport="stdio",
+                command=["uvx", "mcp-server-everything", "--flag"],
+            )
+        ]
+    )
+    try:
+        await sess.execute("anything")
+    finally:
+        await sess.close()
+
+    create_call = mock_sdk["client"].create_session.await_args_list[0]
+    assert "mcp_servers" in create_call.kwargs
+    servers = create_call.kwargs["mcp_servers"]
+    assert "everything" in servers
+    cfg = servers["everything"]
+    assert cfg["type"] == "local"
+    assert cfg["command"] == "uvx"
+    assert cfg["args"] == ["mcp-server-everything", "--flag"]
+    # No url/headers leakage on a local config.
+    assert "url" not in cfg
+    assert "headers" not in cfg
+
+
+async def test_mcp_stdio_single_element_command_emits_empty_args(
+    mock_sdk: dict[str, Any],
+) -> None:
+    """Copilot's wire schema requires ``args`` even when empty — emit ``[]``."""
+    from airframe import McpServerRef
+
+    mock_sdk["session"].send_and_wait = AsyncMock(side_effect=_mcp_send_factory(mock_sdk))
+
+    rt = CopilotRuntime()
+    sess = rt.session(
+        mcp_servers=[McpServerRef(name="solo", transport="stdio", command=["mcp-bin"])]
+    )
+    try:
+        await sess.execute("hi")
+    finally:
+        await sess.close()
+
+    cfg = mock_sdk["client"].create_session.await_args_list[0].kwargs["mcp_servers"]["solo"]
+    assert cfg == {"type": "local", "command": "mcp-bin", "args": []}
+
+
+async def test_mcp_http_translates_with_auth_header(mock_sdk: dict[str, Any]) -> None:
+    """``auth_token`` becomes ``Authorization: Bearer …`` on http transport."""
+    from airframe import McpServerRef
+
+    mock_sdk["session"].send_and_wait = AsyncMock(side_effect=_mcp_send_factory(mock_sdk))
+
+    rt = CopilotRuntime()
+    sess = rt.session(
+        mcp_servers=[
+            McpServerRef(
+                name="remote",
+                transport="http",
+                url="https://mcp.example.com",
+                auth_token="secret-token",
+            )
+        ]
+    )
+    try:
+        await sess.execute("anything")
+    finally:
+        await sess.close()
+
+    cfg = mock_sdk["client"].create_session.await_args_list[0].kwargs["mcp_servers"]["remote"]
+    assert cfg["type"] == "http"
+    assert cfg["url"] == "https://mcp.example.com"
+    assert cfg["headers"]["Authorization"] == "Bearer secret-token"
+    assert "command" not in cfg
+
+
+async def test_mcp_http_caller_headers_override_auth_token(
+    mock_sdk: dict[str, Any],
+) -> None:
+    """Caller-supplied ``Authorization`` in ``headers=`` wins over ``auth_token``.
+
+    Same precedence rule as Claude (Iteration B); shared
+    :func:`~airframe.sessions._compose_mcp_headers` governs both.
+    """
+    from airframe import McpServerRef
+
+    mock_sdk["session"].send_and_wait = AsyncMock(side_effect=_mcp_send_factory(mock_sdk))
+
+    rt = CopilotRuntime()
+    sess = rt.session(
+        mcp_servers=[
+            McpServerRef(
+                name="remote",
+                transport="http",
+                url="https://mcp.example.com",
+                auth_token="shorthand",
+                headers={"Authorization": "Bearer caller-explicit", "X-Trace": "abc"},
+            )
+        ]
+    )
+    try:
+        await sess.execute("anything")
+    finally:
+        await sess.close()
+
+    cfg = mock_sdk["client"].create_session.await_args_list[0].kwargs["mcp_servers"]["remote"]
+    assert cfg["headers"]["Authorization"] == "Bearer caller-explicit"
+    assert cfg["headers"]["X-Trace"] == "abc"
+
+
+async def test_mcp_sse_ref_raises_before_create_session(mock_sdk: dict[str, Any]) -> None:
+    """SSE refs are rejected at :meth:`session` — Copilot never builds a session."""
+    from airframe import McpServerRef
+    from airframe.errors import UnsupportedFeatureError
+
+    rt = CopilotRuntime()
+    with pytest.raises(UnsupportedFeatureError) as exc_info:
+        rt.session(
+            mcp_servers=[McpServerRef(name="feed", transport="sse", url="https://example.com/sse")]
+        )
+    assert exc_info.value.feature == Feature.TOOLS_MCP_SSE
+    text = str(exc_info.value).lower()
+    # The decline points at the working alternative.
+    assert "http" in text
+    assert "sse" in text
+    # And no session was ever built.
+    mock_sdk["client"].create_session.assert_not_called()
+    mock_sdk["client"].resume_session.assert_not_called()
+
+
+async def test_mcp_mixed_stdio_and_http_in_one_session(
+    mock_sdk: dict[str, Any],
+) -> None:
+    """A list combining stdio + http lands as one dict keyed by name."""
+    from airframe import McpServerRef
+
+    mock_sdk["session"].send_and_wait = AsyncMock(side_effect=_mcp_send_factory(mock_sdk))
+
+    rt = CopilotRuntime()
+    sess = rt.session(
+        mcp_servers=[
+            McpServerRef(name="local", transport="stdio", command=["a"]),
+            McpServerRef(name="rest", transport="http", url="https://h.example.com"),
+        ]
+    )
+    try:
+        await sess.execute("anything")
+    finally:
+        await sess.close()
+
+    servers = mock_sdk["client"].create_session.await_args_list[0].kwargs["mcp_servers"]
+    assert set(servers.keys()) == {"local", "rest"}
+    assert servers["local"]["type"] == "local"
+    assert servers["rest"]["type"] == "http"
+
+
+async def test_mcp_servers_coexist_with_tools(mock_sdk: dict[str, Any]) -> None:
+    """``tools=`` and ``mcp_servers=`` pass through separate create_session kwargs."""
+    from airframe import McpServerRef
+
+    mock_sdk["session"].send_and_wait = AsyncMock(side_effect=_mcp_send_factory(mock_sdk))
+
+    rt = CopilotRuntime()
+    sess = rt.session(
+        tools=[_build_tool()],
+        mcp_servers=[McpServerRef(name="external", transport="stdio", command=["x"])],
+    )
+    try:
+        await sess.execute("anything")
+    finally:
+        await sess.close()
+
+    create_call = mock_sdk["client"].create_session.await_args_list[0]
+    # tools= still landed (the FunctionTool registration).
+    assert "tools" in create_call.kwargs
+    assert len(create_call.kwargs["tools"]) == 1
+    # mcp_servers= landed alongside it.
+    assert "mcp_servers" in create_call.kwargs
+    assert "external" in create_call.kwargs["mcp_servers"]
+
+
+async def test_mcp_servers_coexist_with_tools_and_submit_result(
+    mock_sdk: dict[str, Any],
+) -> None:
+    """Three-way coexistence: forced ``submit_result`` + user tools + external MCP.
+
+    Plan-required scenario — schema= forces the submit_result tool to
+    slot 0, user tools fill the rest of the tools= kwarg, mcp_servers
+    rides in its own kwarg. None of the three buckets shadow each
+    other.
+    """
+    from airframe import McpServerRef
+
+    async def fake_send(prompt: str, *, timeout: float, **_: Any) -> None:
+        # Drive submit_result so _build_result returns the structured payload.
+        submit_entry = next(
+            t for t in mock_sdk["captured_tools"] if t["name"] == SUBMIT_RESULT_TOOL
+        )
+        await submit_entry["handler"](_Schema(summary="ok", count=1), MagicMock())
+        _fire(mock_sdk["handlers"], _FakeEvent(_FakeUsage()))
+        _fire(mock_sdk["handlers"], _FakeEvent(_FakeAssistantMessage("")))
+
+    mock_sdk["session"].send_and_wait = AsyncMock(side_effect=fake_send)
+
+    rt = CopilotRuntime()
+    sess = rt.session(
+        tools=[_build_tool()],
+        mcp_servers=[McpServerRef(name="external", transport="http", url="https://e")],
+    )
+    try:
+        result = await sess.execute("brief me", schema=_Schema)
+    finally:
+        await sess.close()
+
+    create_call = mock_sdk["client"].create_session.await_args_list[0]
+    tools = create_call.kwargs["tools"]
+    # submit_result + add (user tool).
+    assert len(tools) == 2
+    captured_order = [t["name"] for t in mock_sdk["captured_tools"]]
+    assert captured_order.index(SUBMIT_RESULT_TOOL) < captured_order.index("add")
+    # External MCP server rides separately and doesn't bleed into tools=.
+    assert create_call.kwargs["mcp_servers"] == {"external": {"type": "http", "url": "https://e"}}
+    # Structured-output round-trip succeeded.
+    assert result.structured == {"summary": "ok", "count": 1}
+
+
+async def test_no_mcp_servers_omits_kwarg(mock_sdk: dict[str, Any]) -> None:
+    """No ``mcp_servers=`` → the kwarg is never passed to create_session."""
+    mock_sdk["session"].send_and_wait = AsyncMock(side_effect=_mcp_send_factory(mock_sdk))
+
+    rt = CopilotRuntime()
+    sess = rt.session()
+    try:
+        await sess.execute("anything")
+    finally:
+        await sess.close()
+
+    create_call = mock_sdk["client"].create_session.await_args_list[0]
+    assert "mcp_servers" not in create_call.kwargs
+
+
+async def test_mcp_refs_change_between_sessions_rebuilds_session(
+    mock_sdk: dict[str, Any],
+) -> None:
+    """Switching ``mcp_servers=`` invalidates the cached CopilotSession.
+
+    ``mcp_servers`` is baked at :meth:`create_session` time on Copilot,
+    just like ``tools=`` — the fingerprint must join the cache key so
+    a refs-change forces a destroy + rebuild.
+    """
+    from airframe import McpServerRef
+
+    mock_sdk["session"].send_and_wait = AsyncMock(side_effect=_mcp_send_factory(mock_sdk))
+
+    rt = CopilotRuntime()
+    sess1 = rt.session(mcp_servers=[McpServerRef(name="one", transport="stdio", command=["x"])])
+    try:
+        await sess1.execute("turn 1")
+    finally:
+        await sess1.close()
+    first_create_count = mock_sdk["client"].create_session.await_count
+
+    sess2 = rt.session(mcp_servers=[McpServerRef(name="two", transport="stdio", command=["x"])])
+    try:
+        await sess2.execute("turn 2")
+    finally:
+        await sess2.close()
+
+    assert mock_sdk["client"].create_session.await_count > first_create_count
+
+
+async def test_mcp_capability_flags_final_truth() -> None:
+    """Sanity-check the Iteration C matrix at the adapter level."""
+    rt = CopilotRuntime()
+    assert rt.supports(Feature.TOOLS_MCP_STDIO)
+    assert rt.supports(Feature.TOOLS_MCP_HTTP)
+    assert not rt.supports(Feature.TOOLS_MCP_SSE)
+    assert not rt.supports(Feature.TOOLS_MCP_IN_PROCESS)

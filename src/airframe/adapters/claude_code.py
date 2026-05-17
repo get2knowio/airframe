@@ -77,9 +77,15 @@ from airframe.protocol import (
     RuntimeResult,
     UnsupportedBindingError,
 )
-from airframe.sessions import _check_tools_supported, _split_prompt_parts
+from airframe.sessions import (
+    _check_mcp_servers_supported,
+    _check_tools_supported,
+    _compose_mcp_headers,
+    _mcp_servers_fingerprint,
+    _split_prompt_parts,
+)
 from airframe.thinking import ThinkingMode
-from airframe.tools import FunctionTool
+from airframe.tools import FunctionTool, McpServerRef
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -192,6 +198,20 @@ class ClaudeCodeRuntime(AgentRuntime):
     #:   :class:`ToolUseBlock` / :class:`ToolResultBlock` on the
     #:   message stream. Tools join the existing ``_ensure_client``
     #:   cache key (Phase 3, Iteration C).
+    #: * ``TOOLS_MCP_STDIO`` / ``TOOLS_MCP_HTTP`` / ``TOOLS_MCP_SSE``
+    #:   — wired by translating each :class:`McpServerRef` to the
+    #:   matching :class:`McpStdioServerConfig` /
+    #:   :class:`McpHttpServerConfig` / :class:`McpSSEServerConfig`
+    #:   TypedDict and passing the keyed dict via
+    #:   :attr:`ClaudeAgentOptions.mcp_servers`, merged with the
+    #:   in-process tools server. ``auth_token=`` becomes an
+    #:   ``Authorization: Bearer …`` header on the network
+    #:   transports; ``headers=`` passes through verbatim. The
+    #:   refs fingerprint joins the cache key — but only
+    #:   ``name``, ``transport``, ``command``, ``url``, and the
+    #:   sorted header *keys* participate; header values and
+    #:   ``auth_token`` never enter the fingerprint (Phase 4,
+    #:   Iteration B).
     SUPPORTED_FEATURES: ClassVar[frozenset[Feature]] = frozenset(
         {
             Feature.STRUCTURED_OUTPUT_JSON_SCHEMA,
@@ -203,6 +223,9 @@ class ClaudeCodeRuntime(AgentRuntime):
             Feature.VISION_INPUT,
             Feature.FILE_INPUT,
             Feature.TOOLS_FUNCTION,
+            Feature.TOOLS_MCP_STDIO,
+            Feature.TOOLS_MCP_HTTP,
+            Feature.TOOLS_MCP_SSE,
         }
     )
 
@@ -301,6 +324,7 @@ class ClaudeCodeRuntime(AgentRuntime):
         system: str | None = None,
         model: ProviderModel | None = None,
         tools: list[FunctionTool] | None = None,
+        mcp_servers: list[McpServerRef] | None = None,
         provider_options: Any | None = None,
     ) -> AgentSession:
         """Open a bespoke :class:`ClaudeCodeSession`.
@@ -328,12 +352,30 @@ class ClaudeCodeRuntime(AgentRuntime):
                 SDK dispatches; the session surfaces tool events from
                 :class:`ToolUseBlock` / :class:`ToolResultBlock` on the
                 message stream.
+            mcp_servers: List of :class:`~airframe.tools.McpServerRef`
+                identifying external MCP servers the model may invoke.
+                Each ref is translated to the matching
+                :class:`McpStdioServerConfig` /
+                :class:`McpHttpServerConfig` /
+                :class:`McpSSEServerConfig` TypedDict and merged with
+                the in-process tools server (if any) into
+                :attr:`ClaudeAgentOptions.mcp_servers`. Tool calls
+                routed through external servers surface as the same
+                :class:`~airframe.events.ToolCallStart` /
+                :class:`~airframe.events.ToolCallResult` events with
+                the ``mcp__<server>__`` prefix stripped. Phase 4
+                Iteration B.
             provider_options: Reserved for Phase 2+ (currently unused).
         """
         _check_tools_supported(
             tools,
             adapter_label=self.label,
             feature_supported=self.supports(Feature.TOOLS_FUNCTION),
+        )
+        _check_mcp_servers_supported(
+            mcp_servers,
+            adapter_label=self.label,
+            supports=self.supports,
         )
         # provider_options accepted but unused — Phase 2+ fills each
         # ProviderOptions dataclass as the corresponding feature lands.
@@ -345,6 +387,7 @@ class ClaudeCodeRuntime(AgentRuntime):
             system=system,
             model_id=model_id,
             tools=tools,
+            mcp_servers=mcp_servers,
         )
 
     async def list_models(self) -> list[ModelInfo]:
@@ -513,6 +556,7 @@ class ClaudeCodeSession:
         system: str | None,
         model_id: str,
         tools: list[FunctionTool] | None = None,
+        mcp_servers: list[McpServerRef] | None = None,
     ) -> None:
         self._runtime = runtime
         self._resume = resume
@@ -543,6 +587,19 @@ class ClaudeCodeSession:
         # reconnect rather than silent staleness.
         self._tools: list[FunctionTool] = list(tools or [])
         self._tools_fingerprint = _tools_fingerprint(self._tools)
+        # Phase 4 Iteration B: external MCP servers. Translated lazily
+        # at connect time and merged with the in-process tools server
+        # into ClaudeAgentOptions.mcp_servers. The fingerprint joins
+        # the cache key so a refs-change forces reconnect; the set of
+        # known server names drives _strip_mcp_prefix on the stream
+        # path so consumers see bare tool names regardless of which
+        # server routed the call.
+        self._mcp_servers: list[McpServerRef] = list(mcp_servers or [])
+        self._mcp_servers_fingerprint = _mcp_servers_fingerprint(self._mcp_servers)
+        names: set[str] = {ref.name for ref in self._mcp_servers}
+        if self._tools:
+            names.add(AIRFRAME_MCP_SERVER_NAME)
+        self._known_mcp_servers: frozenset[str] = frozenset(names)
 
     async def execute(
         self,
@@ -669,7 +726,7 @@ class ClaudeCodeSession:
                             yield TextDelta(text=block.text)
                         elif isinstance(block, ToolUseBlock):
                             yield ToolCallStart(
-                                tool_name=_strip_mcp_prefix(block.name),
+                                tool_name=_strip_mcp_prefix(block.name, self._known_mcp_servers),
                                 tool_call_id=block.id,
                                 arguments_preview=_serialize_tool_arguments(block.input),
                             )
@@ -755,11 +812,11 @@ class ClaudeCodeSession:
         has_attachments: bool = False,
     ) -> Any:
         # Reconnect when the schema OR thinking OR attachments OR tools
-        # fingerprint changes — ``output_format``, ``effort`` /
-        # ``thinking``, ``allowed_tools``, and ``mcp_servers`` are all
-        # baked into ClaudeAgentOptions at connect time. (model, system,
-        # resume) are fixed for the session and don't contribute to the
-        # key.
+        # OR mcp_servers fingerprint changes — ``output_format``,
+        # ``effort`` / ``thinking``, ``allowed_tools``, and
+        # ``mcp_servers`` are all baked into ClaudeAgentOptions at
+        # connect time. (model, system, resume) are fixed for the
+        # session and don't contribute to the key.
         schema_fragment = (
             f"{schema.__name__}|{schema.model_json_schema()}"
             if schema is not None
@@ -769,8 +826,10 @@ class ClaudeCodeSession:
         thinking_fragment = f"effort={effort}|thinking={thinking_config}"
         attachments_fragment = f"attachments={has_attachments}"
         tools_fragment = f"tools={self._tools_fingerprint}"
+        mcp_fragment = f"mcp={self._mcp_servers_fingerprint}"
         cache_key = (
-            f"{schema_fragment}|{thinking_fragment}|{attachments_fragment}|{tools_fragment}"
+            f"{schema_fragment}|{thinking_fragment}|{attachments_fragment}|"
+            f"{tools_fragment}|{mcp_fragment}"
         )
         if self._client is not None and self._client_key == cache_key:
             return self._client
@@ -819,19 +878,42 @@ class ClaudeCodeSession:
         if thinking_config is not None:
             options_kwargs["thinking"] = thinking_config
 
-        # Bring in the auto-allowed Read tool for attachments and any
-        # MCP-routed FunctionTools. The CLI uses ``mcp__<server>__<tool>``
-        # naming for MCP tools, so the allowed_tools entries must match
-        # that pattern; we let _translate_tools_for_claude build both
-        # the server config and the allowed-tools names so the two
-        # stay in sync.
+        # Bring in the auto-allowed Read tool for attachments, the
+        # in-process MCP server for FunctionTools, and the per-name
+        # external MCP servers. The CLI uses ``mcp__<server>__<tool>``
+        # naming for MCP tools, so the allowed_tools entries must
+        # match that pattern; we let _translate_tools_for_claude build
+        # both the in-process server config and the matching
+        # per-tool allowed-tools names so the two stay in sync. For
+        # external MCP servers we don't know tool names ahead of time,
+        # so we add the ``mcp__<server>__*`` wildcard form so every
+        # tool the server exposes is auto-allowed.
         allowed_tools: list[str] = []
         if has_attachments:
             allowed_tools.append("Read")
+        mcp_servers_config: dict[str, Any] = {}
         if self._tools:
             server_config, allowed_tool_names = _translate_tools_for_claude(self._tools)
-            options_kwargs["mcp_servers"] = {AIRFRAME_MCP_SERVER_NAME: server_config}
+            mcp_servers_config[AIRFRAME_MCP_SERVER_NAME] = server_config
             allowed_tools.extend(allowed_tool_names)
+        if self._mcp_servers:
+            external = _translate_mcp_servers_for_claude(self._mcp_servers)
+            # Collision check: surface name overlaps loudly. The
+            # in-process server's name is the only "reserved" value
+            # ``mcp_servers=`` callers must avoid.
+            for name in external:
+                if name in mcp_servers_config:
+                    raise ValueError(
+                        f"{self._runtime.label}: McpServerRef.name {name!r} collides "
+                        f"with airframe's in-process tools server name. Rename the "
+                        f"external server (the in-process name "
+                        f"{AIRFRAME_MCP_SERVER_NAME!r} is reserved)."
+                    )
+            mcp_servers_config.update(external)
+            for ref in self._mcp_servers:
+                allowed_tools.append(f"mcp__{ref.name}__*")
+        if mcp_servers_config:
+            options_kwargs["mcp_servers"] = mcp_servers_config
         if allowed_tools:
             options_kwargs["allowed_tools"] = allowed_tools
 
@@ -1170,14 +1252,66 @@ def _serialize_tool_arguments(input_dict: dict[str, Any]) -> str:
         return repr(input_dict)
 
 
-def _strip_mcp_prefix(tool_name: str) -> str:
-    """Trim the ``mcp__<server>__`` prefix the SDK adds to MCP tool
-    names so consumer code sees the same :attr:`FunctionTool.name` it
-    registered."""
-    prefix = f"mcp__{AIRFRAME_MCP_SERVER_NAME}__"
-    if tool_name.startswith(prefix):
-        return tool_name[len(prefix) :]
+def _strip_mcp_prefix(tool_name: str, server_names: frozenset[str]) -> str:
+    """Trim the ``mcp__<server>__`` prefix the SDK adds to MCP tool names.
+
+    Phase 4 Iteration B generalised this from the single-server form
+    (Phase 3 only knew about ``mcp__airframe_tools__``) to the
+    multi-server set the session tracks: the in-process
+    :data:`AIRFRAME_MCP_SERVER_NAME` whenever ``tools=`` is set, plus
+    every :attr:`McpServerRef.name` for refs in ``mcp_servers=``.
+    Tools delivered through a recognised server come back with their
+    bare name; unrecognised prefixes pass through verbatim so
+    consumers can still inspect raw vendor tool names if they
+    register a server via direct
+    :func:`~ClaudeCodeRuntime.unwrap` access.
+    """
+    for name in server_names:
+        prefix = f"mcp__{name}__"
+        if tool_name.startswith(prefix):
+            return tool_name[len(prefix) :]
     return tool_name
+
+
+def _translate_mcp_servers_for_claude(
+    refs: list[McpServerRef],
+) -> dict[str, dict[str, Any]]:
+    """Translate :class:`McpServerRef` list into Claude's
+    :attr:`ClaudeAgentOptions.mcp_servers` dict shape.
+
+    The SDK accepts a dict keyed by server name where each value is a
+    :class:`McpStdioServerConfig` / :class:`McpHttpServerConfig` /
+    :class:`McpSSEServerConfig` TypedDict. Mapping:
+
+    * **stdio** — splits :attr:`McpServerRef.command` (an argv list)
+      into the SDK's ``command: str`` (head) + ``args: list[str]``
+      (tail). ``args`` is omitted when the argv has only one element.
+    * **http** / **sse** — :attr:`McpServerRef.url` passes through.
+      :attr:`McpServerRef.auth_token`, if set, becomes
+      ``Authorization: Bearer <token>``; caller-supplied
+      :attr:`McpServerRef.headers` are merged on top so an explicit
+      ``Authorization`` in ``headers=`` overrides the shorthand.
+
+    Returns a fresh dict each call — never mutates the caller's refs.
+    """
+    out: dict[str, dict[str, Any]] = {}
+    for ref in refs:
+        if ref.transport == "stdio":
+            # Guaranteed by McpServerRef.__post_init__: command is a
+            # non-empty list when transport is stdio.
+            assert ref.command
+            cfg: dict[str, Any] = {"type": "stdio", "command": ref.command[0]}
+            if len(ref.command) > 1:
+                cfg["args"] = list(ref.command[1:])
+            out[ref.name] = cfg
+        else:  # http or sse — also guaranteed by __post_init__
+            assert ref.url
+            cfg = {"type": ref.transport, "url": ref.url}
+            merged = _compose_mcp_headers(ref)
+            if merged:
+                cfg["headers"] = merged
+            out[ref.name] = cfg
+    return out
 
 
 def _tool_result_output(block: Any) -> Any:

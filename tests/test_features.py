@@ -40,6 +40,7 @@ def test_feature_string_values_are_stable() -> None:
     assert Feature.TOOLS_FUNCTION.value == "tools_function"
     assert Feature.TOOLS_MCP_STDIO.value == "tools_mcp_stdio"
     assert Feature.TOOLS_MCP_HTTP.value == "tools_mcp_http"
+    assert Feature.TOOLS_MCP_SSE.value == "tools_mcp_sse"
     assert Feature.TOOLS_MCP_IN_PROCESS.value == "tools_mcp_in_process"
     assert Feature.PERMISSION_CALLBACK.value == "permission_callback"
     assert Feature.LIFECYCLE_HOOKS.value == "lifecycle_hooks"
@@ -128,6 +129,13 @@ def test_unwired_features_stay_false(adapters: list) -> None:
         # Iteration C will flip it on Claude + Copilot; Iteration D
         # leaves Codex False (no SDK tool-registration channel).
         Feature.TOOLS_FUNCTION,
+        # Phase 4 Iteration B flipped the three MCP transport flags on
+        # Claude (broadest transport coverage); Iteration C flips
+        # STDIO + HTTP on Copilot (SSE keeps a permanent decline);
+        # Iteration D leaves Codex + OpenAI-compat False everywhere.
+        Feature.TOOLS_MCP_STDIO,
+        Feature.TOOLS_MCP_HTTP,
+        Feature.TOOLS_MCP_SSE,
     }
     must_be_false = [f for f in Feature if f not in any_adapter_may_support]
     for adapter in adapters:
@@ -420,6 +428,281 @@ def test_session_tools_kwarg_raises_unsupported_feature_on_codex(
             sess = adapter.session(tools=[tool])
             assert sess is not None
             del sess
+
+
+def test_claude_declares_all_three_mcp_transports(adapters: list) -> None:
+    """Phase 4 Iteration B flips STDIO + HTTP + SSE on ClaudeCodeRuntime.
+
+    Claude's SDK has typed configs for all three transports; the
+    adapter translates :class:`McpServerRef` into the matching
+    :class:`McpStdioServerConfig` / :class:`McpHttpServerConfig` /
+    :class:`McpSSEServerConfig` and passes the keyed dict via
+    :attr:`ClaudeAgentOptions.mcp_servers` (merged with the
+    in-process tools server). The in-process flag stays False — Phase
+    4 doesn't expose ``transport="in_process"`` on
+    :class:`McpServerRef`; Claude's in-process MCP server is internal
+    plumbing for ``tools=``.
+    """
+    from airframe import ClaudeCodeRuntime
+
+    for adapter in adapters:
+        if not isinstance(adapter, ClaudeCodeRuntime):
+            continue
+        assert adapter.supports(Feature.TOOLS_MCP_STDIO), (
+            "ClaudeCodeRuntime should declare TOOLS_MCP_STDIO after Iteration B"
+        )
+        assert adapter.supports(Feature.TOOLS_MCP_HTTP), (
+            "ClaudeCodeRuntime should declare TOOLS_MCP_HTTP after Iteration B"
+        )
+        assert adapter.supports(Feature.TOOLS_MCP_SSE), (
+            "ClaudeCodeRuntime should declare TOOLS_MCP_SSE after Iteration B"
+        )
+        assert not adapter.supports(Feature.TOOLS_MCP_IN_PROCESS), (
+            "ClaudeCodeRuntime should NOT declare TOOLS_MCP_IN_PROCESS — Phase 4 "
+            "doesn't expose an in-process McpServerRef transport"
+        )
+
+
+def test_copilot_declares_stdio_and_http_but_not_sse(adapters: list) -> None:
+    """Phase 4 Iteration C flips ``TOOLS_MCP_{STDIO,HTTP}`` on
+    :class:`CopilotRuntime`.
+
+    Per the implementation plan, SSE stays False on Copilot; refs of
+    that transport surface a specific decline pointing consumers at
+    ``http``. ``TOOLS_MCP_IN_PROCESS`` also stays False — Phase 4
+    doesn't expose an in-process transport on :class:`McpServerRef`.
+    """
+    from airframe import CopilotRuntime
+
+    for adapter in adapters:
+        if not isinstance(adapter, CopilotRuntime):
+            continue
+        assert adapter.supports(Feature.TOOLS_MCP_STDIO), (
+            "CopilotRuntime should declare TOOLS_MCP_STDIO after Iteration C"
+        )
+        assert adapter.supports(Feature.TOOLS_MCP_HTTP), (
+            "CopilotRuntime should declare TOOLS_MCP_HTTP after Iteration C"
+        )
+        assert not adapter.supports(Feature.TOOLS_MCP_SSE), (
+            "CopilotRuntime should NOT declare TOOLS_MCP_SSE — the plan "
+            "declines SSE on Copilot for Phase 4"
+        )
+        assert not adapter.supports(Feature.TOOLS_MCP_IN_PROCESS), (
+            "CopilotRuntime should NOT declare TOOLS_MCP_IN_PROCESS"
+        )
+
+
+def test_codex_and_openai_compat_still_decline_all_mcp_transports(adapters: list) -> None:
+    """Phase 4 Iteration C: Codex + OpenAI-compat still decline every
+    transport.
+
+    Iteration D codifies those declines with vendor-specific messages
+    (Codex points at ``~/.codex/config.toml``; OpenAI-compat at the
+    future ``OpenAIResponsesRuntime``). Until then they share the
+    generic capability-gate message, but the capability flags stay
+    False so the gate keeps raising.
+    """
+    from airframe import ClaudeCodeRuntime, CopilotRuntime
+
+    mcp_features = (
+        Feature.TOOLS_MCP_STDIO,
+        Feature.TOOLS_MCP_HTTP,
+        Feature.TOOLS_MCP_SSE,
+        Feature.TOOLS_MCP_IN_PROCESS,
+    )
+    for adapter in adapters:
+        if isinstance(adapter, ClaudeCodeRuntime | CopilotRuntime):
+            continue
+        for feature in mcp_features:
+            assert not adapter.supports(feature), (
+                f"{type(adapter).__name__} should NOT declare {feature.name} "
+                f"during Phase 4 Iteration C — Iteration D codifies the "
+                f"vendor-specific decline messages but the flags stay False"
+            )
+
+
+def test_copilot_session_sse_decline_carries_http_hint(adapters: list) -> None:
+    """SSE refs on Copilot raise with an actionable pointer at ``http``.
+
+    The plan's Iteration C requirement: ``"SSE decline carries the
+    http-transport hint"``. The decline runs *before* the shared
+    capability gate so the consumer gets the specific "switch to http"
+    advice rather than the generic "not wired" message.
+    """
+    from airframe import CopilotRuntime, McpServerRef
+    from airframe.errors import UnsupportedFeatureError
+
+    for adapter in adapters:
+        if not isinstance(adapter, CopilotRuntime):
+            continue
+        with pytest.raises(UnsupportedFeatureError) as exc_info:
+            adapter.session(
+                mcp_servers=[
+                    McpServerRef(name="remote", transport="sse", url="https://mcp.example.com/sse")
+                ]
+            )
+        assert exc_info.value.feature == Feature.TOOLS_MCP_SSE
+        text = str(exc_info.value).lower()
+        assert "sse" in text
+        # The actionable hint must point at http.
+        assert "http" in text
+
+
+def test_session_mcp_servers_kwarg_raises_on_codex_and_openai_compat(
+    adapters: list,
+) -> None:
+    """Phase 4 Iteration C: Codex + OpenAI-compat raise on every transport.
+
+    Claude opens cleanly (all three transports), Copilot opens cleanly
+    for stdio + http (SSE has its own specific test). The remaining
+    two adapters still surface
+    :class:`~airframe.errors.UnsupportedFeatureError` carrying the
+    offending transport's :class:`Feature` on the ``.feature``
+    attribute.
+    """
+    from airframe import ClaudeCodeRuntime, CopilotRuntime, McpServerRef
+    from airframe.errors import UnsupportedFeatureError
+
+    cases: list[tuple[McpServerRef, Feature]] = [
+        (
+            McpServerRef(
+                name="local", transport="stdio", command=["uvx", "mcp-server-everything"]
+            ),
+            Feature.TOOLS_MCP_STDIO,
+        ),
+        (
+            McpServerRef(name="remote-http", transport="http", url="https://mcp.example.com"),
+            Feature.TOOLS_MCP_HTTP,
+        ),
+        (
+            McpServerRef(name="remote-sse", transport="sse", url="https://mcp.example.com/sse"),
+            Feature.TOOLS_MCP_SSE,
+        ),
+    ]
+
+    for adapter in adapters:
+        if isinstance(adapter, ClaudeCodeRuntime | CopilotRuntime):
+            # Adapter-specific tests cover the accepting paths and (for
+            # Copilot's SSE decline) the vendor-specific message.
+            continue
+        for ref, expected_feature in cases:
+            with pytest.raises(UnsupportedFeatureError) as exc_info:
+                adapter.session(mcp_servers=[ref])  # type: ignore[attr-defined]
+            assert exc_info.value.feature == expected_feature, (
+                f"{type(adapter).__name__} should raise with "
+                f"feature={expected_feature.name!r} on a {ref.transport!r} ref; "
+                f"got feature={exc_info.value.feature!r}"
+            )
+
+
+def test_claude_session_mcp_servers_kwarg_opens_cleanly(adapters: list) -> None:
+    """Phase 4 Iteration B: Claude opens a session with each transport.
+
+    Sanity check at the matrix level — per-transport translation /
+    wire-shape assertions live in
+    ``tests/test_claude_code_session.py``.
+    """
+    from airframe import ClaudeCodeRuntime, McpServerRef
+
+    refs: list[McpServerRef] = [
+        McpServerRef(name="local", transport="stdio", command=["uvx", "x"]),
+        McpServerRef(name="remote-http", transport="http", url="https://mcp.example.com"),
+        McpServerRef(name="remote-sse", transport="sse", url="https://mcp.example.com/sse"),
+    ]
+
+    for adapter in adapters:
+        if not isinstance(adapter, ClaudeCodeRuntime):
+            continue
+        for ref in refs:
+            sess = adapter.session(mcp_servers=[ref])
+            assert sess is not None
+            # No actual connect yet — _ensure_client is lazy.
+            del sess
+
+
+def test_mcp_transports_final_matrix(adapters: list) -> None:
+    """The Phase-4 endgame matrix — pins the table from the
+    iteration-breakdown header.
+
+    +-------------------------+ stdio + http + sse + in_process +
+    | ClaudeCodeRuntime       |  ✓   |  ✓   |  ✓  |    ✗       |
+    | CopilotRuntime          |  ✓   |  ✓   |  ✗  |    ✗       |
+    | CodexRuntime            |  ✗   |  ✗   |  ✗  |    ✗       |
+    | OpenAICompatibleRuntime |  ✗   |  ✗   |  ✗  |    ✗       |
+
+    ``TOOLS_MCP_IN_PROCESS`` stays False on every adapter — Phase 4
+    doesn't expose an in-process transport on :class:`McpServerRef`;
+    the Phase 3 in-process MCP path on Claude is internal plumbing
+    for ``tools=`` rather than a user-facing capability. Flipping
+    it later requires exposing ``transport="in_process"`` on
+    :class:`McpServerRef`.
+    """
+    from airframe import (
+        ClaudeCodeRuntime,
+        CodexRuntime,
+        CopilotRuntime,
+        OpenCodeZenRuntime,
+    )
+
+    expected: dict[type, dict[Feature, bool]] = {
+        ClaudeCodeRuntime: {
+            Feature.TOOLS_MCP_STDIO: True,
+            Feature.TOOLS_MCP_HTTP: True,
+            Feature.TOOLS_MCP_SSE: True,
+            Feature.TOOLS_MCP_IN_PROCESS: False,
+        },
+        CopilotRuntime: {
+            Feature.TOOLS_MCP_STDIO: True,
+            Feature.TOOLS_MCP_HTTP: True,
+            Feature.TOOLS_MCP_SSE: False,
+            Feature.TOOLS_MCP_IN_PROCESS: False,
+        },
+        CodexRuntime: {
+            Feature.TOOLS_MCP_STDIO: False,
+            Feature.TOOLS_MCP_HTTP: False,
+            Feature.TOOLS_MCP_SSE: False,
+            Feature.TOOLS_MCP_IN_PROCESS: False,
+        },
+        OpenCodeZenRuntime: {
+            Feature.TOOLS_MCP_STDIO: False,
+            Feature.TOOLS_MCP_HTTP: False,
+            Feature.TOOLS_MCP_SSE: False,
+            Feature.TOOLS_MCP_IN_PROCESS: False,
+        },
+    }
+
+    seen_classes: set[type] = set()
+    for adapter in adapters:
+        cls = type(adapter)
+        if cls not in expected:
+            continue
+        seen_classes.add(cls)
+        for feature, want in expected[cls].items():
+            assert adapter.supports(feature) is want, (
+                f"{cls.__name__}.supports({feature.name}) should be {want}; final-matrix mismatch"
+            )
+    # Sanity: every expected adapter class actually appeared in the
+    # fixture so a typo in the fixture can't silently skip rows.
+    assert seen_classes == set(expected.keys()), (
+        f"adapters fixture didn't cover the full final-matrix; missing "
+        f"{set(expected.keys()) - seen_classes}"
+    )
+
+
+def test_session_mcp_servers_empty_list_is_a_no_op(adapters: list) -> None:
+    """An empty / ``None`` list never raises — same default as ``tools=``.
+
+    Iteration A's gate only fires on non-empty input; falsy values
+    open a session cleanly so consumers can write
+    ``session(mcp_servers=refs or None)`` without branching.
+    """
+    for adapter in adapters:
+        sess = adapter.session(mcp_servers=None)  # type: ignore[attr-defined]
+        assert sess is not None
+        del sess
+        sess = adapter.session(mcp_servers=[])  # type: ignore[attr-defined]
+        assert sess is not None
+        del sess
 
 
 def test_supports_accepts_optional_model_arg(adapters: list) -> None:

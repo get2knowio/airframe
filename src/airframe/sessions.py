@@ -32,7 +32,7 @@ from airframe.features import Feature
 from airframe.inputs import FileInput, ImageInput
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Callable
 
     from pydantic import BaseModel
 
@@ -40,7 +40,7 @@ if TYPE_CHECKING:
     from airframe.inputs import Prompt
     from airframe.protocol import AgentRuntime, ProviderModel, RuntimeResult
     from airframe.thinking import ThinkingMode
-    from airframe.tools import FunctionTool
+    from airframe.tools import FunctionTool, McpServerRef
 
 
 def _coerce_prompt_or_raise(prompt: Prompt, *, adapter_label: str) -> str:
@@ -182,6 +182,114 @@ def _check_tools_supported(
     )
 
 
+_MCP_TRANSPORT_TO_FEATURE: dict[str, Feature] = {
+    "stdio": Feature.TOOLS_MCP_STDIO,
+    "http": Feature.TOOLS_MCP_HTTP,
+    "sse": Feature.TOOLS_MCP_SSE,
+}
+
+
+def _compose_mcp_headers(ref: McpServerRef) -> dict[str, str]:
+    """Compose the ``headers`` dict for a network-transport
+    :class:`~airframe.tools.McpServerRef`.
+
+    Shared by every adapter that wires MCP. :attr:`McpServerRef.auth_token`
+    becomes ``Authorization: Bearer <token>``; caller-supplied
+    :attr:`McpServerRef.headers` layers on top so an explicit
+    ``Authorization`` value wins on collision (the shorthand is just a
+    shorthand). Returns an empty dict when neither field is set so the
+    caller can drop the ``headers`` key entirely and keep the vendor
+    wire shape minimal.
+    """
+    merged: dict[str, str] = {}
+    if ref.auth_token is not None:
+        merged["Authorization"] = f"Bearer {ref.auth_token}"
+    if ref.headers:
+        merged.update(ref.headers)
+    return merged
+
+
+def _mcp_servers_fingerprint(refs: list[McpServerRef] | None) -> str:
+    """Build a deterministic, secret-free fingerprint of an MCP refs list.
+
+    Shared by every adapter that bakes ``mcp_servers`` into a vendor
+    session at connect time (Claude's
+    :attr:`ClaudeAgentOptions.mcp_servers`, Copilot's
+    :meth:`CopilotClient.create_session` ``mcp_servers=`` kwarg). The
+    fingerprint participates from each ref's ``name``, ``transport``,
+    ``command``, ``url``, and the *sorted keys* of ``headers`` —
+    never the header values, never ``auth_token``. That way sensitive
+    material doesn't enter the in-process cache identity, and
+    rotating a bearer token doesn't accidentally invalidate the cache
+    (caller can ``close()`` the session if they want a hard reset).
+    """
+    if not refs:
+        return "__no_mcp_servers__"
+    parts: list[str] = []
+    for ref in refs:
+        header_keys = ",".join(sorted((ref.headers or {}).keys()))
+        cmd = ",".join(ref.command) if ref.command else ""
+        parts.append(f"{ref.name}|{ref.transport}|{cmd}|{ref.url or ''}|{header_keys}")
+    return "||".join(parts)
+
+
+def _check_mcp_servers_supported(
+    refs: list[McpServerRef] | None,
+    *,
+    adapter_label: str,
+    supports: Callable[[Feature], bool],
+) -> None:
+    """Gate ``session(mcp_servers=...)`` against per-transport capability flags.
+
+    Phase 4 Iteration A scaffolds the ``mcp_servers=`` kwarg on every
+    :meth:`AgentRuntime.session` signature but defers the per-adapter
+    wiring to Iterations B (Claude — all three transports), C (Copilot
+    — stdio + http; SSE declines), and D (Codex + OpenAI-compat
+    permanent declines). Until each adapter flips the matching
+    :data:`~airframe.features.Feature.TOOLS_MCP_STDIO` /
+    :data:`~airframe.features.Feature.TOOLS_MCP_HTTP` /
+    :data:`~airframe.features.Feature.TOOLS_MCP_SSE` True, a non-empty
+    list raises here with the *specific* feature of the first
+    unsupported ref — so a mixed list (stdio + http) on a stdio-only
+    adapter raises with ``feature=TOOLS_MCP_HTTP`` when the http ref
+    comes second.
+
+    A ``None`` (or empty) list is always permitted — it's the no-op
+    default and doesn't exercise any unwired surface.
+
+    Args:
+        refs: The list passed to ``session(mcp_servers=...)``.
+        adapter_label: Adapter name for the error message.
+        supports: Callable answering ``runtime.supports(feature)`` —
+            passed in so this helper doesn't need a runtime reference
+            (same shape as :func:`_check_tools_supported`).
+
+    Raises:
+        UnsupportedFeatureError: ``refs`` contains at least one entry
+            whose transport's :class:`Feature` flag returns ``False``.
+    """
+    if not refs:
+        return
+    for ref in refs:
+        feature = _MCP_TRANSPORT_TO_FEATURE.get(ref.transport)
+        if feature is None:  # pragma: no cover — Literal narrows this
+            raise UnsupportedFeatureError(
+                f"{adapter_label}: McpServerRef(name={ref.name!r}) declares "
+                f"unknown transport {ref.transport!r}; expected one of "
+                f"'stdio', 'http', 'sse'.",
+                feature=None,
+            )
+        if supports(feature):
+            continue
+        raise UnsupportedFeatureError(
+            f"{adapter_label}: mcp_servers= entry {ref.name!r} uses "
+            f"transport {ref.transport!r}, which is not wired on this "
+            f"adapter yet. Check runtime.supports(Feature.{feature.name}) "
+            f"before passing mcp_servers=[McpServerRef(...)].",
+            feature=feature,
+        )
+
+
 class _ThinAgentSession:
     """Iteration B :class:`AgentSession` — thin wrapper over ``runtime.execute()``.
 
@@ -318,8 +426,11 @@ def _open_thin_session(
 
 __all__ = [
     "_ThinAgentSession",
+    "_check_mcp_servers_supported",
     "_check_tools_supported",
     "_coerce_prompt_or_raise",
+    "_compose_mcp_headers",
+    "_mcp_servers_fingerprint",
     "_open_thin_session",
     "_split_prompt_parts",
 ]
