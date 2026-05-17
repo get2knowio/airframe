@@ -1,6 +1,6 @@
 """:class:`FunctionTool` — typed Python callable the model can invoke.
 
-Phase 3 of the [implementation plan](../../docs/implementation-plan.md)
+Phase 3 of the [implementation plan](../../dev-docs/implementation-plan.md)
 introduces ``tools=[FunctionTool(...)]`` on
 :meth:`AgentRuntime.session`. Each :class:`FunctionTool` registers one
 Python coroutine the model can call mid-turn; airframe handles the
@@ -120,7 +120,7 @@ class McpServerRef:
     """One MCP server the model may invoke tools on during a session.
 
     Phase 4 of the [implementation
-    plan](../../docs/implementation-plan.md) introduces
+    plan](../../dev-docs/implementation-plan.md) introduces
     ``mcp_servers=[McpServerRef(...)]`` on
     :meth:`AgentRuntime.session`. Each ref names a Model Context
     Protocol server the adapter wires through its vendor SDK's native

@@ -1,6 +1,6 @@
 """:class:`ImageInput` / :class:`FileInput` — polymorphic prompt parts.
 
-Phase 2 of the [implementation plan](../../docs/implementation-plan.md)
+Phase 2 of the [implementation plan](../../dev-docs/implementation-plan.md)
 makes :meth:`AgentSession.execute` and :meth:`AgentSession.stream`
 accept ``prompt: Prompt`` where :data:`Prompt` is either a plain
 ``str`` (the v0-through-Phase-1 shape, still works) or a list of

@@ -355,7 +355,7 @@ class AgentRuntime(Protocol):
         """Open a multi-turn session against this runtime.
 
         Phase 1 of the [implementation
-        plan](../../docs/implementation-plan.md) introduces sessions
+        plan](../../dev-docs/implementation-plan.md) introduces sessions
         as the "hinge" abstraction — every later kwarg
         (``thinking=``, ``tools=``, ``mcp_servers=``,
         ``on_permission=``) attaches to the session, not the runtime.

@@ -1,6 +1,6 @@
 """:class:`RuntimeEvent` — the streaming event taxonomy.
 
-Phase 1 of the [implementation plan](../../docs/implementation-plan.md)
+Phase 1 of the [implementation plan](../../dev-docs/implementation-plan.md)
 introduces :class:`~airframe.protocol.AgentSession` and its
 ``stream()`` method. This module defines the discriminated union
 ``stream()`` yields, modelled on the deltas every major agent SDK

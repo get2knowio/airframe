@@ -1,6 +1,6 @@
 """:class:`ThinkingMode` — portable reasoning-effort control.
 
-Phase 2 of the [implementation plan](../../docs/implementation-plan.md)
+Phase 2 of the [implementation plan](../../dev-docs/implementation-plan.md)
 introduces the ``thinking=`` kwarg on :meth:`AgentSession.execute` /
 :meth:`AgentSession.stream`. This module defines the value type.
 

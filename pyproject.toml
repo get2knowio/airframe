@@ -58,9 +58,12 @@ all = [
 
 [project.urls]
 Homepage = "https://github.com/get2knowio/airframe"
+Documentation = "https://github.com/get2knowio/airframe/tree/main/docs"
 Repository = "https://github.com/get2knowio/airframe"
 Issues = "https://github.com/get2knowio/airframe/issues"
 Changelog = "https://github.com/get2knowio/airframe/blob/main/CHANGELOG.md"
+"Architecture" = "https://github.com/get2knowio/airframe/blob/main/docs/architecture.md"
+"Security" = "https://github.com/get2knowio/airframe/blob/main/SECURITY.md"
 
 [dependency-groups]
 test = [
@@ -86,6 +89,18 @@ dev = [
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/airframe"]
+
+[tool.hatch.build.targets.sdist]
+# Dev-internal docs (implementation-plan / feature-roadmap) and the
+# devcontainer config don't belong in the published sdist. Examples
+# stay in because they're useful as live probes for end users.
+exclude = [
+    "dev-docs/",
+    ".devcontainer/",
+    ".github/",
+    "CLAUDE.md",
+    "memory/",
+]
 
 [tool.ruff]
 line-length = 99

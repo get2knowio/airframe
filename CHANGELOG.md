@@ -6,6 +6,86 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### v1.0-readiness docs sprint
+
+Documentation-focused follow-up to the v1.0-readiness work below.
+No code changes; the goal is parity with the PyPI documentation
+patterns of comparable multi-vendor libraries (`litellm`,
+`pydantic-ai`, `instructor`).
+
+#### Added
+
+- **`SECURITY.md`** at repo root — disclosure workflow (GitHub
+  security advisory preferred, email fallback), in-scope /
+  out-of-scope, supported-versions table, credential-handling
+  guarantees.
+- **`docs/auth.md`** — single page summarising all four adapters'
+  credential resolution chains side by side, plus CI patterns and
+  the "credentials never leave airframe" guarantees.
+- **`docs/capabilities.md`** — per-`Feature` semantics across
+  adapters; the README matrix as the executive summary, per-feature
+  deep dives here.
+- **`docs/reference.md`** — hand-curated API reference covering
+  every top-level export with cross-links into the source. Modelled
+  on `openai-python`'s `api.md`.
+- **`docs/cookbook.md`** — table of `examples/probe_*.py` scripts
+  grouped by phase, with one-sentence descriptions and the shared
+  probe-script shape consumers can copy.
+- **`docs/adapters/claude.md`**, **`docs/adapters/copilot.md`**,
+  **`docs/adapters/codex.md`**, **`docs/adapters/opencode-zen.md`**
+  — per-adapter pages: install extra, auth chain link, supported
+  features table, `<Vendor>Options` field reference, model IDs,
+  structured-output mechanism, vendor quirks & landmines, native
+  escape hatches.
+- **`docs/adapters/third-party.md`** — how to write a custom adapter
+  against the `airframe.adapters` entry-point group. Covers both
+  the `OpenAICompatibleRuntime` subclass shape (~30 lines) and the
+  full bespoke `AgentRuntime` shape; conformance + integration
+  contract usage; a complete checklist.
+- **PyPI badges** on the README (PyPI version, Python versions,
+  license, CI status).
+- **PyPI project URLs** in `pyproject.toml` — `Documentation`,
+  `Architecture`, `Security` populate the PyPI sidebar.
+
+#### Changed
+
+- **README rewritten** — 572 → ~300 lines. New order: badges →
+  tagline → Quickstart → Supported providers → Capability matrix →
+  Why? → Install → Sessions/streaming → Errors → Escape hatch →
+  Live probes → Documentation (link tree) → Development. The
+  protocol Python block moved to `docs/reference.md`; the
+  streaming + tools + MCP mega-example moved to `docs/cookbook.md`
+  / per-adapter pages; the errors deep-dive moved to
+  `docs/reference.md#errors`.
+- **`docs/architecture.md`** — "Where to look next" section updated
+  to point at the new docs (auth, capabilities, reference,
+  per-adapter pages, third-party).
+- **Dev-internal docs moved out of `docs/`** —
+  `docs/implementation-plan.md` → `dev-docs/implementation-plan.md`;
+  `docs/feature-roadmap.md` → `dev-docs/feature-roadmap.md`. Both
+  are dev-internal; the published `docs/` tree is now end-user-only.
+- **sdist exclusions** in `pyproject.toml` — `dev-docs/`,
+  `.devcontainer/`, `.github/`, `CLAUDE.md`, `memory/` excluded
+  from the published source distribution.
+- **In-repo path updates** for the moved dev-docs — `CLAUDE.md`,
+  module docstrings under `src/airframe/`, `docs/architecture.md`,
+  `examples/probe_supports.py`, and `tests/test_features.py` all
+  point at `dev-docs/implementation-plan.md` / `feature-roadmap.md`
+  where the references survived the move.
+
+#### Notes
+
+- Tests unchanged; the 683 unit + 33 integration-skip count carries
+  through.
+- The CHANGELOG remains a single file; per the audit recommendation,
+  archiving pre-1.0 entries to a `CHANGELOG.archive.md` waits for
+  the 1.0 release itself.
+- No `MIGRATION.md` or `CODE_OF_CONDUCT.md` shipped — both can wait
+  until they're load-bearing (a breaking change for MIGRATION; a
+  third external contributor for CODE_OF_CONDUCT).
+
+---
+
 ### v1.0-readiness pass (docs + TCK + ProviderOptions + integration suite)
 
 A documentation-honesty + test-breadth sweep before cutting v1.0.

@@ -376,11 +376,12 @@ each adapter's `_PRICING` / `_METADATA` dict.
 
 ## Where to look next
 
-* `docs/implementation-plan.md` — phased rollout (Phase 0 through
-  6 / 7+), version targets, gating decisions, and the criteria for
-  cutting v1.0.
-* `docs/feature-roadmap.md` — per-SDK feature audit and prioritised
-  cross-vendor work.
+* `dev-docs/implementation-plan.md` — phased rollout (Phase 0
+  through 6 / 7+), version targets, gating decisions, and the
+  criteria for cutting v1.0. *(Dev-internal; not published to
+  PyPI.)*
+* `dev-docs/feature-roadmap.md` — per-SDK feature audit and
+  prioritised cross-vendor work. *(Dev-internal.)*
 * `examples/probe_*.py` — live-vendor probes that exercise each
   adapter end-to-end. Including:
   - `probe_streaming.py` — `session.stream()` against any installed
