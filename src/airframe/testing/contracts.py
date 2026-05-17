@@ -26,8 +26,9 @@ from typing import Any
 
 import pytest
 
+from airframe.events import TurnComplete
 from airframe.features import Feature
-from airframe.protocol import ProviderModel
+from airframe.protocol import AgentSession, ProviderModel
 
 # ---------------------------------------------------------------------------
 # Lifecycle contracts
@@ -249,10 +250,154 @@ def test_validate_binding_returns_bool(adapter_runtime: Any) -> None:
     )
 
 
+# ---------------------------------------------------------------------------
+# session() factory contracts — Phase 1 (Iteration B)
+# ---------------------------------------------------------------------------
+
+
+def test_session_factory_returns_agent_session(adapter_runtime: Any) -> None:
+    """``runtime.session()`` returns an object satisfying ``AgentSession``.
+
+    Phase 1 Iteration B lands the factory on every adapter; the
+    returned object exposes ``id``, ``execute``, ``stream``,
+    ``cancel``, ``close``. The :class:`AgentSession` Protocol is
+    ``runtime_checkable`` so :func:`isinstance` is the right gate.
+    """
+    sess = adapter_runtime.session()
+    try:
+        assert isinstance(sess, AgentSession), (
+            f"{type(adapter_runtime).__name__}.session() returned "
+            f"{type(sess).__name__}, which doesn't satisfy AgentSession"
+        )
+        # ``id`` is part of the protocol surface — accessible without raising.
+        assert sess.id is None or isinstance(sess.id, str), (
+            f"AgentSession.id must be `str | None`; got {type(sess.id).__name__}"
+        )
+    finally:
+        # Eagerly close so a leaked subprocess / HTTP client doesn't
+        # outlive the test.
+        import asyncio
+
+        asyncio.run(_safe_close(sess))
+
+
+async def _safe_close(sess: Any) -> None:
+    """Helper used by the synchronous session-factory contracts."""
+    try:
+        await sess.close()
+    except Exception:  # noqa: BLE001 — contract test, never raise from teardown
+        pass
+
+
+async def test_session_close_is_idempotent(adapter_runtime: Any) -> None:
+    """``session.close()`` is safe to call repeatedly.
+
+    Same discipline as :meth:`AgentRuntime.close` — sessions are
+    routinely torn down in ``finally`` blocks and async-context-manager
+    ``__aexit__`` paths where shadowing the underlying exception would
+    be catastrophic. The contract is checked structurally so adapter
+    authors can't accidentally ship a single-shot ``close()``.
+    """
+    sess = adapter_runtime.session()
+    await sess.close()
+    await sess.close()
+    await sess.close()
+
+
+async def test_session_close_on_fresh_session_is_safe(adapter_runtime: Any) -> None:
+    """Closing a never-used session must not raise.
+
+    Caller code commonly opens a session inside a ``try`` that fails
+    before the first :meth:`execute`; the ``finally`` still calls
+    :meth:`close`. That path must work without a constructed vendor
+    handle.
+    """
+    sess = adapter_runtime.session()
+    await sess.close()
+
+
+async def test_session_cancel_when_idle_is_noop(adapter_runtime: Any) -> None:
+    """``session.cancel()`` when no turn is in flight is a no-op.
+
+    The :class:`AgentSession` docstring is explicit: ``cancel()`` is
+    cheap and idempotent; the unsupported-capability branch only fires
+    *while a turn is running*. A fresh session has nothing in flight,
+    so the call returns without raising — regardless of whether the
+    adapter declares :data:`~airframe.features.Feature.CANCEL`.
+    """
+    sess = adapter_runtime.session()
+    try:
+        await sess.cancel()
+        await sess.cancel()
+    finally:
+        await sess.close()
+
+
+def test_session_stream_is_async_generator(adapter_runtime: Any) -> None:
+    """``session.stream()`` is an async-generator method.
+
+    Structural check that the implementation uses ``yield`` (i.e.
+    returns an :class:`~collections.abc.AsyncGenerator` when called),
+    not a coroutine that *returns* an iterator. Catches the easy
+    typo of ``async def stream(...) -> ...: return iter(...)`` which
+    typechecks but breaks the ``async for event in session.stream():``
+    pattern.
+    """
+    import inspect
+
+    method = type(adapter_runtime.session()).stream
+    assert inspect.isasyncgenfunction(method), (
+        f"{type(adapter_runtime).__name__}.session().stream must be an "
+        f"async generator (async def + yield); got "
+        f"{'coroutine' if inspect.iscoroutinefunction(method) else 'function'}"
+    )
+
+
+def test_session_resume_not_implemented_until_feature_flips(adapter_runtime: Any) -> None:
+    """Adapters not declaring SESSION_RESUME must refuse ``session(resume=...)``.
+
+    The implementation plan's "no silent fallbacks" principle: a
+    capability declined must raise, never quietly drop the request.
+    Two acceptable shapes:
+
+    * :class:`NotImplementedError` — Iteration B's
+      :func:`~airframe.sessions._open_thin_session` raises this; signals
+      "the API exists in the protocol but this adapter hasn't wired it
+      yet" (will land in a later iteration).
+    * :class:`~airframe.errors.UnsupportedFeatureError` — Iteration C+
+      bespoke sessions raise this; signals "this capability will
+      *never* land on this adapter" (e.g., chat-completions vendors
+      can't resume server-side).
+
+    Adapters declaring :data:`~airframe.features.Feature.SESSION_RESUME`
+    opt out of this contract — the resume call should succeed.
+    """
+    if adapter_runtime.supports(Feature.SESSION_RESUME):
+        return  # Adapter wired resume; structural contract doesn't apply.
+
+    import pytest as _pytest
+
+    from airframe.errors import UnsupportedFeatureError
+
+    with _pytest.raises((NotImplementedError, UnsupportedFeatureError, ValueError, TypeError)):
+        adapter_runtime.session(resume="any-string")
+
+
+# ``TurnComplete`` is exported alongside the contracts so integration-test
+# fixtures (Phase 1 Iteration B+) can build the trailing event without
+# re-importing it from airframe.events. Re-exporting here keeps the
+# contracts module self-contained for adapter authors.
 __all__ = [
+    "TurnComplete",
     "test_close_is_idempotent",
     "test_close_on_fresh_runtime",
     "test_plain_text_execute_path_is_wired",
+    "test_session_cancel_when_idle_is_noop",
+    "test_session_close_is_idempotent",
+    "test_session_close_on_fresh_session_is_safe",
+    "test_session_factory_returns_agent_session",
+    "test_session_resume_not_implemented_until_feature_flips",
+    "test_session_stream_is_async_generator",
     "test_supports_accepts_model_kwarg",
     "test_supports_is_idempotent",
     "test_supports_returns_bool_for_every_feature",

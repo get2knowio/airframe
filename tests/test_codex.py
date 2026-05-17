@@ -536,50 +536,58 @@ async def test_cost_usd_none_for_unknown_model(mock_sdk: dict[str, Any]) -> None
 
 
 @pytest.mark.asyncio
-async def test_reset_drops_thread(mock_sdk: dict[str, Any]) -> None:
-    rt = CodexRuntime()
-    await rt.execute("hi", schema=_Schema)
-    assert rt._thread is not None
+async def test_reset_is_noop_after_iteration_g() -> None:
+    """Phase 1 Iteration G: the runtime no longer caches a Thread.
 
-    await rt.reset()
-    assert rt._thread is None
-    assert rt._thread_key is None
-
-
-@pytest.mark.asyncio
-async def test_close_drops_thread_and_client(mock_sdk: dict[str, Any]) -> None:
-    rt = CodexRuntime()
-    await rt.execute("hi", schema=_Schema)
-
-    await rt.close()
-    assert rt._thread is None
-    assert rt._client is None
-
-
-@pytest.mark.asyncio
-async def test_reset_with_no_thread_is_noop() -> None:
+    Per-call sessions own that. reset() / close() on a never-used
+    runtime are no-ops; close() additionally drops the cached Codex
+    client (cheap, no subprocess until thread.run()).
+    """
     rt = CodexRuntime()
     await rt.reset()
     await rt.close()
 
 
 @pytest.mark.asyncio
-async def test_thread_reused_when_model_matches(mock_sdk: dict[str, Any]) -> None:
+async def test_close_drops_codex_client(mock_sdk: dict[str, Any]) -> None:
+    """close() drops the runtime's cached Codex reference."""
+    rt = CodexRuntime()
+    rt._ensure_client()  # noqa: SLF001 — populate the runtime-level client
+    assert rt._client is not None  # noqa: SLF001
+    await rt.close()
+    assert rt._client is None  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+async def test_execute_creates_thread_per_call(mock_sdk: dict[str, Any]) -> None:
+    """Iteration G: each execute() opens a session → spawns one Thread, closes it.
+
+    Two execute() calls → two start_thread invocations. Consumers
+    wanting Thread reuse open a session explicitly and call
+    ``session.execute()`` repeatedly.
+    """
     rt = CodexRuntime(model="gpt-5-codex")
     await rt.execute("hi", schema=_Schema)
     await rt.execute("hi again", schema=_Schema)
-
-    # start_thread called once across both executes.
-    assert mock_sdk["client"].start_thread.call_count == 1
+    assert mock_sdk["client"].start_thread.call_count == 2
 
 
 @pytest.mark.asyncio
-async def test_thread_recreated_when_model_changes(mock_sdk: dict[str, Any]) -> None:
-    rt = CodexRuntime()
-    await rt.execute("hi", schema=_Schema, model=ProviderModel("codex", "gpt-5-codex"))
-    await rt.execute("hi", schema=_Schema, model=ProviderModel("codex", "o5-codex"))
+async def test_session_reuses_thread_across_turns(mock_sdk: dict[str, Any]) -> None:
+    """Session-level thread reuse — covered in detail by test_codex_session.py.
 
-    assert mock_sdk["client"].start_thread.call_count == 2
+    Smoke check here that the runtime exposes a session that holds
+    onto its Thread across multiple turns, distinct from the per-call
+    sugar above.
+    """
+    rt = CodexRuntime(model="gpt-5-codex")
+    sess = rt.session()
+    try:
+        await sess.execute("hi", schema=_Schema)
+        await sess.execute("hi again", schema=_Schema)
+    finally:
+        await sess.close()
+    assert mock_sdk["client"].start_thread.call_count == 1
 
 
 # ---------------------------------------------------------------------------

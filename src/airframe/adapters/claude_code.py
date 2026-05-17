@@ -44,7 +44,7 @@ import asyncio
 import logging
 import os
 from dataclasses import dataclass, field
-from typing import Any, ClassVar, TypeVar
+from typing import TYPE_CHECKING, Any, ClassVar, TypeVar
 
 from pydantic import BaseModel
 
@@ -52,19 +52,29 @@ from airframe.cost import CostRecord
 from airframe.errors import (
     AgentRuntimeError,
     RuntimeAuthError,
+    RuntimeCancelledError,
     RuntimeProtocolError,
     RuntimeServerStartError,
     RuntimeStructuredOutputError,
     RuntimeTransientError,
+    UnsupportedFeatureError,
 )
+from airframe.events import ReasoningDelta, RuntimeEvent, TextDelta, TurnComplete
 from airframe.features import Feature
+from airframe.inputs import Prompt
 from airframe.models import ModelInfo
 from airframe.protocol import (
     AgentRuntime,
+    AgentSession,
     ProviderModel,
     RuntimeResult,
     UnsupportedBindingError,
 )
+from airframe.sessions import _split_prompt_parts
+from airframe.thinking import ThinkingMode
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
 
 logger = logging.getLogger(__name__)
 
@@ -131,12 +141,51 @@ class ClaudeCodeRuntime(AgentRuntime):
     #: pip extra that brings the vendor SDK in.
     EXTRA_NAME: ClassVar[str] = "claude"
 
-    #: Features this runtime exposes today. Phase 0 declares only
-    #: the structured-output capability that's already wired through
-    #: ``execute(schema=...)``; later phases flip more bits on as
-    #: their respective APIs land.
+    #: Features this runtime exposes today.
+    #:
+    #: * ``STRUCTURED_OUTPUT_JSON_SCHEMA`` — wired via
+    #:   ``ClaudeAgentOptions.output_format`` (Phase 0).
+    #: * ``STREAMING`` — wired via :class:`ClaudeCodeSession` using
+    #:   ``include_partial_messages=True`` + filtering for
+    #:   ``content_block_delta`` / ``thinking_delta`` events on
+    #:   :meth:`ClaudeSDKClient.receive_response` (Phase 1, Iteration D).
+    #: * ``SESSION_RESUME`` — wired via ``ClaudeAgentOptions.resume``;
+    #:   :meth:`AgentRuntime.session` accepts ``resume=<session_id>``
+    #:   (Phase 1, Iteration D). The session ID surfaces on
+    #:   :attr:`AgentSession.id` after the first turn.
+    #: * ``CANCEL`` — wired via :meth:`ClaudeSDKClient.interrupt`
+    #:   plus :func:`asyncio.Task.cancel` on the in-flight execute task
+    #:   (Phase 1, Iteration D).
+    #: * ``REASONING_EFFORT`` — wired via ``ClaudeAgentOptions.effort``
+    #:   (``"low" | "medium" | "high"``). The Anthropic SDK has a
+    #:   richer enum (``"xhigh"``, ``"max"``); airframe stays on the
+    #:   portable intersection. ``"minimal"`` is coerced to ``"low"``
+    #:   with a debug-level log since Anthropic has no equivalent
+    #:   (Phase 2, Iteration B).
+    #: * ``REASONING_BUDGET_TOKENS`` — wired via
+    #:   ``ClaudeAgentOptions.thinking = {"type": "enabled",
+    #:   "budget_tokens": N}`` when ``thinking={"budget_tokens": N}``
+    #:   is passed. Claude-only — no other adapter supports a token
+    #:   budget (Phase 2, Iteration B).
+    #: * ``VISION_INPUT`` / ``FILE_INPUT`` — both wired via the SDK's
+    #:   Read tool (auto-allowed for prompt-attached paths). The
+    #:   adapter appends an ``Attached files (use the Read tool):``
+    #:   block to the prompt text and adds ``"Read"`` to
+    #:   :attr:`ClaudeAgentOptions.allowed_tools`. Cache key includes
+    #:   whether attachments are present so a no-attachment → with-
+    #:   attachment switch reconnects with the right tools list.
+    #:   Path-only in v0; bytes/URL raise (Phase 2, Iteration C).
     SUPPORTED_FEATURES: ClassVar[frozenset[Feature]] = frozenset(
-        {Feature.STRUCTURED_OUTPUT_JSON_SCHEMA}
+        {
+            Feature.STRUCTURED_OUTPUT_JSON_SCHEMA,
+            Feature.STREAMING,
+            Feature.SESSION_RESUME,
+            Feature.CANCEL,
+            Feature.REASONING_EFFORT,
+            Feature.REASONING_BUDGET_TOKENS,
+            Feature.VISION_INPUT,
+            Feature.FILE_INPUT,
+        }
     )
 
     def __init__(
@@ -155,99 +204,47 @@ class ClaudeCodeRuntime(AgentRuntime):
         # paths. We don't mutate os.environ — we set it per-spawn via
         # ClaudeAgentOptions.env.
         self._api_key_override = api_key
-
-        self._client: Any | None = None  # claude_agent_sdk.ClaudeSDKClient
-        self._client_key: str | None = None
+        # Phase 1 Iteration G: the runtime no longer caches a
+        # ClaudeSDKClient — sessions own it. The runtime is genuinely
+        # sessionless, holding only config (model / max_turns / api key).
 
     # --- AgentRuntime interface ---------------------------------------------
 
     async def execute(
         self,
-        prompt: str,
+        prompt: Prompt,
         *,
         schema: type[BaseModel] | None = None,
         system: str | None = None,
         persona: str | None = None,
         model: ProviderModel | None = None,
+        thinking: ThinkingMode = None,
         timeout: float = 600.0,
     ) -> RuntimeResult:
-        model_id = self._resolve_model(model)
-        client = await self._ensure_client(schema=schema, system=system, model=model_id)
+        # Phase 1 Iteration G: ``execute()`` is documented sugar for
+        # ``runtime.session(...).execute(...) + close()``. Single-turn,
+        # ephemeral — the underlying ClaudeSDKClient is spawned and
+        # disconnected per call. Consumers wanting context warmth across
+        # calls open a session explicitly and reuse it.
+        del persona  # accepted in the protocol but not consumed by Claude
+        sess = self.session(system=system, model=model)
         try:
-            result_msg = await asyncio.wait_for(
-                self._query_and_drain(client, prompt),
-                timeout=timeout,
-            )
-        except TimeoutError as exc:
-            raise RuntimeTransientError(
-                f"claude_code: execute timed out after {timeout}s"
-            ) from exc
-        except Exception as exc:
-            raise self._classify_exception(exc) from exc
-
-        if result_msg is None:
-            raise RuntimeProtocolError("claude_code: stream closed without a ResultMessage")
-        if getattr(result_msg, "is_error", False):
-            err_text = (result_msg.errors or [])[:1] or [result_msg.subtype or "unknown"]
-            raise AgentRuntimeError(
-                f"claude_code: is_error subtype={result_msg.subtype} {err_text}"
-            )
-
-        text = result_msg.result or ""
-
-        if schema is None:
-            # Plain-text mode: the SDK's ``ResultMessage.result`` already
-            # carries the concatenated final assistant text. No structured
-            # payload to extract; just return the text.
-            return RuntimeResult(
-                text=text,
-                structured=None,
-                cost=self._cost_from_result(result_msg, model_id=model_id),
-                finish=result_msg.stop_reason,
-                raw=result_msg,
-            )
-
-        structured = getattr(result_msg, "structured_output", None)
-        if structured is None:
-            preview = text[:300]
-            logger.debug(
-                "claude_code.structured_output_missing stop_reason=%s subtype=%s preview=%r",
-                result_msg.stop_reason,
-                getattr(result_msg, "subtype", None),
-                preview,
-            )
-            raise RuntimeStructuredOutputError(
-                f"claude_code: structured_output was empty "
-                f"(stop_reason={result_msg.stop_reason}, "
-                f"subtype={getattr(result_msg, 'subtype', None)})",
-                body={
-                    "stop_reason": result_msg.stop_reason,
-                    "subtype": getattr(result_msg, "subtype", None),
-                    "result": result_msg.result,
-                },
-            )
-
-        return RuntimeResult(
-            text=text,
-            structured=structured,
-            cost=self._cost_from_result(result_msg, model_id=model_id),
-            finish=result_msg.stop_reason,
-            raw=result_msg,
-        )
+            return await sess.execute(prompt, schema=schema, thinking=thinking, timeout=timeout)
+        finally:
+            await sess.close()
 
     async def reset(self) -> None:
-        client = self._client
-        self._client = None
-        self._client_key = None
-        if client is None:
-            return
-        try:
-            await client.disconnect()
-        except Exception as exc:  # noqa: BLE001 — teardown never raises
-            logger.debug("claude_code_runtime.reset_failed error=%s", exc)
+        # Phase 1 Iteration G: the runtime no longer caches a session-
+        # scoped client. ``execute()`` opens and closes its session
+        # per call, so there is nothing scope-bound to drop here.
+        # Kept as a no-op for protocol completeness and back-compat.
+        return None
 
     async def close(self) -> None:
-        await self.reset()
+        # Phase 1 Iteration G: the runtime is sessionless — no
+        # subprocess, no HTTP client, no long-lived vendor handle to
+        # release. Kept as a no-op for protocol completeness.
+        return None
 
     def validate_binding(self, binding: ProviderModel) -> bool:
         return binding.provider_id == self.PROVIDER_ID
@@ -264,16 +261,58 @@ class ClaudeCodeRuntime(AgentRuntime):
         if isinstance(self, cls):
             return self  # type: ignore[return-value]
         if cls is ClaudeSDKClient:
-            if self._client is None:
-                raise TypeError(
-                    "ClaudeCodeRuntime.unwrap(ClaudeSDKClient): no client "
-                    "exists yet — call execute() first or use the runtime "
-                    "instance directly for setup."
-                )
-            return self._client  # type: ignore[return-value]
+            # Phase 1 Iteration G moved the SDK client off the runtime
+            # onto the session. The runtime is now sessionless, so this
+            # type is reachable only via ``session.unwrap(ClaudeSDKClient)``.
+            raise TypeError(
+                "ClaudeCodeRuntime no longer owns a ClaudeSDKClient — "
+                "sessions do. Open a session with `sess = runtime.session(...)`, "
+                "run a turn, then call `sess.unwrap(ClaudeSDKClient)`."
+            )
         raise TypeError(
-            f"ClaudeCodeRuntime cannot unwrap to {cls!r}; supported types are "
-            f"ClaudeCodeRuntime and claude_agent_sdk.ClaudeSDKClient."
+            f"ClaudeCodeRuntime cannot unwrap to {cls!r}; only "
+            f"ClaudeCodeRuntime is supported on the runtime today. "
+            f"Vendor session objects live on AgentSession — use "
+            f"session.unwrap(NativeType)."
+        )
+
+    def session(
+        self,
+        *,
+        resume: str | None = None,
+        system: str | None = None,
+        model: ProviderModel | None = None,
+        provider_options: Any | None = None,
+    ) -> AgentSession:
+        """Open a bespoke :class:`ClaudeCodeSession`.
+
+        Phase 1 Iteration D replaces the
+        :class:`~airframe.sessions._ThinAgentSession` placeholder with
+        a session that owns its own :class:`ClaudeSDKClient` lifecycle:
+        streaming via ``include_partial_messages=True``, native
+        session resume via :attr:`ClaudeAgentOptions.resume`, and
+        cancellation via :meth:`ClaudeSDKClient.interrupt`.
+
+        Args:
+            resume: Vendor-assigned Claude session ID to resume — the
+                value surfaced on a prior :class:`ResultMessage` /
+                :class:`AssistantMessage` ``session_id`` field. ``None``
+                opens a fresh session.
+            system: System prompt baked into
+                :attr:`ClaudeAgentOptions.system_prompt` at connect.
+            model: Default :class:`ProviderModel` for every turn in
+                the session.
+            provider_options: Reserved for Phase 2+ (currently unused).
+        """
+        # provider_options accepted but unused — Phase 2+ fills each
+        # ProviderOptions dataclass as the corresponding feature lands.
+        del provider_options
+        model_id = self._resolve_model(model) if model is not None else self._default_model
+        return ClaudeCodeSession(
+            self,
+            resume=resume,
+            system=system,
+            model_id=model_id,
         )
 
     async def list_models(self) -> list[ModelInfo]:
@@ -357,71 +396,12 @@ class ClaudeCodeRuntime(AgentRuntime):
             )
         return model.model_id
 
-    async def _ensure_client(
-        self,
-        *,
-        schema: type[BaseModel] | None,
-        system: str | None,
-        model: str,
-    ) -> Any:
-        # Cache key encodes the schema fingerprint when present; the
-        # literal sentinel ``__plain_text__`` distinguishes plain-text
-        # sessions from structured ones with the same (model, system).
-        # Changes to any of (model, system, schema-shape) force a
-        # reconnect because ``output_format`` is baked into
-        # ``ClaudeAgentOptions`` at connect time.
-        schema_fragment = (
-            f"{schema.__name__}|{schema.model_json_schema()}"
-            if schema is not None
-            else "__plain_text__"
-        )
-        key = f"{model}|{system or ''}|{schema_fragment}"
-        if self._client is not None and self._client_key == key:
-            return self._client
-        await self.reset()
-
-        from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient
-
-        env_override: dict[str, str] = {}
-        if self._api_key_override is not None:
-            env_override["ANTHROPIC_API_KEY"] = self._api_key_override
-
-        options_kwargs: dict[str, Any] = {
-            "model": model,
-            "max_turns": self._max_turns,
-            "permission_mode": "bypassPermissions",
-            "env": env_override or {},
-        }
-        if schema is not None:
-            options_kwargs["output_format"] = {
-                "type": "json_schema",
-                "schema": schema.model_json_schema(),
-            }
-        if system is not None:
-            options_kwargs["system_prompt"] = system
-
-        options = ClaudeAgentOptions(**options_kwargs)
-        try:
-            client = ClaudeSDKClient(options=options)
-            await client.connect()
-        except Exception as exc:
-            raise self._classify_exception(exc) from exc
-        self._client = client
-        self._client_key = key
-        return client
-
-    async def _query_and_drain(self, client: Any, prompt: str) -> Any:
-        from claude_agent_sdk import ResultMessage
-
-        await client.query(prompt)
-        final: Any = None
-        async for msg in client.receive_response():
-            if isinstance(msg, ResultMessage):
-                final = msg
-        return final
-
     def _cost_from_result(self, result_msg: Any, *, model_id: str) -> CostRecord:
         usage = result_msg.usage or {}
+        # Phase 2 Iteration B: Anthropic's Messages API surfaces hidden
+        # reasoning under the ``thinking_tokens`` key when extended
+        # thinking is enabled. The field is absent on non-thinking
+        # turns; falls through to 0.
         return CostRecord(
             provider_id=self.PROVIDER_ID,
             model_id=model_id,
@@ -431,6 +411,7 @@ class ClaudeCodeRuntime(AgentRuntime):
             cache_read_tokens=int(usage.get("cache_read_input_tokens") or 0),
             cache_write_tokens=int(usage.get("cache_creation_input_tokens") or 0),
             finish=result_msg.stop_reason,
+            reasoning_tokens=int(usage.get("thinking_tokens") or 0),
         )
 
     def _classify_exception(self, exc: BaseException) -> Exception:
@@ -458,8 +439,529 @@ class ClaudeCodeRuntime(AgentRuntime):
         return AgentRuntimeError(f"claude_code: unexpected {type(exc).__name__}: {exc}")
 
 
+class ClaudeCodeSession:
+    """Bespoke :class:`~airframe.protocol.AgentSession` for the Claude Agent SDK.
+
+    Phase 1 Iteration D — replaces the
+    :class:`~airframe.sessions._ThinAgentSession` placeholder for this
+    adapter. Owns one :class:`ClaudeSDKClient` for its lifetime;
+    ``system`` / ``model`` / ``resume`` are session-fixed and baked
+    into :class:`ClaudeAgentOptions` at connect. Schema can vary per
+    :meth:`execute` / :meth:`stream` call — the client reconnects when
+    a different schema fingerprint is requested because
+    ``output_format`` is connect-time-bound.
+
+    **Streaming.** :meth:`stream` sets
+    ``include_partial_messages=True`` on the client and translates
+    Anthropic stream events into
+    :class:`~airframe.events.TextDelta` / :class:`ReasoningDelta`
+    on the fly. The trailing :class:`~airframe.events.TurnComplete`
+    carries the canonical :class:`~airframe.cost.CostRecord` built
+    from the SDK's :class:`ResultMessage`.
+
+    **Cancellation.** :meth:`cancel` calls
+    :meth:`ClaudeSDKClient.interrupt` to abort the in-flight CLI turn
+    AND cancels the wrapping :class:`asyncio.Task` for :meth:`execute`.
+    The awaiting call raises
+    :class:`~airframe.errors.RuntimeCancelledError`.
+
+    **Resume.** ``session(resume=<session_id>)`` forwards the ID into
+    :attr:`ClaudeAgentOptions.resume`; the SDK materialises the prior
+    conversation from local-disk session store on connect. :attr:`id`
+    reflects the live session ID after the first turn — either the
+    resumed ID (when ``resume=`` was given) or a fresh one Claude
+    assigned.
+    """
+
+    def __init__(
+        self,
+        runtime: ClaudeCodeRuntime,
+        *,
+        resume: str | None,
+        system: str | None,
+        model_id: str,
+    ) -> None:
+        self._runtime = runtime
+        self._resume = resume
+        self._system = system
+        self._model_id = model_id
+        # Session-owned client + the cache key that produced it. We
+        # reconnect when the requested schema fingerprint changes
+        # because ``output_format`` is baked at connect time.
+        self._client: Any | None = None
+        self._client_key: str | None = None
+        self._closed = False
+        self._in_flight_task: asyncio.Task[Any] | None = None
+        # True from the moment execute()/stream() starts work until it
+        # finishes (or is cancelled). Drives cancel()'s no-op-when-idle
+        # contract per the AgentSession docstring.
+        self._in_flight = False
+        self._stream_cancelled = False
+        # Populated from the first ResultMessage / AssistantMessage.
+        # ``resume=`` callers see this seeded with their resume ID
+        # before the first turn; absent that, ``None`` until a turn
+        # completes.
+        self.id: str | None = resume
+
+    async def execute(
+        self,
+        prompt: Prompt,
+        *,
+        schema: type[BaseModel] | None = None,
+        thinking: ThinkingMode = None,
+        timeout: float = 600.0,
+    ) -> RuntimeResult:
+        if self._closed:
+            raise RuntimeError("session is closed")
+        text, images, files = _split_prompt_parts(
+            prompt,
+            adapter_label=self._runtime.label,
+            supports_vision=True,
+            supports_file=True,
+        )
+        has_attachments = bool(images or files)
+        prompt_str = _build_claude_prompt(text, images, files)
+        task = asyncio.create_task(
+            self._do_execute(
+                prompt_str,
+                schema=schema,
+                thinking=thinking,
+                has_attachments=has_attachments,
+                timeout=timeout,
+            )
+        )
+        self._in_flight_task = task
+        try:
+            return await task
+        except asyncio.CancelledError as exc:
+            raise RuntimeCancelledError(f"{self._runtime.label}: cancelled") from exc
+        finally:
+            self._in_flight_task = None
+
+    async def _do_execute(
+        self,
+        prompt: str,
+        *,
+        schema: type[BaseModel] | None,
+        thinking: ThinkingMode,
+        has_attachments: bool,
+        timeout: float,
+    ) -> RuntimeResult:
+        client = await self._ensure_client(
+            schema=schema, thinking=thinking, has_attachments=has_attachments
+        )
+        self._in_flight = True
+        try:
+            result_msg = await asyncio.wait_for(
+                self._query_and_drain(client, prompt),
+                timeout=timeout,
+            )
+        except TimeoutError as exc:
+            raise RuntimeTransientError(
+                f"{self._runtime.label}: execute timed out after {timeout}s"
+            ) from exc
+        except Exception as exc:
+            raise self._runtime._classify_exception(exc) from exc
+        finally:
+            self._in_flight = False
+        return self._build_result(result_msg, schema=schema)
+
+    async def stream(
+        self,
+        prompt: Prompt,
+        *,
+        schema: type[BaseModel] | None = None,
+        thinking: ThinkingMode = None,
+        timeout: float = 600.0,
+    ) -> AsyncIterator[RuntimeEvent]:
+        if self._closed:
+            raise RuntimeError("session is closed")
+        text, images, files = _split_prompt_parts(
+            prompt,
+            adapter_label=self._runtime.label,
+            supports_vision=True,
+            supports_file=True,
+        )
+        has_attachments = bool(images or files)
+        prompt_str = _build_claude_prompt(text, images, files)
+        self._stream_cancelled = False
+        try:
+            client = await self._ensure_client(
+                schema=schema, thinking=thinking, has_attachments=has_attachments
+            )
+        except Exception as exc:
+            raise self._runtime._classify_exception(exc) from exc
+
+        try:
+            await client.query(prompt_str)
+        except Exception as exc:
+            raise self._runtime._classify_exception(exc) from exc
+
+        from claude_agent_sdk import AssistantMessage, ResultMessage, StreamEvent, TextBlock
+
+        result_msg: Any = None
+        self._in_flight = True
+        try:
+            async for msg in client.receive_response():
+                if self._stream_cancelled:
+                    raise RuntimeCancelledError(f"{self._runtime.label}: stream cancelled")
+                if isinstance(msg, StreamEvent):
+                    for event in _events_from_stream_event(msg):
+                        yield event
+                    continue
+                if isinstance(msg, AssistantMessage):
+                    # Fallback when include_partial_messages did not deliver
+                    # text via StreamEvent (older CLI versions, or content
+                    # blocks that arrived intact). Emit a TextDelta per
+                    # TextBlock so consumers always see the assistant text
+                    # at least once before TurnComplete.
+                    for block in msg.content:
+                        if isinstance(block, TextBlock) and block.text:
+                            yield TextDelta(text=block.text)
+                    continue
+                if isinstance(msg, ResultMessage):
+                    result_msg = msg
+                    break
+        except Exception as exc:
+            self._in_flight = False
+            if isinstance(exc, RuntimeCancelledError):
+                raise
+            raise self._runtime._classify_exception(exc) from exc
+
+        self._in_flight = False
+        result = self._build_result(result_msg, schema=schema)
+        yield TurnComplete(result=result)
+
+    async def cancel(self) -> None:
+        # No-op when no turn is in flight — per the AgentSession contract.
+        if not self._in_flight:
+            return
+        # Signal the stream() generator to raise on its next yield boundary.
+        self._stream_cancelled = True
+        # Abort the in-flight execute() task, if any.
+        task = self._in_flight_task
+        if task is not None and not task.done():
+            task.cancel()
+        # Ask the SDK to interrupt the CLI turn.
+        client = self._client
+        if client is not None:
+            try:
+                await client.interrupt()
+            except Exception as exc:  # noqa: BLE001 — cancellation never raises
+                logger.debug("%s.session_interrupt_failed error=%s", self._runtime.label, exc)
+
+    async def close(self) -> None:
+        self._closed = True
+        client = self._client
+        self._client = None
+        self._client_key = None
+        if client is None:
+            return
+        try:
+            await client.disconnect()
+        except Exception as exc:  # noqa: BLE001 — teardown never raises
+            logger.debug("%s.session_close_failed error=%s", self._runtime.label, exc)
+
+    def unwrap(self, cls: type[T]) -> T:
+        from claude_agent_sdk import ClaudeSDKClient
+
+        if isinstance(self, cls):
+            return self  # type: ignore[return-value]
+        if cls is ClaudeSDKClient:
+            if self._client is None:
+                raise TypeError(
+                    "ClaudeCodeSession.unwrap(ClaudeSDKClient): no client "
+                    "exists yet — call execute() or stream() first."
+                )
+            return self._client  # type: ignore[return-value]
+        raise TypeError(
+            f"ClaudeCodeSession cannot unwrap to {cls!r}; supported types are "
+            f"ClaudeCodeSession and claude_agent_sdk.ClaudeSDKClient."
+        )
+
+    async def _ensure_client(
+        self,
+        *,
+        schema: type[BaseModel] | None,
+        thinking: ThinkingMode = None,
+        has_attachments: bool = False,
+    ) -> Any:
+        # Reconnect when the schema OR thinking OR attachments
+        # fingerprint changes — ``output_format``, ``effort`` /
+        # ``thinking``, and ``allowed_tools`` are all baked into
+        # ClaudeAgentOptions at connect time. (model, system, resume)
+        # are fixed for the session and don't contribute to the key.
+        schema_fragment = (
+            f"{schema.__name__}|{schema.model_json_schema()}"
+            if schema is not None
+            else "__plain_text__"
+        )
+        effort, thinking_config = _translate_thinking_for_claude(thinking)
+        thinking_fragment = f"effort={effort}|thinking={thinking_config}"
+        attachments_fragment = f"attachments={has_attachments}"
+        cache_key = f"{schema_fragment}|{thinking_fragment}|{attachments_fragment}"
+        if self._client is not None and self._client_key == cache_key:
+            return self._client
+
+        # Tear down any stale client before rebuilding so we don't leak
+        # the previous subprocess.
+        if self._client is not None:
+            try:
+                await self._client.disconnect()
+            except Exception as exc:  # noqa: BLE001
+                logger.debug(
+                    "%s.session_reconnect_disconnect_failed error=%s",
+                    self._runtime.label,
+                    exc,
+                )
+            self._client = None
+            self._client_key = None
+
+        from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient
+
+        env_override: dict[str, str] = {}
+        if self._runtime._api_key_override is not None:
+            env_override["ANTHROPIC_API_KEY"] = self._runtime._api_key_override
+
+        options_kwargs: dict[str, Any] = {
+            "model": self._model_id,
+            "max_turns": self._runtime._max_turns,
+            "permission_mode": "bypassPermissions",
+            "env": env_override or {},
+            # Always-on so stream() gets fine-grained deltas. execute()
+            # ignores StreamEvents — receive_response drains them
+            # alongside the ResultMessage and we only act on the latter.
+            "include_partial_messages": True,
+        }
+        if schema is not None:
+            options_kwargs["output_format"] = {
+                "type": "json_schema",
+                "schema": schema.model_json_schema(),
+            }
+        if self._system is not None:
+            options_kwargs["system_prompt"] = self._system
+        if self._resume is not None:
+            options_kwargs["resume"] = self._resume
+        if effort is not None:
+            options_kwargs["effort"] = effort
+        if thinking_config is not None:
+            options_kwargs["thinking"] = thinking_config
+        if has_attachments:
+            # The Read tool is what lets the model actually look at the
+            # image / file paths we appended to the prompt. Without
+            # this, the model sees the path strings but has no way to
+            # open them.
+            options_kwargs["allowed_tools"] = ["Read"]
+
+        options = ClaudeAgentOptions(**options_kwargs)
+        try:
+            client = ClaudeSDKClient(options=options)
+            await client.connect()
+        except Exception as exc:
+            raise self._runtime._classify_exception(exc) from exc
+        self._client = client
+        self._client_key = cache_key
+        return client
+
+    async def _query_and_drain(self, client: Any, prompt: str) -> Any:
+        from claude_agent_sdk import ResultMessage
+
+        await client.query(prompt)
+        final: Any = None
+        async for msg in client.receive_response():
+            if isinstance(msg, ResultMessage):
+                final = msg
+        return final
+
+    def _build_result(self, result_msg: Any, *, schema: type[BaseModel] | None) -> RuntimeResult:
+        if result_msg is None:
+            raise RuntimeProtocolError(
+                f"{self._runtime.label}: stream closed without a ResultMessage"
+            )
+        # Surface the live session ID for resume.
+        sess_id = getattr(result_msg, "session_id", None)
+        if sess_id:
+            self.id = sess_id
+
+        if getattr(result_msg, "is_error", False):
+            err_text = (result_msg.errors or [])[:1] or [result_msg.subtype or "unknown"]
+            raise AgentRuntimeError(
+                f"{self._runtime.label}: is_error subtype={result_msg.subtype} {err_text}"
+            )
+
+        text = result_msg.result or ""
+        cost = self._runtime._cost_from_result(result_msg, model_id=self._model_id)
+
+        if schema is None:
+            return RuntimeResult(
+                text=text,
+                structured=None,
+                cost=cost,
+                finish=result_msg.stop_reason,
+                raw=result_msg,
+            )
+
+        structured = getattr(result_msg, "structured_output", None)
+        if structured is None:
+            raise RuntimeStructuredOutputError(
+                f"{self._runtime.label}: structured_output was empty "
+                f"(stop_reason={result_msg.stop_reason}, "
+                f"subtype={getattr(result_msg, 'subtype', None)})",
+                body={
+                    "stop_reason": result_msg.stop_reason,
+                    "subtype": getattr(result_msg, "subtype", None),
+                    "result": result_msg.result,
+                },
+            )
+        return RuntimeResult(
+            text=text,
+            structured=structured,
+            cost=cost,
+            finish=result_msg.stop_reason,
+            raw=result_msg,
+        )
+
+
+def _events_from_stream_event(stream_event: Any) -> list[RuntimeEvent]:
+    """Translate one :class:`StreamEvent` into airframe :class:`RuntimeEvent` instances.
+
+    Anthropic's wire format emits a stream of ``content_block_delta`` events
+    each carrying a typed ``delta``:
+
+    * ``{"type": "text_delta", "text": "..."}`` → :class:`TextDelta`
+    * ``{"type": "thinking_delta", "thinking": "..."}`` → :class:`ReasoningDelta`
+    * ``{"type": "input_json_delta", "partial_json": "..."}`` → tool args
+      (no event surfaced today — Phase 3 wires :class:`ToolCallStart`
+      from the matching ``content_block_start``).
+
+    Other event kinds (``message_start``, ``message_stop``, etc.) are
+    ignored at this layer; the SDK already tracks the lifecycle and
+    delivers a :class:`ResultMessage` at the end of the turn.
+    """
+    raw = getattr(stream_event, "event", None) or {}
+    if raw.get("type") != "content_block_delta":
+        return []
+    delta = raw.get("delta") or {}
+    kind = delta.get("type")
+    if kind == "text_delta":
+        text = delta.get("text") or ""
+        if text:
+            return [TextDelta(text=text)]
+    elif kind == "thinking_delta":
+        thinking = delta.get("thinking") or ""
+        if thinking:
+            return [ReasoningDelta(text=thinking)]
+    return []
+
+
+def _build_claude_prompt(text: str, images: list[Any], files: list[Any]) -> str:
+    """Append a Read-tool hint block for image / file attachments.
+
+    Claude Agent SDK has no direct image-in-prompt API today; the
+    portable workaround is to surface attachment paths in the prompt
+    text and let the model open them with the Read tool (caller adds
+    ``allowed_tools=["Read"]``). The hint is a plain list — short
+    enough that it doesn't crowd long user prompts but unambiguous
+    enough that the model picks it up reliably.
+
+    **Path-only.** The Read tool reads from the filesystem;
+    :class:`ImageInput(bytes_=)` and :class:`ImageInput(url=)` raise
+    :class:`UnsupportedFeatureError`. Consumer should write bytes to
+    disk (e.g. ``tempfile.NamedTemporaryFile``) and pass ``path=``
+    instead.
+
+    Returns the original ``text`` unchanged when no attachments are
+    present, so the no-vision path stays untouched.
+    """
+    for img in images:
+        if img.path is None:
+            kind = "bytes_" if img.bytes_ is not None else "url"
+            raise UnsupportedFeatureError(
+                f"claude_code: ImageInput({kind}=...) has no Claude Agent SDK "
+                f"channel — the Read tool fallback only opens filesystem paths. "
+                f"Write the bytes to disk (tempfile.NamedTemporaryFile) and "
+                f"pass path= instead.",
+                feature=Feature.VISION_INPUT,
+            )
+    if not images and not files:
+        return text
+    lines = ["Attached files (use the Read tool to access):"]
+    for img in images:
+        lines.append(f"- {img.path}")
+    for file in files:
+        suffix = f" ({file.media_type})" if file.media_type else ""
+        lines.append(f"- {file.path}{suffix}")
+    block = "\n".join(lines)
+    return f"{text}\n\n{block}" if text else block
+
+
+def _translate_thinking_for_claude(
+    thinking: ThinkingMode,
+) -> tuple[str | None, dict[str, Any] | None]:
+    """Translate :data:`ThinkingMode` to ``(effort, thinking_config)``.
+
+    Claude exposes two related knobs on :class:`ClaudeAgentOptions`:
+
+    * ``effort: Literal["low" | "medium" | "high" | "xhigh" | "max"]``
+      — coarse, portable.
+    * ``thinking: ThinkingConfig`` — fine-grained
+      ``{"type": "adaptive" | "enabled" | "disabled",
+      "budget_tokens"?: int}``.
+
+    This helper returns ``(effort, thinking_config)`` — either or both
+    may be ``None``. ``None, None`` means "send neither" (vendor
+    default).
+
+    Mappings:
+
+    * ``None`` → no override (vendor default).
+    * ``"disabled"`` → ``thinking = {"type": "disabled"}``.
+    * ``"low" | "medium" | "high"`` → ``effort = <same>``.
+    * ``"minimal"`` → ``effort = "low"`` with a debug log (Anthropic
+      has no minimal tier).
+    * ``{"budget_tokens": N}`` → ``thinking = {"type": "enabled",
+      "budget_tokens": N}``.
+
+    Raises:
+        UnsupportedFeatureError: when the dict shape is unrecognised
+            (no ``budget_tokens`` key) or the literal isn't one of the
+            documented values.
+    """
+    if thinking is None:
+        return None, None
+    if thinking == "disabled":
+        return None, {"type": "disabled"}
+    if isinstance(thinking, str):
+        if thinking == "minimal":
+            logger.debug(
+                "claude_code: thinking='minimal' has no Anthropic equivalent; coercing to 'low'"
+            )
+            return "low", None
+        if thinking in ("low", "medium", "high"):
+            return thinking, None
+        raise UnsupportedFeatureError(
+            f"claude_code: unrecognised thinking effort {thinking!r}; "
+            f"supported: 'minimal' (→'low'), 'low', 'medium', 'high', 'disabled'.",
+            feature="reasoning_effort",
+        )
+    if isinstance(thinking, dict):
+        budget = thinking.get("budget_tokens")
+        if budget is None or not isinstance(budget, int):
+            raise UnsupportedFeatureError(
+                f"claude_code: dict-shaped thinking must include integer "
+                f"'budget_tokens'; got keys={list(thinking)}",
+                feature="reasoning_budget_tokens",
+            )
+        return None, {"type": "enabled", "budget_tokens": int(budget)}
+    raise UnsupportedFeatureError(
+        f"claude_code: unrecognised thinking mode {thinking!r}",
+        feature="reasoning_effort",
+    )
+
+
 __all__ = [
     "DEFAULT_CLAUDE_MODEL",
     "DEFAULT_MAX_TURNS",
     "ClaudeCodeRuntime",
+    "ClaudeCodeSession",
 ]

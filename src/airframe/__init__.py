@@ -51,8 +51,18 @@ from airframe.errors import (
     RuntimeServerStartError,
     RuntimeStructuredOutputError,
     RuntimeTransientError,
+    UnsupportedFeatureError,
+)
+from airframe.events import (
+    ReasoningDelta,
+    RuntimeEvent,
+    TextDelta,
+    ToolCallResult,
+    ToolCallStart,
+    TurnComplete,
 )
 from airframe.features import Feature
+from airframe.inputs import FileInput, ImageInput, Prompt, PromptPart
 from airframe.models import (
     CAPABILITY_REASONING_EFFORT,
     CAPABILITY_STREAMING,
@@ -70,12 +80,14 @@ from airframe.options import (
 )
 from airframe.protocol import (
     AgentRuntime,
+    AgentSession,
     ProviderModel,
     RuntimeResult,
     UnsupportedBindingError,
 )
+from airframe.thinking import ReasoningEffort, ThinkingMode
 
-__version__ = "0.3.0"
+__version__ = "0.5.0"
 
 # Adapter imports live at the top level for ergonomic use, but the
 # adapter modules themselves lazy-import their underlying SDK so
@@ -89,6 +101,7 @@ from airframe.adapters.opencode_zen import OpenCodeZenRuntime
 __all__ = [
     "AgentRuntime",
     "AgentRuntimeError",
+    "AgentSession",
     "CAPABILITY_REASONING_EFFORT",
     "CAPABILITY_STREAMING",
     "CAPABILITY_STRUCTURED_OUTPUT",
@@ -102,21 +115,34 @@ __all__ = [
     "CopilotRuntime",
     "CostRecord",
     "Feature",
+    "FileInput",
+    "ImageInput",
     "ModelInfo",
     "OpenAICompatOptions",
     "OpenCodeZenRuntime",
+    "Prompt",
+    "PromptPart",
     "ProviderModel",
     "ProviderOptions",
+    "ReasoningDelta",
+    "ReasoningEffort",
     "RuntimeAuthError",
     "RuntimeCancelledError",
     "RuntimeContextOverflowError",
+    "RuntimeEvent",
     "RuntimeModelNotFoundError",
     "RuntimeProtocolError",
     "RuntimeResult",
     "RuntimeServerStartError",
     "RuntimeStructuredOutputError",
     "RuntimeTransientError",
+    "TextDelta",
+    "ThinkingMode",
+    "ToolCallResult",
+    "ToolCallStart",
+    "TurnComplete",
     "UnsupportedBindingError",
+    "UnsupportedFeatureError",
     "__version__",
     "list_providers",
     "runtime_for",

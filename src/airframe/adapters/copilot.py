@@ -51,7 +51,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-from typing import Any, ClassVar, TypeVar
+from typing import TYPE_CHECKING, Any, ClassVar, TypeVar
 
 from pydantic import BaseModel, ValidationError
 
@@ -59,20 +59,30 @@ from airframe.cost import CostRecord
 from airframe.errors import (
     AgentRuntimeError,
     RuntimeAuthError,
+    RuntimeCancelledError,
     RuntimeModelNotFoundError,
     RuntimeProtocolError,
     RuntimeServerStartError,
     RuntimeStructuredOutputError,
     RuntimeTransientError,
+    UnsupportedFeatureError,
 )
+from airframe.events import ReasoningDelta, RuntimeEvent, TextDelta, TurnComplete
 from airframe.features import Feature
+from airframe.inputs import Prompt
 from airframe.models import ModelInfo
 from airframe.protocol import (
     AgentRuntime,
+    AgentSession,
     ProviderModel,
     RuntimeResult,
     UnsupportedBindingError,
 )
+from airframe.sessions import _split_prompt_parts
+from airframe.thinking import ThinkingMode
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
 
 logger = logging.getLogger(__name__)
 
@@ -115,11 +125,51 @@ class CopilotRuntime(AgentRuntime):
     #: pip extra that brings the vendor SDK in.
     EXTRA_NAME: ClassVar[str] = "copilot"
 
-    #: Features this runtime exposes today. Phase 0 declares only
-    #: structured output — wired via the forced ``submit_result`` tool
-    #: pattern. Later phases flip more bits as their APIs land.
+    #: Features this runtime exposes today.
+    #:
+    #: * ``STRUCTURED_OUTPUT_JSON_SCHEMA`` — wired via the forced
+    #:   ``submit_result`` tool pattern (Phase 0).
+    #: * ``STREAMING`` — wired via :class:`CopilotAgentSession` using
+    #:   ``session.on(handler)`` filtering for
+    #:   ``ASSISTANT_MESSAGE_DELTA`` / ``ASSISTANT_REASONING_DELTA``
+    #:   (Phase 1, Iteration E).
+    #: * ``SESSION_RESUME`` — wired via
+    #:   :meth:`CopilotClient.resume_session`;
+    #:   :meth:`AgentRuntime.session` accepts ``resume=<session_id>``
+    #:   (Phase 1, Iteration E). The session ID surfaces on
+    #:   :attr:`AgentSession.id` once the underlying CopilotSession is
+    #:   built.
+    #: * ``CANCEL`` — wired via :meth:`CopilotSession.abort` (Phase 1,
+    #:   Iteration E).
+    #: * ``REASONING_EFFORT`` — wired via the ``reasoning_effort``
+    #:   kwarg on ``create_session`` / ``resume_session``. Baked at
+    #:   session-create time, so a ``thinking=`` change between turns
+    #:   triggers a rebuild (same pattern as schema). Copilot's enum is
+    #:   ``"low" | "medium" | "high" | "xhigh"``; airframe stays on
+    #:   the portable intersection. ``"minimal"`` is coerced to
+    #:   ``"low"`` with a debug-level log (Phase 2, Iteration B).
+    #:
+    #: * ``VISION_INPUT`` / ``FILE_INPUT`` — wired via Copilot's
+    #:   attachment slot on :meth:`CopilotSession.send_and_wait`.
+    #:   ``ImageInput(path=)`` and ``FileInput(path=)`` use
+    #:   :class:`FileAttachment` (``{"type":"file","path":...}``);
+    #:   ``ImageInput(bytes_=)`` uses :class:`BlobAttachment`
+    #:   (``{"type":"blob","data":<b64>,"mimeType":...}``).
+    #:   ``ImageInput(url=)`` raises — Copilot's SDK has no URL channel
+    #:   (Phase 2, Iterations C + D).
+    #:
+    #: ``REASONING_BUDGET_TOKENS`` stays False — Copilot uses the
+    #: enum, not a token budget. Pass a literal effort string instead.
     SUPPORTED_FEATURES: ClassVar[frozenset[Feature]] = frozenset(
-        {Feature.STRUCTURED_OUTPUT_JSON_SCHEMA}
+        {
+            Feature.STRUCTURED_OUTPUT_JSON_SCHEMA,
+            Feature.STREAMING,
+            Feature.SESSION_RESUME,
+            Feature.CANCEL,
+            Feature.REASONING_EFFORT,
+            Feature.VISION_INPUT,
+            Feature.FILE_INPUT,
+        }
     )
 
     def __init__(
@@ -138,102 +188,48 @@ class CopilotRuntime(AgentRuntime):
         self._cli_path = cli_path or os.environ.get("COPILOT_CLI_PATH")
 
         self._client: Any | None = None  # copilot.CopilotClient
-        self._session: Any | None = None  # copilot.CopilotSession
-        self._session_key: str | None = None
-
-        # Per-execute state captured via the tool handler + event subscriber.
-        self._captured_payload: BaseModel | None = None
-        self._captured_usage: Any | None = None  # AssistantUsageData
-        self._captured_error: Any | None = None  # SessionErrorData
-        self._last_assistant_message: Any | None = None
+        # Phase 1 Iteration G: per-conversation state (CopilotSession,
+        # captured payload/usage/error/message) moved off the runtime
+        # onto CopilotAgentSession. The runtime keeps only the
+        # runtime-wide CopilotClient.
 
     # --- AgentRuntime interface ---------------------------------------------
 
     async def execute(
         self,
-        prompt: str,
+        prompt: Prompt,
         *,
         schema: type[BaseModel] | None = None,
         system: str | None = None,
         persona: str | None = None,
         model: ProviderModel | None = None,
+        thinking: ThinkingMode = None,
         timeout: float = 600.0,
     ) -> RuntimeResult:
-        model_id = self._resolve_model(model)
-        session = await self._ensure_session(schema=schema, system=system, model=model_id)
-
-        # Reset per-execute capture slots.
-        self._captured_payload = None
-        self._captured_usage = None
-        self._captured_error = None
-        self._last_assistant_message = None
-
+        # Phase 1 Iteration G: ``execute()`` is documented sugar for
+        # ``runtime.session(...).execute(...) + close()``. Single-turn,
+        # ephemeral — the CopilotSession is destroyed per call. The
+        # CopilotClient (runtime-owned, long-lived) is reused across
+        # calls. Consumers wanting session warmth across turns open a
+        # session explicitly.
+        del persona  # accepted in the protocol but not consumed by Copilot
+        sess = self.session(system=system, model=model)
         try:
-            await asyncio.wait_for(
-                session.send_and_wait(prompt, timeout=timeout),
-                timeout=timeout,
-            )
-        except TimeoutError as exc:
-            raise RuntimeTransientError(f"copilot: execute timed out after {timeout}s") from exc
-        except Exception as exc:
-            raise self._classify_exception(exc) from exc
-
-        if self._captured_error is not None:
-            raise self._error_from_session_error(self._captured_error)
-
-        text = ""
-        if self._last_assistant_message is not None and hasattr(
-            self._last_assistant_message, "data"
-        ):
-            text = getattr(self._last_assistant_message.data, "content", "") or ""
-
-        if schema is None:
-            # Plain-text mode: no submit_result tool was registered, so
-            # no payload to capture. The final assistant message
-            # content is the result.
-            return RuntimeResult(
-                text=text,
-                structured=None,
-                cost=self._cost_from_usage(self._captured_usage, model_id=model_id),
-                finish="stop",
-                raw={
-                    "usage": self._captured_usage,
-                    "message": self._last_assistant_message,
-                },
-            )
-
-        captured = self._captured_payload
-        if captured is None:
-            preview_text = text[:300]
-            raise RuntimeStructuredOutputError(
-                f"copilot: {SUBMIT_RESULT_TOOL} was never called",
-                body={"assistant_message_preview": preview_text},
-            )
-
-        return RuntimeResult(
-            text=text,
-            structured=captured.model_dump(),
-            cost=self._cost_from_usage(self._captured_usage, model_id=model_id),
-            finish="stop",
-            raw={
-                "usage": self._captured_usage,
-                "message": self._last_assistant_message,
-            },
-        )
+            return await sess.execute(prompt, schema=schema, thinking=thinking, timeout=timeout)
+        finally:
+            await sess.close()
 
     async def reset(self) -> None:
-        session = self._session
-        self._session = None
-        self._session_key = None
-        if session is None:
-            return
-        try:
-            await session.destroy()
-        except Exception as exc:  # noqa: BLE001 — teardown never raises
-            logger.debug("copilot_runtime.reset_failed error=%s", exc)
+        # Phase 1 Iteration G: the runtime no longer caches a CopilotSession.
+        # The CopilotClient (long-lived CLI handle) survives reset() — only
+        # close() releases it. With no scope-bound state to drop, reset is
+        # a no-op; kept for protocol completeness.
+        return None
 
     async def close(self) -> None:
-        await self.reset()
+        # Phase 1 Iteration G: only the runtime-wide CopilotClient needs
+        # tearing down here. The per-conversation CopilotSession lives
+        # on AgentSession instances and is closed by session.close().
         client = self._client
         self._client = None
         if client is None:
@@ -268,15 +264,61 @@ class CopilotRuntime(AgentRuntime):
                 )
             return self._client  # type: ignore[return-value]
         if cls is CopilotSession:
-            if self._session is None:
-                raise TypeError(
-                    "CopilotRuntime.unwrap(CopilotSession): no session exists yet "
-                    "— call execute() first."
-                )
-            return self._session  # type: ignore[return-value]
+            # Phase 1 Iteration G moved the per-conversation
+            # CopilotSession off the runtime onto CopilotAgentSession.
+            raise TypeError(
+                "CopilotRuntime no longer owns a CopilotSession — sessions do. "
+                "Open a session with `sess = runtime.session(...)`, run a turn, "
+                "then call `sess.unwrap(CopilotSession)`."
+            )
         raise TypeError(
             f"CopilotRuntime cannot unwrap to {cls!r}; supported types are "
-            f"CopilotRuntime, copilot.CopilotClient, and copilot.session.CopilotSession."
+            f"CopilotRuntime and copilot.CopilotClient. Vendor session objects "
+            f"live on AgentSession — use session.unwrap(NativeType)."
+        )
+
+    def session(
+        self,
+        *,
+        resume: str | None = None,
+        system: str | None = None,
+        model: ProviderModel | None = None,
+        provider_options: Any | None = None,
+    ) -> AgentSession:
+        """Open a bespoke :class:`CopilotAgentSession`.
+
+        Phase 1 Iteration E replaces the
+        :class:`~airframe.sessions._ThinAgentSession` placeholder with
+        a session that owns its own :class:`CopilotSession` lifecycle:
+        streaming via per-session
+        :meth:`CopilotSession.on` subscriptions for
+        ``ASSISTANT_MESSAGE_DELTA`` / ``ASSISTANT_REASONING_DELTA``,
+        native session resume via
+        :meth:`CopilotClient.resume_session`, and cancellation via
+        :meth:`CopilotSession.abort`.
+
+        Args:
+            resume: Vendor-assigned session ID to resume — Copilot
+                surfaces this on :attr:`CopilotSession.session_id`.
+                ``None`` opens a fresh session.
+            system: System message appended via the
+                :attr:`SystemMessageConfig` shape at session create /
+                resume.
+            model: Default :class:`ProviderModel` for every turn.
+                Claude bindings are rejected here too — same reason as
+                ``execute()``: Copilot routes Claude as markdown JSON,
+                not via tool calls.
+            provider_options: Reserved for Phase 2+ (currently unused).
+        """
+        # provider_options accepted but unused — Phase 2+ fills each
+        # ProviderOptions dataclass as the corresponding feature lands.
+        del provider_options
+        model_id = self._resolve_model(model) if model is not None else self._default_model
+        return CopilotAgentSession(
+            self,
+            resume=resume,
+            system=system,
+            model_id=model_id,
         )
 
     async def list_models(self) -> list[ModelInfo]:
@@ -340,83 +382,6 @@ class CopilotRuntime(AgentRuntime):
             )
         return model.model_id
 
-    async def _ensure_session(
-        self,
-        *,
-        schema: type[BaseModel] | None,
-        system: str | None,
-        model: str,
-    ) -> Any:
-        schema_fragment = (
-            f"{schema.__name__}|{schema.model_json_schema()}"
-            if schema is not None
-            else "__plain_text__"
-        )
-        key = f"{model}|{system or ''}|{schema_fragment}"
-        if self._session is not None and self._session_key == key:
-            return self._session
-        await self.reset()
-        client = await self._ensure_client()
-
-        from copilot.session import PermissionHandler
-
-        # Two session shapes share the path:
-        # * schema=None — plain text. No submit_result tool registered;
-        #   no forced-tool prefix on the system message; whatever the
-        #   caller passed as ``system`` reaches the model verbatim.
-        # * schema=Pydantic — structured. submit_result tool registered
-        #   with the schema's JSON shape; system message gets the
-        #   forced-tool prefix telling the model to call it.
-        create_kwargs: dict[str, Any] = {
-            "on_permission_request": PermissionHandler.approve_all,
-            "model": model,
-        }
-
-        if schema is not None:
-            from copilot import define_tool
-
-            async def _submit_handler(params: schema) -> dict[str, Any]:  # type: ignore[valid-type]
-                self._captured_payload = params
-                return {"ok": True}
-
-            submit_tool = define_tool(
-                SUBMIT_RESULT_TOOL,
-                description=(
-                    f"Submit the final typed payload as a {schema.__name__}. "
-                    "Call this exactly once with all required fields filled in."
-                ),
-                handler=lambda params, inv: _submit_handler(params),
-                params_type=schema,
-                skip_permission=True,
-            )
-            create_kwargs["tools"] = [submit_tool]
-
-            forced_prefix = (
-                "When you are ready to answer, call the "
-                f"`{SUBMIT_RESULT_TOOL}` tool with the typed payload. "
-                "Do not emit a final assistant message; the tool call is your answer.\n\n"
-            )
-            create_kwargs["system_message"] = {
-                "mode": "append",
-                "content": forced_prefix + (system or ""),
-            }
-        elif system is not None:
-            # Plain text + caller-supplied system prompt: append it
-            # without any forced-tool framing.
-            create_kwargs["system_message"] = {"mode": "append", "content": system}
-
-        try:
-            session = await client.create_session(**create_kwargs)
-        except Exception as exc:
-            raise self._classify_exception(exc) from exc
-
-        # Subscribe to usage + error events.
-        session.on(self._on_event)
-
-        self._session = session
-        self._session_key = key
-        return session
-
     async def _ensure_client(self) -> Any:
         if self._client is not None:
             return self._client
@@ -439,25 +404,6 @@ class CopilotRuntime(AgentRuntime):
         self._client = client
         return client
 
-    def _on_event(self, event: Any) -> None:
-        """Capture usage + error + final-assistant-message events.
-
-        Runs synchronously off the SDK's event dispatch — keep it cheap.
-        """
-        from copilot.generated.session_events import (
-            AssistantMessageData,
-            AssistantUsageData,
-            SessionErrorData,
-        )
-
-        data = getattr(event, "data", None)
-        if isinstance(data, AssistantUsageData):
-            self._captured_usage = data
-        elif isinstance(data, SessionErrorData):
-            self._captured_error = data
-        elif isinstance(data, AssistantMessageData):
-            self._last_assistant_message = event
-
     def _cost_from_usage(self, usage: Any, *, model_id: str) -> CostRecord:
         if usage is None:
             return CostRecord(
@@ -470,6 +416,10 @@ class CopilotRuntime(AgentRuntime):
                 cache_write_tokens=0,
                 finish="stop",
             )
+        # Phase 2 Iteration B: Copilot's AssistantUsageData surfaces
+        # reasoning tokens directly when a reasoning-effort model is
+        # in play. Falls through to 0 for non-reasoning turns.
+        reasoning_tokens = int(getattr(usage, "reasoning_tokens", 0) or 0)
         return CostRecord(
             provider_id=self.PROVIDER_ID,
             model_id=model_id,
@@ -479,6 +429,7 @@ class CopilotRuntime(AgentRuntime):
             cache_read_tokens=int(usage.cache_read_tokens or 0),
             cache_write_tokens=int(usage.cache_write_tokens or 0),
             finish="stop",
+            reasoning_tokens=reasoning_tokens,
         )
 
     def _error_from_session_error(self, error_data: Any) -> Exception:
@@ -525,8 +476,526 @@ class CopilotRuntime(AgentRuntime):
         return AgentRuntimeError(f"copilot: unexpected {type(exc).__name__}: {exc}")
 
 
+class CopilotAgentSession:
+    """Bespoke :class:`~airframe.protocol.AgentSession` for the Copilot SDK.
+
+    Phase 1 Iteration E — third per-vendor session (after OpenAI-compat
+    and Claude Code). Owns one :class:`CopilotSession` for its lifetime;
+    ``system`` / ``model`` / ``resume`` are session-fixed and baked into
+    :meth:`CopilotClient.create_session` (or :meth:`resume_session`) at
+    creation time. Schema can vary per :meth:`execute` / :meth:`stream`
+    call — the session is destroyed and re-created when the schema
+    fingerprint changes since the ``submit_result`` tool is baked into
+    ``create_session()`` at session-creation time.
+
+    **Streaming.** :meth:`stream` subscribes a delta-collecting handler
+    via :meth:`CopilotSession.on`, runs
+    :meth:`CopilotSession.send_and_wait` as a background task, and
+    drains an :class:`asyncio.Queue` yielding airframe events:
+
+    * ``AssistantMessageDeltaData`` → :class:`TextDelta`
+    * ``AssistantReasoningDeltaData`` → :class:`ReasoningDelta`
+
+    The trailing :class:`~airframe.events.TurnComplete` carries the
+    canonical :class:`~airframe.cost.CostRecord` built from the
+    ``AssistantUsageData`` event captured during the turn.
+
+    **Cancellation.** :meth:`cancel` calls
+    :meth:`CopilotSession.abort` to abort the CLI side of the turn; the
+    awaiting :meth:`send_and_wait` raises, surfaced as
+    :class:`~airframe.errors.RuntimeCancelledError`.
+
+    **Resume.** ``session(resume=<session_id>)`` forwards the ID into
+    :meth:`CopilotClient.resume_session`; :attr:`id` is seeded with the
+    resume ID and updated to the live :attr:`CopilotSession.session_id`
+    after the underlying session is built.
+    """
+
+    def __init__(
+        self,
+        runtime: CopilotRuntime,
+        *,
+        resume: str | None,
+        system: str | None,
+        model_id: str,
+    ) -> None:
+        self._runtime = runtime
+        self._resume = resume
+        self._system = system
+        self._model_id = model_id
+        # Session-owned vendor session + the schema-fingerprint key it
+        # was built with. Schema-fingerprint changes force a destroy +
+        # rebuild because the submit_result tool is baked in at
+        # create_session() time.
+        self._session: Any | None = None  # CopilotSession
+        self._session_key: str | None = None
+        self._unsubscribe_capture: Any | None = None  # Callable[[], None]
+        self._closed = False
+        self._in_flight = False
+        # Per-turn capture slots, refreshed on each execute() / stream().
+        self._captured_payload: BaseModel | None = None
+        self._captured_usage: Any | None = None
+        self._captured_error: Any | None = None
+        self._last_assistant_message: Any | None = None
+        # Seeded from resume= so consumer code that branches on
+        # session.id before the first turn sees the right value.
+        self.id: str | None = resume
+
+    async def execute(
+        self,
+        prompt: Prompt,
+        *,
+        schema: type[BaseModel] | None = None,
+        thinking: ThinkingMode = None,
+        timeout: float = 600.0,
+    ) -> RuntimeResult:
+        if self._closed:
+            raise RuntimeError("session is closed")
+        text, images, files = _split_prompt_parts(
+            prompt,
+            adapter_label=self._runtime.label,
+            supports_vision=True,
+            supports_file=True,
+        )
+        attachments = _build_copilot_attachments(images, files)
+        session = await self._ensure_session(schema=schema, thinking=thinking)
+        self._reset_capture_slots()
+        self._in_flight = True
+        try:
+            await asyncio.wait_for(
+                session.send_and_wait(text, attachments=attachments, timeout=timeout),
+                timeout=timeout,
+            )
+        except asyncio.CancelledError as exc:
+            raise RuntimeCancelledError(f"{self._runtime.label}: cancelled") from exc
+        except TimeoutError as exc:
+            raise RuntimeTransientError(
+                f"{self._runtime.label}: execute timed out after {timeout}s"
+            ) from exc
+        except Exception as exc:
+            raise self._runtime._classify_exception(exc) from exc
+        finally:
+            self._in_flight = False
+
+        return self._build_result(schema=schema)
+
+    async def stream(
+        self,
+        prompt: Prompt,
+        *,
+        schema: type[BaseModel] | None = None,
+        thinking: ThinkingMode = None,
+        timeout: float = 600.0,
+    ) -> AsyncIterator[RuntimeEvent]:
+        if self._closed:
+            raise RuntimeError("session is closed")
+        text, images, files = _split_prompt_parts(
+            prompt,
+            adapter_label=self._runtime.label,
+            supports_vision=True,
+            supports_file=True,
+        )
+        attachments = _build_copilot_attachments(images, files)
+        session = await self._ensure_session(schema=schema, thinking=thinking)
+        self._reset_capture_slots()
+
+        # Per-stream queue + delta handler. We subscribe a lightweight
+        # callback that pushes deltas into the queue; the generator
+        # below drains until the send_and_wait task completes.
+        queue: asyncio.Queue[RuntimeEvent] = asyncio.Queue()
+        loop = asyncio.get_running_loop()
+
+        from copilot.generated.session_events import (
+            AssistantMessageDeltaData,
+            AssistantReasoningDeltaData,
+        )
+
+        def _on_delta(event: Any) -> None:
+            # Runs synchronously off the SDK dispatch thread — keep it
+            # cheap. Use call_soon_threadsafe to enqueue from the SDK's
+            # thread back onto our event loop.
+            data = getattr(event, "data", None)
+            if isinstance(data, AssistantMessageDeltaData):
+                text = data.delta_content or ""
+                if text:
+                    loop.call_soon_threadsafe(queue.put_nowait, TextDelta(text=text))
+            elif isinstance(data, AssistantReasoningDeltaData):
+                text = data.delta_content or ""
+                if text:
+                    loop.call_soon_threadsafe(queue.put_nowait, ReasoningDelta(text=text))
+
+        unsubscribe = session.on(_on_delta)
+        self._in_flight = True
+        send_task = asyncio.create_task(
+            asyncio.wait_for(
+                session.send_and_wait(text, attachments=attachments, timeout=timeout),
+                timeout=timeout,
+            )
+        )
+
+        try:
+            while True:
+                # Wait for either the next delta or the send task to finish.
+                getter = asyncio.create_task(queue.get())
+                done, _ = await asyncio.wait(
+                    {getter, send_task}, return_when=asyncio.FIRST_COMPLETED
+                )
+                if getter in done:
+                    yield getter.result()
+                else:
+                    # send_task finished — cancel the queue getter and
+                    # drain any final events the SDK may have enqueued
+                    # before send_and_wait returned.
+                    getter.cancel()
+                    while not queue.empty():
+                        yield queue.get_nowait()
+                    break
+            try:
+                await send_task
+            except asyncio.CancelledError as exc:
+                raise RuntimeCancelledError(f"{self._runtime.label}: cancelled") from exc
+            except TimeoutError as exc:
+                raise RuntimeTransientError(
+                    f"{self._runtime.label}: stream timed out after {timeout}s"
+                ) from exc
+            except Exception as exc:
+                raise self._runtime._classify_exception(exc) from exc
+        finally:
+            unsubscribe()
+            self._in_flight = False
+
+        result = self._build_result(schema=schema)
+        yield TurnComplete(result=result)
+
+    async def cancel(self) -> None:
+        # No-op when no turn is in flight — per the AgentSession contract.
+        if not self._in_flight:
+            return
+        session = self._session
+        if session is None:
+            return
+        try:
+            await session.abort()
+        except Exception as exc:  # noqa: BLE001 — cancellation never raises
+            logger.debug("%s.session_abort_failed error=%s", self._runtime.label, exc)
+
+    async def close(self) -> None:
+        self._closed = True
+        # Tear down the per-session capture subscription.
+        unsubscribe = self._unsubscribe_capture
+        self._unsubscribe_capture = None
+        if unsubscribe is not None:
+            try:
+                unsubscribe()
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("%s.session_unsubscribe_failed error=%s", self._runtime.label, exc)
+        # Destroy the vendor session. The runtime owns the CopilotClient
+        # and lives independently — don't tear it down here.
+        session = self._session
+        self._session = None
+        self._session_key = None
+        if session is None:
+            return
+        try:
+            await session.destroy()
+        except Exception as exc:  # noqa: BLE001 — teardown never raises
+            logger.debug("%s.session_close_failed error=%s", self._runtime.label, exc)
+
+    def unwrap(self, cls: type[T]) -> T:
+        from copilot.session import CopilotSession
+
+        if isinstance(self, cls):
+            return self  # type: ignore[return-value]
+        if cls is CopilotSession:
+            if self._session is None:
+                raise TypeError(
+                    "CopilotAgentSession.unwrap(CopilotSession): no session "
+                    "exists yet — call execute() or stream() first."
+                )
+            return self._session  # type: ignore[return-value]
+        raise TypeError(
+            f"CopilotAgentSession cannot unwrap to {cls!r}; supported types are "
+            f"CopilotAgentSession and copilot.session.CopilotSession. "
+            f"(CopilotClient lives on the runtime — "
+            f"call runtime.unwrap(CopilotClient).)"
+        )
+
+    # --- Internals ---------------------------------------------------------
+
+    def _reset_capture_slots(self) -> None:
+        self._captured_payload = None
+        self._captured_usage = None
+        self._captured_error = None
+        self._last_assistant_message = None
+
+    async def _ensure_session(
+        self,
+        *,
+        schema: type[BaseModel] | None,
+        thinking: ThinkingMode = None,
+    ) -> Any:
+        schema_fragment = (
+            f"{schema.__name__}|{schema.model_json_schema()}"
+            if schema is not None
+            else "__plain_text__"
+        )
+        reasoning_effort = _translate_thinking_for_copilot(thinking)
+        cache_key = f"{schema_fragment}|effort={reasoning_effort}"
+        if self._session is not None and self._session_key == cache_key:
+            return self._session
+
+        # Schema OR thinking fingerprint changed (or first turn) —
+        # tear down any stale session before rebuilding so we don't
+        # leak it. ``reasoning_effort`` is baked at create_session
+        # time, so it joins schema in the cache key.
+        await self._tear_down_session()
+
+        client = await self._runtime._ensure_client()
+
+        from copilot.session import PermissionHandler
+
+        create_kwargs: dict[str, Any] = {
+            "on_permission_request": PermissionHandler.approve_all,
+            "model": self._model_id,
+        }
+        if reasoning_effort is not None:
+            create_kwargs["reasoning_effort"] = reasoning_effort
+
+        if schema is not None:
+            from copilot import define_tool
+
+            captured_schema = schema  # bind for closure stability
+
+            async def _submit_handler(params: schema) -> dict[str, Any]:  # type: ignore[valid-type]
+                self._captured_payload = params
+                return {"ok": True}
+
+            submit_tool = define_tool(
+                SUBMIT_RESULT_TOOL,
+                description=(
+                    f"Submit the final typed payload as a {captured_schema.__name__}. "
+                    "Call this exactly once with all required fields filled in."
+                ),
+                handler=lambda params, inv: _submit_handler(params),
+                params_type=captured_schema,
+                skip_permission=True,
+            )
+            create_kwargs["tools"] = [submit_tool]
+
+            forced_prefix = (
+                "When you are ready to answer, call the "
+                f"`{SUBMIT_RESULT_TOOL}` tool with the typed payload. "
+                "Do not emit a final assistant message; the tool call is your answer.\n\n"
+            )
+            create_kwargs["system_message"] = {
+                "mode": "append",
+                "content": forced_prefix + (self._system or ""),
+            }
+        elif self._system is not None:
+            create_kwargs["system_message"] = {"mode": "append", "content": self._system}
+
+        try:
+            if self._resume is not None:
+                session = await client.resume_session(self._resume, **create_kwargs)
+            else:
+                session = await client.create_session(**create_kwargs)
+        except Exception as exc:
+            raise self._runtime._classify_exception(exc) from exc
+
+        # Always-on capture subscription for usage / error / final message.
+        self._unsubscribe_capture = session.on(self._on_capture_event)
+        self._session = session
+        self._session_key = cache_key
+        # Surface the live session ID. resume= callers may see a
+        # different value here if Copilot forked the session.
+        live_id = getattr(session, "session_id", None)
+        if live_id:
+            self.id = live_id
+        return session
+
+    async def _tear_down_session(self) -> None:
+        unsubscribe = self._unsubscribe_capture
+        self._unsubscribe_capture = None
+        if unsubscribe is not None:
+            try:
+                unsubscribe()
+            except Exception as exc:  # noqa: BLE001
+                logger.debug(
+                    "%s.session_unsubscribe_failed error=%s",
+                    self._runtime.label,
+                    exc,
+                )
+        session = self._session
+        self._session = None
+        self._session_key = None
+        if session is None:
+            return
+        try:
+            await session.destroy()
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("%s.session_teardown_failed error=%s", self._runtime.label, exc)
+
+    def _on_capture_event(self, event: Any) -> None:
+        """Capture usage / error / final-assistant-message events.
+
+        Runs synchronously off the SDK dispatch — keep it cheap. Mirrors
+        the runtime's ``_on_event`` but scoped to this session.
+        """
+        from copilot.generated.session_events import (
+            AssistantMessageData,
+            AssistantUsageData,
+            SessionErrorData,
+        )
+
+        data = getattr(event, "data", None)
+        if isinstance(data, AssistantUsageData):
+            self._captured_usage = data
+        elif isinstance(data, SessionErrorData):
+            self._captured_error = data
+        elif isinstance(data, AssistantMessageData):
+            self._last_assistant_message = event
+
+    def _build_result(self, *, schema: type[BaseModel] | None) -> RuntimeResult:
+        if self._captured_error is not None:
+            raise self._runtime._error_from_session_error(self._captured_error)
+
+        text = ""
+        if self._last_assistant_message is not None and hasattr(
+            self._last_assistant_message, "data"
+        ):
+            text = getattr(self._last_assistant_message.data, "content", "") or ""
+
+        cost = self._runtime._cost_from_usage(self._captured_usage, model_id=self._model_id)
+
+        if schema is None:
+            return RuntimeResult(
+                text=text,
+                structured=None,
+                cost=cost,
+                finish="stop",
+                raw={
+                    "usage": self._captured_usage,
+                    "message": self._last_assistant_message,
+                },
+            )
+
+        captured = self._captured_payload
+        if captured is None:
+            preview_text = text[:300]
+            raise RuntimeStructuredOutputError(
+                f"{self._runtime.label}: {SUBMIT_RESULT_TOOL} was never called",
+                body={"assistant_message_preview": preview_text},
+            )
+
+        return RuntimeResult(
+            text=text,
+            structured=captured.model_dump(),
+            cost=cost,
+            finish="stop",
+            raw={
+                "usage": self._captured_usage,
+                "message": self._last_assistant_message,
+            },
+        )
+
+
+def _build_copilot_attachments(images: list[Any], files: list[Any]) -> list[dict[str, Any]] | None:
+    """Build the ``attachments=`` list for ``send_and_wait``.
+
+    Returns ``None`` (so the SDK keeps its own default behaviour) when
+    no parts were attached; otherwise a list of TypedDicts ready to
+    pass to the SDK. Per-variant routing:
+
+    * ``ImageInput(path=)`` → :class:`FileAttachment`
+      (``{"type":"file","path":str}``).
+    * ``ImageInput(bytes_=)`` → :class:`BlobAttachment`
+      (``{"type":"blob","data":<b64>,"mimeType":...}``). ``media_type``
+      defaults to ``image/png`` when omitted.
+    * ``ImageInput(url=)`` → raises :class:`UnsupportedFeatureError`.
+      Copilot's SDK has no URL channel; the consumer should fetch the
+      image and pass ``bytes_=`` or ``path=``.
+    * ``FileInput(path=)`` → :class:`FileAttachment`. Copilot handles
+      documents and images uniformly through the attachment slot.
+    """
+    if not images and not files:
+        return None
+    import base64
+
+    attachments: list[dict[str, Any]] = []
+    for img in images:
+        if img.path is not None:
+            attachments.append({"type": "file", "path": img.path})
+        elif img.bytes_ is not None:
+            attachments.append(
+                {
+                    "type": "blob",
+                    "data": base64.b64encode(img.bytes_).decode("ascii"),
+                    "mimeType": img.media_type or "image/png",
+                }
+            )
+        else:
+            raise UnsupportedFeatureError(
+                "copilot: ImageInput(url=...) has no Copilot SDK channel; "
+                "fetch the image and pass bytes_= or path= instead.",
+                feature=Feature.VISION_INPUT,
+            )
+    for file in files:
+        attachments.append({"type": "file", "path": file.path})
+    return attachments
+
+
+def _translate_thinking_for_copilot(thinking: ThinkingMode) -> str | None:
+    """Translate :data:`ThinkingMode` to the ``reasoning_effort`` kwarg.
+
+    Copilot exposes ``Literal["low" | "medium" | "high" | "xhigh"]``
+    on :meth:`CopilotClient.create_session` / ``resume_session``.
+    Returns ``None`` to mean "don't send the kwarg" (vendor default
+    for the chosen model).
+
+    Mappings:
+
+    * ``None`` → ``None`` (vendor default).
+    * ``"disabled"`` → ``None`` (Copilot has no explicit-off; omitting
+      the kwarg picks the model's non-reasoning default for non-
+      reasoning models, which is what the user asked for).
+    * ``"low" | "medium" | "high"`` → pass through.
+    * ``"minimal"`` → ``"low"`` with a debug log (no Copilot
+      equivalent).
+
+    Raises:
+        UnsupportedFeatureError: when a dict shape is passed (Claude-
+            only ``budget_tokens``).
+    """
+    if thinking is None or thinking == "disabled":
+        return None
+    if isinstance(thinking, str):
+        if thinking == "minimal":
+            logger.debug(
+                "copilot: thinking='minimal' has no Copilot equivalent; coercing to 'low'"
+            )
+            return "low"
+        if thinking in ("low", "medium", "high"):
+            return thinking
+        raise UnsupportedFeatureError(
+            f"copilot: unrecognised thinking effort {thinking!r}; "
+            f"supported: 'minimal' (→'low'), 'low', 'medium', 'high', 'disabled'.",
+            feature="reasoning_effort",
+        )
+    if isinstance(thinking, dict):
+        raise UnsupportedFeatureError(
+            "copilot: dict-shaped thinking ({'budget_tokens': N}) is Claude-only; "
+            "use a literal effort level instead.",
+            feature="reasoning_budget_tokens",
+        )
+    raise UnsupportedFeatureError(
+        f"copilot: unrecognised thinking mode {thinking!r}",
+        feature="reasoning_effort",
+    )
+
+
 __all__ = [
     "DEFAULT_COPILOT_MODEL",
+    "CopilotAgentSession",
     "CopilotRuntime",
     "SUBMIT_RESULT_TOOL",
 ]

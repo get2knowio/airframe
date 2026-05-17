@@ -395,137 +395,21 @@ async def test_execute_timeout_raises_transient_error(
 
 
 @pytest.mark.asyncio
-async def test_reset_disconnects_client(mock_sdk: dict[str, MagicMock]) -> None:
+async def test_reset_is_noop_after_iteration_g() -> None:
+    """Phase 1 Iteration G: reset() / close() are no-ops on the runtime.
+
+    Per-call sessions own the SDK client lifecycle; the runtime is
+    genuinely sessionless. Both methods are kept on the protocol for
+    completeness and back-compat, but they don't disconnect anything
+    that lives on the runtime (nothing does).
+    """
     rt = ClaudeCodeRuntime()
-    final = _FakeResultMessage(structured_output={"summary": "x", "count": 1})
-
-    async def fake_receive() -> Any:
-        yield final
-
-    mock_sdk["client"].receive_response = fake_receive
-    await rt.execute("hi", schema=_Schema)
-    assert rt._client is not None  # noqa: SLF001
-
     await rt.reset()
-    assert rt._client is None  # noqa: SLF001
-    assert mock_sdk["client"].disconnect.await_count >= 1
-
-
-@pytest.mark.asyncio
-async def test_reset_with_no_client_is_noop() -> None:
-    rt = ClaudeCodeRuntime()
-    # Should not raise even with no client constructed yet.
+    await rt.close()
     await rt.reset()
     await rt.close()
 
 
-def test_api_key_override_passes_through_env(mock_sdk: dict[str, MagicMock]) -> None:
-    """When api_key= is passed, it lands in ClaudeAgentOptions.env."""
-    import claude_agent_sdk as sdk
-
-    captured_kwargs: dict[str, Any] = {}
-
-    def capturing_options(**kwargs: Any) -> MagicMock:
-        captured_kwargs.update(kwargs)
-        return MagicMock()
-
-    with patch.object(sdk, "ClaudeAgentOptions", side_effect=capturing_options):
-        rt = ClaudeCodeRuntime(api_key="sk-ant-test-key")
-        import asyncio
-
-        async def go() -> None:
-            await rt._ensure_client(  # noqa: SLF001
-                schema=_Schema, system=None, model="claude-haiku-4-5"
-            )
-
-        asyncio.get_event_loop().run_until_complete(go())
-
-    env = captured_kwargs.get("env", {})
-    assert env.get("ANTHROPIC_API_KEY") == "sk-ant-test-key"
-
-
-def test_output_format_uses_schema_json_schema(mock_sdk: dict[str, MagicMock]) -> None:
-    """The runtime passes a native json_schema output_format to the SDK."""
-    import claude_agent_sdk as sdk
-
-    captured_kwargs: dict[str, Any] = {}
-
-    def capturing_options(**kwargs: Any) -> MagicMock:
-        captured_kwargs.update(kwargs)
-        return MagicMock()
-
-    with patch.object(sdk, "ClaudeAgentOptions", side_effect=capturing_options):
-        rt = ClaudeCodeRuntime()
-        import asyncio
-
-        async def go() -> None:
-            await rt._ensure_client(  # noqa: SLF001
-                schema=_Schema, system=None, model="claude-haiku-4-5"
-            )
-
-        asyncio.get_event_loop().run_until_complete(go())
-
-    output_format = captured_kwargs.get("output_format")
-    assert output_format == {
-        "type": "json_schema",
-        "schema": _Schema.model_json_schema(),
-    }
-    # No MCP servers / forced tool wiring.
-    assert "mcp_servers" not in captured_kwargs
-    assert "allowed_tools" not in captured_kwargs
-
-
-def test_no_system_prompt_prefix_when_system_is_none(
-    mock_sdk: dict[str, MagicMock],
-) -> None:
-    """Without a caller-supplied system prompt, we don't synthesise one.
-
-    The SDK applies its own default; we no longer prepend a tool-forcing
-    prefix.
-    """
-    import claude_agent_sdk as sdk
-
-    captured_kwargs: dict[str, Any] = {}
-
-    def capturing_options(**kwargs: Any) -> MagicMock:
-        captured_kwargs.update(kwargs)
-        return MagicMock()
-
-    with patch.object(sdk, "ClaudeAgentOptions", side_effect=capturing_options):
-        rt = ClaudeCodeRuntime()
-        import asyncio
-
-        async def go() -> None:
-            await rt._ensure_client(  # noqa: SLF001
-                schema=_Schema, system=None, model="claude-haiku-4-5"
-            )
-
-        asyncio.get_event_loop().run_until_complete(go())
-
-    assert "system_prompt" not in captured_kwargs
-
-
-def test_system_prompt_passes_through_unmodified(mock_sdk: dict[str, MagicMock]) -> None:
-    """Caller-supplied system prompts land in ClaudeAgentOptions verbatim."""
-    import claude_agent_sdk as sdk
-
-    captured_kwargs: dict[str, Any] = {}
-
-    def capturing_options(**kwargs: Any) -> MagicMock:
-        captured_kwargs.update(kwargs)
-        return MagicMock()
-
-    with patch.object(sdk, "ClaudeAgentOptions", side_effect=capturing_options):
-        rt = ClaudeCodeRuntime()
-        import asyncio
-
-        async def go() -> None:
-            await rt._ensure_client(  # noqa: SLF001
-                schema=_Schema,
-                system="You are the navigator.",
-                model="claude-haiku-4-5",
-            )
-
-        asyncio.get_event_loop().run_until_complete(go())
-
-    assert captured_kwargs.get("system_prompt") == "You are the navigator."
+# Note: tests for ClaudeAgentOptions wiring (output_format, env,
+# system_prompt) live in ``test_claude_code_session.py`` after
+# Iteration G — the options are built by the session, not the runtime.

@@ -82,81 +82,106 @@ def test_unwrap_unrelated_type_raises_typeerror(runtime_factory: Any) -> None:
 # --- Native unwrap before client construction raises -------------------------
 
 
-def test_claude_code_unwrap_native_before_execute_raises() -> None:
-    """``unwrap(ClaudeSDKClient)`` before any execute() call is an error.
+def test_claude_code_unwrap_native_redirects_to_session() -> None:
+    """Phase 1 Iteration G: ClaudeSDKClient moved off the runtime onto session.
 
-    The client is built lazily by ``execute()``. Asking for it before
-    construction is a programming error — the runtime can't fabricate
-    one without auth + options.
+    ``runtime.unwrap(ClaudeSDKClient)`` raises with a clear message
+    pointing the caller to ``session.unwrap(ClaudeSDKClient)``.
     """
     from claude_agent_sdk import ClaudeSDKClient
 
     runtime = ClaudeCodeRuntime()
-    with pytest.raises(TypeError, match="no client exists yet"):
+    with pytest.raises(TypeError, match="sessions do"):
         runtime.unwrap(ClaudeSDKClient)
 
 
-def test_copilot_unwrap_native_before_execute_raises() -> None:
+def test_copilot_unwrap_session_redirects_to_session() -> None:
+    """Phase 1 Iteration G: CopilotSession moved onto AgentSession.
+
+    ``CopilotClient`` is runtime-owned and still unwraps normally;
+    ``CopilotSession`` raises with a redirect.
+    """
     from copilot import CopilotClient
     from copilot.session import CopilotSession
 
     runtime = CopilotRuntime()
+    # CopilotClient still raises pre-construction (runtime-owned but lazy).
     with pytest.raises(TypeError, match="no client exists yet"):
         runtime.unwrap(CopilotClient)
-    with pytest.raises(TypeError, match="no session exists yet"):
+    # CopilotSession now points users to the session.
+    with pytest.raises(TypeError, match="sessions do"):
         runtime.unwrap(CopilotSession)
 
 
-def test_codex_unwrap_native_before_execute_raises() -> None:
+def test_codex_unwrap_thread_redirects_to_session() -> None:
+    """Phase 1 Iteration G: Thread moved onto AgentSession.
+
+    ``Codex`` is runtime-owned and still unwraps normally;
+    ``Thread`` raises with a redirect.
+    """
     from openai_codex_sdk import Codex, Thread
 
     runtime = CodexRuntime()
     with pytest.raises(TypeError, match="no client exists yet"):
         runtime.unwrap(Codex)
-    with pytest.raises(TypeError, match="no thread exists yet"):
+    with pytest.raises(TypeError, match="sessions do"):
         runtime.unwrap(Thread)
 
 
 # --- Native unwrap after client construction returns the live object ----------
 
 
-def test_claude_code_unwrap_returns_live_client() -> None:
-    """Once ``execute()`` has built a client, unwrap returns it.
-
-    We sneak a mock onto ``_client`` rather than actually executing —
-    the contract is about the unwrap routing, not the SDK behaviour.
-    """
-    from claude_agent_sdk import ClaudeSDKClient
-
-    runtime = ClaudeCodeRuntime()
-    mock_client = MagicMock(spec=ClaudeSDKClient)
-    runtime._client = mock_client
-    assert runtime.unwrap(ClaudeSDKClient) is mock_client
-
-
-def test_copilot_unwrap_returns_live_client_and_session() -> None:
+def test_copilot_unwrap_returns_live_client() -> None:
+    """``CopilotClient`` is still runtime-owned — unwrap returns it after construction."""
     from copilot import CopilotClient
-    from copilot.session import CopilotSession
 
     runtime = CopilotRuntime()
     mock_client = MagicMock(spec=CopilotClient)
-    mock_session = MagicMock(spec=CopilotSession)
-    runtime._client = mock_client
-    runtime._session = mock_session
+    runtime._client = mock_client  # noqa: SLF001 — test scaffolding
     assert runtime.unwrap(CopilotClient) is mock_client
-    assert runtime.unwrap(CopilotSession) is mock_session
 
 
-def test_codex_unwrap_returns_live_client_and_thread() -> None:
-    from openai_codex_sdk import Codex, Thread
+def test_codex_unwrap_returns_live_client() -> None:
+    """``Codex`` is still runtime-owned — unwrap returns it after construction."""
+    from openai_codex_sdk import Codex
 
     runtime = CodexRuntime()
     mock_client = MagicMock(spec=Codex)
-    mock_thread = MagicMock(spec=Thread)
-    runtime._client = mock_client
-    runtime._thread = mock_thread
+    runtime._client = mock_client  # noqa: SLF001 — test scaffolding
     assert runtime.unwrap(Codex) is mock_client
-    assert runtime.unwrap(Thread) is mock_thread
+
+
+# --- Session-level unwrap (Phase 1 Iteration G — new home for native types) ----
+
+
+def test_claude_code_session_unwrap_native_before_execute_raises() -> None:
+    """``session.unwrap(ClaudeSDKClient)`` before the first turn raises."""
+    from claude_agent_sdk import ClaudeSDKClient
+
+    runtime = ClaudeCodeRuntime()
+    sess = runtime.session()
+    with pytest.raises(TypeError, match="no client exists yet"):
+        sess.unwrap(ClaudeSDKClient)
+
+
+def test_copilot_session_unwrap_native_before_execute_raises() -> None:
+    """``session.unwrap(CopilotSession)`` before the first turn raises."""
+    from copilot.session import CopilotSession
+
+    runtime = CopilotRuntime()
+    sess = runtime.session()
+    with pytest.raises(TypeError, match="no session exists yet"):
+        sess.unwrap(CopilotSession)
+
+
+def test_codex_session_unwrap_native_before_execute_raises() -> None:
+    """``session.unwrap(Thread)`` before the first turn raises."""
+    from openai_codex_sdk import Thread
+
+    runtime = CodexRuntime()
+    sess = runtime.session()
+    with pytest.raises(TypeError, match="no thread exists yet"):
+        sess.unwrap(Thread)
 
 
 def test_opencode_zen_unwrap_builds_client_lazily() -> None:
