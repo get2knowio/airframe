@@ -1089,7 +1089,7 @@ or to roll straight into Phase 5 (permission, hooks, budget).
 
 ---
 
-## Phase 5 — Permission, hooks, budget
+## Phase 5 — Permission, hooks, budget ✅
 
 **Goal.** Roadmap §3 P3 items. Independent of Phase 3/4 — could land
 in parallel.
@@ -1202,7 +1202,7 @@ Coverage matrix (target after Iteration D):
 | `CodexRuntime` | ✓ | ✓ | ✓ | ✓ | Permission mapping is coarser (session-wide `approval_policy`). |
 | `OpenAICompatibleRuntime` | ✗ | ✓ | ✓ | ✓ | Chat Completions has no permission concept; declines permanently. |
 
-#### Iteration A — Protocol scaffolding (no behaviour)
+#### Iteration A — Protocol scaffolding (no behaviour) ✅
 
 Lock the public surface; defer the wiring.
 
@@ -1253,7 +1253,7 @@ Lock the public surface; defer the wiring.
 `session()` / `execute()` / `stream()` signature; non-None values
 raise immediately. No per-adapter behaviour yet.
 
-#### Iteration B — Permission callback (3 wire, 1 declines)
+#### Iteration B — Permission callback (3 wire, 1 declines) ✅
 
 Sets the per-vendor permission-channel pattern. Same "wire the
 hardest one first" cadence as Phase 4 Iteration B (Claude).
@@ -1294,7 +1294,7 @@ hardest one first" cadence as Phase 4 Iteration B (Claude).
 **Stopping point.** Three of four adapters wire permission;
 OpenAI-compat declines. Hooks and budget still raise.
 
-#### Iteration C — Lifecycle hooks (4 wire, mixed mechanisms)
+#### Iteration C — Lifecycle hooks (4 wire, mixed mechanisms) ✅
 
 The most surface-area iteration; each adapter takes a different
 route to emit the 8 `HookEvent.kind` literals.
@@ -1327,7 +1327,7 @@ route to emit the 8 `HookEvent.kind` literals.
 **Stopping point.** All four adapters fire hooks; emittable-kinds
 sets are documented and tested.
 
-#### Iteration D — Budget caps + probe + wrap-up
+#### Iteration D — Budget caps + probe + wrap-up ✅
 
 - **Claude:** `max_turns` → `ClaudeAgentOptions.max_turns`
   (overrides the hard-coded `DEFAULT_MAX_TURNS=60` when set);

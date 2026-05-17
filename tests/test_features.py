@@ -136,6 +136,20 @@ def test_unwired_features_stay_false(adapters: list) -> None:
         Feature.TOOLS_MCP_STDIO,
         Feature.TOOLS_MCP_HTTP,
         Feature.TOOLS_MCP_SSE,
+        # Phase 5 Iteration B flipped PERMISSION_CALLBACK on Claude,
+        # Copilot, and Codex; OpenAI-compat declines permanently
+        # (Chat Completions has no permission wire shape).
+        Feature.PERMISSION_CALLBACK,
+        # Phase 5 Iteration C flipped LIFECYCLE_HOOKS on all four
+        # adapters. Per-adapter emittable-kinds set differs (see
+        # each adapter's EMITTABLE_HOOK_KINDS ClassVar).
+        Feature.LIFECYCLE_HOOKS,
+        # Phase 5 Iteration D flipped BUDGET_USD_CAP on all four
+        # (client-side accumulation) and BUDGET_TURN_CAP on three
+        # (Claude / Codex / OpenAI-compat). Copilot keeps the
+        # turn-cap decline because its vendor caps internally.
+        Feature.BUDGET_USD_CAP,
+        Feature.BUDGET_TURN_CAP,
     }
     must_be_false = [f for f in Feature if f not in any_adapter_may_support]
     for adapter in adapters:
@@ -733,3 +747,357 @@ def test_supports_is_pure(adapters: list) -> None:
         second = adapter.supports(Feature.STREAMING)
         third = adapter.supports(Feature.STREAMING)
         assert first == second == third
+
+
+# ---------------------------------------------------------------------------
+# Phase 5 Iteration A — permission / hooks / budget scaffolding
+# ---------------------------------------------------------------------------
+
+
+def test_phase_5_final_matrix(adapters: list) -> None:
+    """Phase 5 Iteration D — the endgame coverage matrix.
+
+    Pins per the plan's Phase 5 coverage table:
+
+    | Adapter | PERMISSION | HOOKS | BUDGET_USD | BUDGET_TURN |
+    |---|---|---|---|---|
+    | ClaudeCodeRuntime | ✓ | ✓ | ✓ | ✓ |
+    | CopilotRuntime    | ✓ | ✓ | ✓ | ✗ |  ← turn cap vendor-internal
+    | CodexRuntime      | ✓ | ✓ | ✓ | ✓ |
+    | OpenCodeZenRuntime | ✗ | ✓ | ✓ | ✓ |  ← permission permanently declined
+
+    Regressions in any cell are caught here.
+    """
+    from airframe import (
+        ClaudeCodeRuntime,
+        CodexRuntime,
+        CopilotRuntime,
+        OpenCodeZenRuntime,
+    )
+
+    matrix: dict[type, dict[Feature, bool]] = {
+        ClaudeCodeRuntime: {
+            Feature.PERMISSION_CALLBACK: True,
+            Feature.LIFECYCLE_HOOKS: True,
+            Feature.BUDGET_USD_CAP: True,
+            Feature.BUDGET_TURN_CAP: True,
+        },
+        CopilotRuntime: {
+            Feature.PERMISSION_CALLBACK: True,
+            Feature.LIFECYCLE_HOOKS: True,
+            Feature.BUDGET_USD_CAP: True,
+            Feature.BUDGET_TURN_CAP: False,
+        },
+        CodexRuntime: {
+            Feature.PERMISSION_CALLBACK: True,
+            Feature.LIFECYCLE_HOOKS: True,
+            Feature.BUDGET_USD_CAP: True,
+            Feature.BUDGET_TURN_CAP: True,
+        },
+        OpenCodeZenRuntime: {
+            Feature.PERMISSION_CALLBACK: False,
+            Feature.LIFECYCLE_HOOKS: True,
+            Feature.BUDGET_USD_CAP: True,
+            Feature.BUDGET_TURN_CAP: True,
+        },
+    }
+    for adapter in adapters:
+        for cls, expected in matrix.items():
+            if isinstance(adapter, cls):
+                for feature, want in expected.items():
+                    got = adapter.supports(feature)
+                    assert got == want, (
+                        f"{cls.__name__}.supports({feature.name}) should be {want}; got {got}"
+                    )
+
+
+def test_budget_usd_cap_universal(adapters: list) -> None:
+    """Phase 5 Iteration D: every adapter declares BUDGET_USD_CAP.
+
+    Client-side accumulation against ``RuntimeResult.cost.cost_usd``
+    is universally available — the cap is enforced at turn boundary
+    in v0 (mid-turn interrupt is additive later).
+    """
+    for adapter in adapters:
+        assert adapter.supports(Feature.BUDGET_USD_CAP), (
+            f"{type(adapter).__name__} should declare BUDGET_USD_CAP after Phase 5 Iteration D"
+        )
+
+
+def test_budget_turn_cap_universal_except_copilot(adapters: list) -> None:
+    """Phase 5 Iteration D: Claude / Codex / OpenAI-compat flip
+    BUDGET_TURN_CAP True; Copilot declines.
+
+    Copilot's vendor SDK caps internal turns at the CLI level via the
+    runtime's ``--max-turns`` config, so a user-facing ``max_turns=``
+    surface would be misleading — the decline is the honest signal.
+    """
+    from airframe import CopilotRuntime
+
+    for adapter in adapters:
+        if isinstance(adapter, CopilotRuntime):
+            assert not adapter.supports(Feature.BUDGET_TURN_CAP), (
+                "CopilotRuntime should NOT declare BUDGET_TURN_CAP — "
+                "vendor enforces turn caps internally"
+            )
+        else:
+            assert adapter.supports(Feature.BUDGET_TURN_CAP), (
+                f"{type(adapter).__name__} should declare BUDGET_TURN_CAP "
+                f"after Phase 5 Iteration D"
+            )
+
+
+def test_lifecycle_hooks_universal(adapters: list) -> None:
+    """Phase 5 Iteration C: every adapter declares LIFECYCLE_HOOKS.
+
+    The per-adapter *emittable kinds set* differs — each adapter
+    advertises an ``EMITTABLE_HOOK_KINDS`` ClassVar with the
+    :class:`~airframe.hooks.HookEventKind` literals it can honestly
+    produce. See :func:`test_emittable_hook_kinds_matrix` below for
+    the per-adapter pin.
+    """
+    for adapter in adapters:
+        assert adapter.supports(Feature.LIFECYCLE_HOOKS), (
+            f"{type(adapter).__name__} should declare LIFECYCLE_HOOKS after Phase 5 Iteration C"
+        )
+
+
+def test_emittable_hook_kinds_matrix(adapters: list) -> None:
+    """The per-adapter ``EMITTABLE_HOOK_KINDS`` matrix.
+
+    Pinned so a regression where (say) Codex drops ``post_tool_use``
+    from its emittable set is caught at PR time. ``session_start``
+    and ``session_end`` are universal (every adapter synthesises
+    them); ``pre_compact`` / ``rate_limit`` are vendor-specific.
+    """
+    from airframe import (
+        ClaudeCodeRuntime,
+        CodexRuntime,
+        CopilotRuntime,
+        OpenCodeZenRuntime,
+    )
+
+    expected: dict[type, set[str]] = {
+        ClaudeCodeRuntime: {
+            "session_start",
+            "session_end",
+            "user_prompt_submit",
+            "pre_tool_use",
+            "post_tool_use",
+            "tool_failure",
+            "pre_compact",
+            "rate_limit",
+        },
+        CopilotRuntime: {
+            "session_start",
+            "session_end",
+            "user_prompt_submit",
+            "pre_tool_use",
+            "post_tool_use",
+            "tool_failure",
+            "pre_compact",
+        },
+        CodexRuntime: {
+            "session_start",
+            "session_end",
+            "user_prompt_submit",
+            "pre_tool_use",
+            "post_tool_use",
+            "tool_failure",
+        },
+        OpenCodeZenRuntime: {
+            "session_start",
+            "session_end",
+            "user_prompt_submit",
+            "pre_tool_use",
+            "post_tool_use",
+            "tool_failure",
+        },
+    }
+    for adapter in adapters:
+        kinds = getattr(type(adapter), "EMITTABLE_HOOK_KINDS", None)
+        assert kinds is not None, (
+            f"{type(adapter).__name__} should expose an EMITTABLE_HOOK_KINDS "
+            f"ClassVar after Phase 5 Iteration C"
+        )
+        for cls, want in expected.items():
+            if isinstance(adapter, cls):
+                assert set(kinds) == want, (
+                    f"{cls.__name__}.EMITTABLE_HOOK_KINDS should be {want}; got {set(kinds)}"
+                )
+
+
+def test_permission_callback_universal_except_openai_compat(adapters: list) -> None:
+    """Phase 5 Iteration B: Claude / Copilot / Codex all flip
+    PERMISSION_CALLBACK True; OpenAI-compat (chat-completions)
+    permanently declines.
+    """
+    from airframe import (
+        ClaudeCodeRuntime,
+        CodexRuntime,
+        CopilotRuntime,
+        OpenCodeZenRuntime,
+    )
+
+    for adapter in adapters:
+        if isinstance(adapter, ClaudeCodeRuntime | CopilotRuntime | CodexRuntime):
+            assert adapter.supports(Feature.PERMISSION_CALLBACK), (
+                f"{type(adapter).__name__} should declare PERMISSION_CALLBACK "
+                f"after Phase 5 Iteration B"
+            )
+        elif isinstance(adapter, OpenCodeZenRuntime):
+            assert not adapter.supports(Feature.PERMISSION_CALLBACK), (
+                "OpenCodeZenRuntime should NOT declare PERMISSION_CALLBACK — "
+                "Chat Completions has no tool-permission wire shape"
+            )
+
+
+def test_session_on_permission_kwarg_raises_only_on_openai_compat(adapters: list) -> None:
+    """Phase 5 Iteration B: only OpenAI-compat raises on ``on_permission=``.
+
+    The accepting three (Claude / Copilot / Codex) open cleanly with
+    the callback supplied. OpenAI-compat raises with an actionable
+    decline message pointing at the future ``OpenAIResponsesRuntime``.
+    """
+    from airframe import (
+        ClaudeCodeRuntime,
+        CodexRuntime,
+        CopilotRuntime,
+        OpenCodeZenRuntime,
+        PermissionDecision,
+        PermissionRequest,
+    )
+    from airframe.errors import UnsupportedFeatureError
+
+    class _StubCallback:
+        async def handle(self, request: PermissionRequest) -> PermissionDecision:
+            return "allow"
+
+    cb = _StubCallback()
+    for adapter in adapters:
+        if isinstance(adapter, OpenCodeZenRuntime):
+            with pytest.raises(UnsupportedFeatureError) as exc_info:
+                adapter.session(on_permission=cb)  # type: ignore[attr-defined]
+            assert exc_info.value.feature == Feature.PERMISSION_CALLBACK
+            text = str(exc_info.value).lower()
+            # Pin the actionable pointer.
+            assert "chat completions" in text
+            assert "openairesponsesruntime" in text.replace(" ", "")
+        elif isinstance(adapter, ClaudeCodeRuntime | CopilotRuntime | CodexRuntime):
+            sess = adapter.session(on_permission=cb)  # type: ignore[attr-defined]
+            assert sess is not None
+            del sess
+
+
+def test_session_on_event_kwarg_opens_cleanly_on_every_adapter(adapters: list) -> None:
+    """Phase 5 Iteration C: every adapter accepts ``on_event=``.
+
+    Per-adapter emission shape lives in the corresponding
+    ``test_*_session.py`` file; here we just check the four
+    adapters open the session cleanly with an observer registered.
+    """
+    from airframe import HookEvent
+
+    def _observer(_event: HookEvent) -> None:
+        pass
+
+    for adapter in adapters:
+        sess = adapter.session(on_event=_observer)  # type: ignore[attr-defined]
+        assert sess is not None
+        del sess
+
+
+def test_session_on_permission_or_event_none_opens_cleanly(adapters: list) -> None:
+    """``on_permission=None`` / ``on_event=None`` are both no-ops.
+
+    The default-None values must continue to open sessions cleanly
+    on every adapter — same shape as Phase 4's
+    ``mcp_servers=None`` no-op contract.
+    """
+    for adapter in adapters:
+        sess = adapter.session(on_permission=None, on_event=None)  # type: ignore[attr-defined]
+        assert sess is not None
+        del sess
+
+
+async def test_execute_max_turns_kwarg_raises_only_on_copilot(adapters: list) -> None:
+    """Phase 5 Iteration D: ``max_turns=`` raises only on Copilot.
+
+    Claude / Codex / OpenAI-compat all flip ``BUDGET_TURN_CAP`` True
+    and honour the kwarg. Copilot keeps the decline because the
+    vendor SDK caps internal turns at the CLI level — exposing a
+    user-facing ``max_turns=`` would be misleading.
+    """
+    from airframe import CopilotRuntime
+    from airframe.errors import UnsupportedFeatureError
+
+    for adapter in adapters:
+        sess = adapter.session()  # type: ignore[attr-defined]
+        try:
+            if isinstance(adapter, CopilotRuntime):
+                with pytest.raises(UnsupportedFeatureError) as exc_info:
+                    await sess.execute("hi", max_turns=5)
+                assert exc_info.value.feature == Feature.BUDGET_TURN_CAP, (
+                    f"CopilotRuntime should raise with feature=BUDGET_TURN_CAP; "
+                    f"got {exc_info.value.feature!r}"
+                )
+            # The accepting three need real vendor I/O to run a turn,
+            # so we don't actually call execute() here. The per-adapter
+            # session tests cover the enforcement path with mocks.
+        finally:
+            await sess.close()
+
+
+async def test_execute_max_budget_usd_kwarg_no_longer_raises(adapters: list) -> None:
+    """Phase 5 Iteration D: every adapter honours ``max_budget_usd=``.
+
+    Iteration D flipped ``BUDGET_USD_CAP`` True on all four
+    adapters; the gate no longer raises on any adapter. Behavioural
+    coverage (cap firing, error attributes) lives in the per-adapter
+    session tests with mocked vendor I/O.
+
+    Verified at the gate layer: opening a session and calling the
+    gate with ``max_budget_usd=`` must not raise
+    :class:`UnsupportedFeatureError`. The actual ``execute()`` call
+    needs live vendors and is out of scope here.
+    """
+    from airframe.sessions import _check_budget_supported
+
+    for adapter in adapters:
+        # The gate must accept non-None ``max_budget_usd=`` on every
+        # adapter post-Iteration-D — no UnsupportedFeatureError.
+        _check_budget_supported(
+            max_turns=None,
+            max_budget_usd=0.05,
+            adapter_label=adapter.label,  # type: ignore[attr-defined]
+            supports=adapter.supports,  # type: ignore[attr-defined]
+        )
+
+
+async def test_execute_budget_kwargs_none_opens_cleanly(adapters: list) -> None:
+    """``max_turns=None`` / ``max_budget_usd=None`` are no-ops — must
+    not raise.
+
+    The gate only fires on non-None values; the default-None
+    branches continue to flow through to per-adapter behaviour.
+    Verified at the session-construction layer; the actual execute
+    call needs live vendors and lives in the per-adapter session
+    tests.
+    """
+    for adapter in adapters:
+        sess = adapter.session()  # type: ignore[attr-defined]
+        try:
+            # Just constructing the session and exercising the gate
+            # with the defaults — _check_budget_supported is called
+            # at the top of execute() and must short-circuit when
+            # both kwargs are None.
+            from airframe.sessions import _check_budget_supported
+
+            _check_budget_supported(
+                max_turns=None,
+                max_budget_usd=None,
+                adapter_label=adapter.label,  # type: ignore[attr-defined]
+                supports=adapter.supports,  # type: ignore[attr-defined]
+            )
+        finally:
+            await sess.close()

@@ -37,7 +37,7 @@ different shapes:
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 
 class AgentRuntimeError(Exception):
@@ -136,6 +136,43 @@ class RuntimeProtocolError(AgentRuntimeError):
     """
 
 
+class RuntimeBudgetExceededError(AgentRuntimeError):
+    """Raised when a session exceeds a caller-supplied budget cap.
+
+    Phase 5 Iteration D companion to the ``max_turns=`` /
+    ``max_budget_usd=`` kwargs on :meth:`~airframe.protocol.AgentSession.execute`
+    and :meth:`~airframe.protocol.AgentSession.stream`. Raised at a
+    turn boundary (mid-turn interrupt is additive later via the
+    existing :meth:`~airframe.protocol.AgentSession.cancel` plumbing)
+    when the running total would exceed the cap.
+
+    Attributes:
+        cap: The caller-supplied threshold (USD or turn count).
+        current: The session's running total at the moment the cap
+            tripped — equal to or greater than ``cap``.
+        kind: ``"usd"`` when the USD-budget cap fired,
+            ``"turns"`` when the turn-count cap fired.
+
+    Consumer code can branch on ``kind`` to decide whether to
+    retry-with-larger-cap, surface to the user, or fail closed.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        cap: float,
+        current: float,
+        kind: Literal["usd", "turns"],
+        status: int | None = None,
+        body: Any = None,
+    ) -> None:
+        super().__init__(message, status=status, body=body)
+        self.cap = cap
+        self.current = current
+        self.kind = kind
+
+
 class UnsupportedFeatureError(AgentRuntimeError):
     """Raised when a caller asks an adapter to honour a capability it lacks.
 
@@ -176,6 +213,7 @@ class UnsupportedFeatureError(AgentRuntimeError):
 __all__ = [
     "AgentRuntimeError",
     "RuntimeAuthError",
+    "RuntimeBudgetExceededError",
     "RuntimeCancelledError",
     "RuntimeContextOverflowError",
     "RuntimeModelNotFoundError",

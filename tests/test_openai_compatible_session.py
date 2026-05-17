@@ -1212,3 +1212,440 @@ def test_openai_compat_declines_every_mcp_transport() -> None:
     assert rt.supports(Feature.TOOLS_MCP_HTTP) is False
     assert rt.supports(Feature.TOOLS_MCP_SSE) is False
     assert rt.supports(Feature.TOOLS_MCP_IN_PROCESS) is False
+
+
+# ---------------------------------------------------------------------------
+# Permission callback (Phase 5 Iteration B — permanent decline)
+# ---------------------------------------------------------------------------
+
+
+async def test_session_on_permission_declines_with_responses_api_pointer() -> None:
+    """``on_permission=`` raises UnsupportedFeatureError with the
+    Responses-API pointer.
+
+    The decline is **permanent** for the chat-completions family —
+    Chat Completions has no tool-permission wire shape. A future
+    ``OpenAIResponsesRuntime`` could wire it.
+    """
+    from airframe import PermissionDecision, PermissionRequest
+    from airframe.errors import UnsupportedFeatureError
+
+    class _Cb:
+        async def handle(self, request: PermissionRequest) -> PermissionDecision:
+            return "allow"
+
+    rt = _make_runtime()
+    with pytest.raises(UnsupportedFeatureError) as exc_info:
+        rt.session(on_permission=_Cb())
+    assert exc_info.value.feature == Feature.PERMISSION_CALLBACK
+    text = str(exc_info.value).lower()
+    # Pin the actionable pointer.
+    assert "chat completions" in text
+    assert "openairesponsesruntime" in text.replace(" ", "")
+
+
+async def test_session_on_permission_none_opens_cleanly() -> None:
+    """``on_permission=None`` is the no-op default — must not raise."""
+    rt = _make_runtime()
+    sess = rt.session(on_permission=None)
+    assert sess is not None
+    await sess.close()
+
+
+def test_openai_compat_does_not_declare_permission_callback() -> None:
+    """The chat-completions family stays at PERMISSION_CALLBACK=False."""
+    rt = _make_runtime()
+    assert rt.supports(Feature.PERMISSION_CALLBACK) is False
+
+
+# ---------------------------------------------------------------------------
+# Lifecycle hooks (Phase 5 Iteration C)
+# ---------------------------------------------------------------------------
+
+
+def test_openai_compat_runtime_declares_lifecycle_hooks() -> None:
+    """LIFECYCLE_HOOKS is True after Iteration C."""
+    rt = _make_runtime()
+    assert rt.supports(Feature.LIFECYCLE_HOOKS) is True
+
+
+def test_openai_compat_emittable_hook_kinds_matches_plan() -> None:
+    """Six kinds — no pre_compact (no compaction concept on chat-completions)
+    and no rate_limit (SDK doesn't surface a discrete throttle event)."""
+    from airframe.adapters.openai_compatible import OpenAICompatibleRuntime
+
+    assert (
+        frozenset(
+            {
+                "session_start",
+                "session_end",
+                "user_prompt_submit",
+                "pre_tool_use",
+                "post_tool_use",
+                "tool_failure",
+            }
+        )
+        == OpenAICompatibleRuntime.EMITTABLE_HOOK_KINDS
+    )
+
+
+async def test_on_event_execute_emits_session_start_and_user_prompt_submit(
+    mock_openai: MagicMock,
+) -> None:
+    """First execute() fires session_start; every turn fires
+    user_prompt_submit with prompt + length."""
+    from airframe.hooks import HookEvent
+
+    events: list[HookEvent] = []
+    rt = _make_runtime()
+    sess = rt.session(on_event=events.append)
+    try:
+        await sess.execute("first")
+        await sess.execute("second")
+    finally:
+        await sess.close()
+
+    starts = [e for e in events if e.kind == "session_start"]
+    prompts = [e for e in events if e.kind == "user_prompt_submit"]
+    assert len(starts) == 1
+    assert len(prompts) == 2
+    assert prompts[0].payload["prompt"] == "first"
+    assert prompts[0].payload["length"] == len("first")
+    # No vendor session_id on chat-completions.
+    assert all(e.session_id is None for e in events)
+
+
+async def test_on_event_stream_also_emits_session_start_and_user_prompt_submit(
+    mock_openai: MagicMock,
+) -> None:
+    """The stream() path emits the same session-level kinds as execute()."""
+    from airframe.hooks import HookEvent
+
+    chunks = [
+        _make_chunk(content="hi", finish_reason="stop"),
+        _make_usage_chunk(prompt_tokens=1, completion_tokens=1),
+    ]
+    mock_openai.chat.completions.create = AsyncMock(return_value=_AsyncIter(chunks))
+
+    events: list[HookEvent] = []
+    rt = _make_runtime()
+    sess = rt.session(on_event=events.append)
+    try:
+        async for _ in sess.stream("hello"):
+            pass
+    finally:
+        await sess.close()
+
+    kinds = [e.kind for e in events]
+    assert "session_start" in kinds
+    assert "user_prompt_submit" in kinds
+
+
+async def test_on_event_tool_round_trip_emits_pre_and_post_tool_use(
+    mock_openai: MagicMock,
+) -> None:
+    """A round-trip with a function tool fires pre_tool_use before
+    handler invocation and post_tool_use on success — in that order."""
+    from airframe import FunctionTool
+    from airframe.hooks import HookEvent
+
+    async def add(params: _AddParams) -> float:
+        return params.a + params.b
+
+    tool = FunctionTool(name="add", description="Add.", params=_AddParams, handler=add)
+
+    mock_openai.chat.completions.create = AsyncMock(
+        side_effect=[
+            _make_tool_call_response(
+                tool_calls=[
+                    _make_tool_call(call_id="c1", name="add", arguments='{"a": 1, "b": 2}')
+                ]
+            ),
+            _make_response(content="3"),
+        ]
+    )
+
+    events: list[HookEvent] = []
+    rt = _make_runtime()
+    sess = rt.session(tools=[tool], on_event=events.append)
+    try:
+        await sess.execute("what's 1 + 2?")
+    finally:
+        await sess.close()
+
+    tool_kinds = [e.kind for e in events if e.kind in {"pre_tool_use", "post_tool_use"}]
+    assert tool_kinds == ["pre_tool_use", "post_tool_use"]
+    pre = next(e for e in events if e.kind == "pre_tool_use")
+    post = next(e for e in events if e.kind == "post_tool_use")
+    assert pre.payload["tool_name"] == "add"
+    assert pre.payload["tool_call_id"] == "c1"
+    assert post.payload["tool_call_id"] == "c1"
+    assert str(post.payload["output"]) == "3.0"
+
+
+async def test_on_event_tool_failure_translates_to_tool_failure_kind(
+    mock_openai: MagicMock,
+) -> None:
+    """Handler-raised exception → tool_failure (not post_tool_use)."""
+    from airframe import FunctionTool
+    from airframe.hooks import HookEvent
+
+    async def boom(params: _AddParams) -> float:
+        raise RuntimeError("handler broke")
+
+    tool = FunctionTool(name="add", description="Add.", params=_AddParams, handler=boom)
+
+    mock_openai.chat.completions.create = AsyncMock(
+        side_effect=[
+            _make_tool_call_response(
+                tool_calls=[
+                    _make_tool_call(call_id="c1", name="add", arguments='{"a": 1, "b": 2}')
+                ]
+            ),
+            _make_response(content="apologies"),
+        ]
+    )
+
+    events: list[HookEvent] = []
+    rt = _make_runtime()
+    sess = rt.session(tools=[tool], on_event=events.append)
+    try:
+        await sess.execute("call add")
+    finally:
+        await sess.close()
+
+    kinds = [e.kind for e in events if e.kind in {"post_tool_use", "tool_failure"}]
+    assert kinds == ["tool_failure"]
+    failure = next(e for e in events if e.kind == "tool_failure")
+    assert "error" in failure.payload
+
+
+async def test_on_event_stream_tool_round_trip_emits_pre_and_post_tool_use(
+    mock_openai: MagicMock,
+) -> None:
+    """The stream() path fires the same per-tool kinds as execute()."""
+    from airframe import FunctionTool
+    from airframe.hooks import HookEvent
+
+    async def add(params: _AddParams) -> float:
+        return params.a + params.b
+
+    tool = FunctionTool(name="add", description="Add.", params=_AddParams, handler=add)
+
+    first_stream_chunks = [
+        _make_chunk(
+            tool_call_deltas=[
+                _make_tool_call_delta(index=0, call_id="c1", name="add", arguments=""),
+            ]
+        ),
+        _make_chunk(
+            tool_call_deltas=[
+                _make_tool_call_delta(index=0, arguments='{"a": 1, "b": 2}'),
+            ],
+            finish_reason="tool_calls",
+        ),
+        _make_usage_chunk(prompt_tokens=1, completion_tokens=1),
+    ]
+    second_stream_chunks = [
+        _make_chunk(content="3", finish_reason="stop"),
+        _make_usage_chunk(prompt_tokens=1, completion_tokens=1),
+    ]
+    mock_openai.chat.completions.create = AsyncMock(
+        side_effect=[_AsyncIter(first_stream_chunks), _AsyncIter(second_stream_chunks)]
+    )
+
+    events: list[HookEvent] = []
+    rt = _make_runtime()
+    sess = rt.session(tools=[tool], on_event=events.append)
+    try:
+        async for _ in sess.stream("call add"):
+            pass
+    finally:
+        await sess.close()
+
+    kinds = [e.kind for e in events if e.kind in {"pre_tool_use", "post_tool_use"}]
+    assert kinds == ["pre_tool_use", "post_tool_use"]
+
+
+async def test_close_synthesises_session_end_when_session_start_fired(
+    mock_openai: MagicMock,
+) -> None:
+    """close() after at least one turn emits exactly one session_end."""
+    from airframe.hooks import HookEvent
+
+    events: list[HookEvent] = []
+    rt = _make_runtime()
+    sess = rt.session(on_event=events.append)
+    await sess.execute("hi")
+    assert [e for e in events if e.kind == "session_end"] == []
+    await sess.close()
+    ends = [e for e in events if e.kind == "session_end"]
+    assert len(ends) == 1
+
+
+async def test_close_session_end_is_idempotent(mock_openai: MagicMock) -> None:
+    """Multiple close() calls fire session_end at most once."""
+    from airframe.hooks import HookEvent
+
+    events: list[HookEvent] = []
+    rt = _make_runtime()
+    sess = rt.session(on_event=events.append)
+    await sess.execute("hi")
+    await sess.close()
+    await sess.close()
+    await sess.close()
+    ends = [e for e in events if e.kind == "session_end"]
+    assert len(ends) == 1
+
+
+async def test_close_without_execute_omits_session_end(mock_openai: MagicMock) -> None:
+    """If session_start never fired (no execute() ever ran), close()
+    must NOT fire a phantom session_end."""
+    from airframe.hooks import HookEvent
+
+    events: list[HookEvent] = []
+    rt = _make_runtime()
+    sess = rt.session(on_event=events.append)
+    await sess.close()
+    assert [e for e in events if e.kind == "session_end"] == []
+
+
+async def test_no_on_event_skips_hook_emission(mock_openai: MagicMock) -> None:
+    """Without on_event= the adapter's hot path doesn't emit hooks.
+    Verified indirectly: the session executes a tool round-trip
+    without raising and produces the expected text."""
+    from airframe import FunctionTool
+
+    async def add(params: _AddParams) -> float:
+        return params.a + params.b
+
+    tool = FunctionTool(name="add", description="Add.", params=_AddParams, handler=add)
+    mock_openai.chat.completions.create = AsyncMock(
+        side_effect=[
+            _make_tool_call_response(
+                tool_calls=[
+                    _make_tool_call(call_id="c1", name="add", arguments='{"a": 1, "b": 2}')
+                ]
+            ),
+            _make_response(content="3"),
+        ]
+    )
+
+    rt = _make_runtime()
+    sess = rt.session(tools=[tool])
+    try:
+        result = await sess.execute("compute")
+    finally:
+        await sess.close()
+    assert result.text == "3"
+
+
+async def test_on_event_observer_that_raises_does_not_break_session(
+    mock_openai: MagicMock,
+) -> None:
+    """A raising observer must not break the turn — _fire_hook_event
+    swallows everything except KeyboardInterrupt/SystemExit."""
+    from airframe.hooks import HookEvent
+
+    calls = {"n": 0}
+
+    def boom(event: HookEvent) -> None:
+        calls["n"] += 1
+        raise RuntimeError("observer broke")
+
+    rt = _make_runtime()
+    sess = rt.session(on_event=boom)
+    try:
+        result = await sess.execute("hi")
+    finally:
+        await sess.close()
+    assert calls["n"] >= 1
+    assert result.text == "hello world"
+
+
+# ---------------------------------------------------------------------------
+# Budget caps (Phase 5 Iteration D)
+# ---------------------------------------------------------------------------
+
+
+def test_openai_compat_declares_budget_caps() -> None:
+    """OpenAI-compat declares both BUDGET_USD_CAP and BUDGET_TURN_CAP."""
+    rt = _make_runtime()
+    assert rt.supports(Feature.BUDGET_USD_CAP)
+    assert rt.supports(Feature.BUDGET_TURN_CAP)
+
+
+async def test_max_turns_cap_raises_when_count_reached(mock_openai: MagicMock) -> None:
+    """After running max_turns turns, the next execute() raises."""
+    from airframe.errors import RuntimeBudgetExceededError
+
+    rt = _make_runtime()
+    sess = rt.session()
+    try:
+        await sess.execute("turn 1", max_turns=2)
+        await sess.execute("turn 2", max_turns=2)
+        with pytest.raises(RuntimeBudgetExceededError) as exc_info:
+            await sess.execute("turn 3", max_turns=2)
+    finally:
+        await sess.close()
+    err = exc_info.value
+    assert err.kind == "turns"
+    assert err.cap == 2.0
+    assert err.current == 2.0
+
+
+async def test_max_budget_usd_cap_raises_when_cumulative_cost_reached(
+    mock_openai: MagicMock,
+) -> None:
+    """Cumulative cost accumulates per turn; cap trips at the next
+    pre-turn enforce."""
+    from airframe.errors import RuntimeBudgetExceededError
+
+    # Default _make_response: prompt_tokens=100, completion_tokens=50.
+    # On gpt-5-nano ($0.0001/$0.0002 per 1K) → $0.00002/turn.
+    # Cap at $0.000015 → first turn succeeds, second turn raises.
+    rt = _make_runtime()
+    sess = rt.session()
+    try:
+        await sess.execute("turn 1", max_budget_usd=0.000015)
+        with pytest.raises(RuntimeBudgetExceededError) as exc_info:
+            await sess.execute("turn 2", max_budget_usd=0.000015)
+    finally:
+        await sess.close()
+    err = exc_info.value
+    assert err.kind == "usd"
+    assert err.cap == 0.000015
+
+
+async def test_stream_honours_budget_caps(mock_openai: MagicMock) -> None:
+    """Stream path uses the same enforce — exhausted cap raises."""
+    from airframe.errors import RuntimeBudgetExceededError
+
+    chunks = [
+        _make_chunk(content="hi", finish_reason="stop"),
+        _make_usage_chunk(prompt_tokens=100, completion_tokens=50),
+    ]
+    mock_openai.chat.completions.create = AsyncMock(
+        side_effect=[_AsyncIter(list(chunks)), _AsyncIter(list(chunks))]
+    )
+    rt = _make_runtime()
+    sess = rt.session()
+    try:
+        async for _ in sess.stream("a", max_budget_usd=0.000015):
+            pass
+        with pytest.raises(RuntimeBudgetExceededError):
+            async for _ in sess.stream("b", max_budget_usd=0.000015):
+                pass
+    finally:
+        await sess.close()
+
+
+async def test_budget_caps_none_open_cleanly(mock_openai: MagicMock) -> None:
+    """No caps → turns run freely."""
+    rt = _make_runtime()
+    sess = rt.session()
+    try:
+        for i in range(5):
+            await sess.execute(f"turn {i}")
+    finally:
+        await sess.close()

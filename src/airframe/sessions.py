@@ -37,7 +37,9 @@ if TYPE_CHECKING:
     from pydantic import BaseModel
 
     from airframe.events import RuntimeEvent
+    from airframe.hooks import HookEvent
     from airframe.inputs import Prompt
+    from airframe.permission import PermissionCallback
     from airframe.protocol import AgentRuntime, ProviderModel, RuntimeResult
     from airframe.thinking import ThinkingMode
     from airframe.tools import FunctionTool, McpServerRef
@@ -290,6 +292,246 @@ def _check_mcp_servers_supported(
         )
 
 
+def _check_permission_supported(
+    callback: PermissionCallback | None,
+    *,
+    adapter_label: str,
+    supports: Callable[[Feature], bool],
+) -> None:
+    """Gate ``session(on_permission=...)`` against
+    :data:`~airframe.features.Feature.PERMISSION_CALLBACK`.
+
+    Phase 5 Iteration A scaffolds the ``on_permission=`` kwarg on
+    every :meth:`AgentRuntime.session` signature but defers the
+    per-adapter wiring to Iteration B (Claude / Copilot / Codex
+    accepting paths; OpenAI-compat permanent decline). Until each
+    adapter flips
+    :data:`~airframe.features.Feature.PERMISSION_CALLBACK` True, a
+    non-None callback raises here so consumer code gets a clear
+    capability decline rather than a silently-ignored kwarg.
+
+    Args:
+        callback: The :class:`~airframe.permission.PermissionCallback`
+            passed to ``session(on_permission=...)``.
+        adapter_label: Adapter name for the error message.
+        supports: Bound :meth:`~airframe.protocol.AgentRuntime.supports`
+            so this helper doesn't need a runtime reference.
+
+    Raises:
+        UnsupportedFeatureError: ``callback is not None`` and the
+            adapter hasn't flipped ``PERMISSION_CALLBACK``.
+    """
+    if callback is None:
+        return
+    if supports(Feature.PERMISSION_CALLBACK):
+        return
+    raise UnsupportedFeatureError(
+        f"{adapter_label}: on_permission= is not wired on this adapter "
+        f"yet. Check runtime.supports(Feature.PERMISSION_CALLBACK) before "
+        f"passing on_permission=<PermissionCallback>.",
+        feature=Feature.PERMISSION_CALLBACK,
+    )
+
+
+def _check_hooks_supported(
+    callback: Callable[[HookEvent], None] | None,
+    *,
+    adapter_label: str,
+    supports: Callable[[Feature], bool],
+) -> None:
+    """Gate ``session(on_event=...)`` against
+    :data:`~airframe.features.Feature.LIFECYCLE_HOOKS`.
+
+    Phase 5 Iteration A scaffolds the ``on_event=`` kwarg on every
+    :meth:`AgentRuntime.session` signature; per-adapter emission
+    wiring lands in Iteration C. Until each adapter flips
+    :data:`~airframe.features.Feature.LIFECYCLE_HOOKS` True, a
+    non-None callback raises here.
+
+    Args:
+        callback: The user's :class:`~airframe.hooks.HookEvent`
+            observer.
+        adapter_label: Adapter name for the error message.
+        supports: Bound :meth:`~airframe.protocol.AgentRuntime.supports`.
+
+    Raises:
+        UnsupportedFeatureError: ``callback is not None`` and the
+            adapter hasn't flipped ``LIFECYCLE_HOOKS``.
+    """
+    if callback is None:
+        return
+    if supports(Feature.LIFECYCLE_HOOKS):
+        return
+    raise UnsupportedFeatureError(
+        f"{adapter_label}: on_event= is not wired on this adapter yet. "
+        f"Check runtime.supports(Feature.LIFECYCLE_HOOKS) before passing "
+        f"on_event=<Callable[[HookEvent], None]>.",
+        feature=Feature.LIFECYCLE_HOOKS,
+    )
+
+
+def _fire_hook_event(
+    callback: Callable[[HookEvent], None] | None,
+    kind: str,
+    *,
+    session_id: str | None,
+    payload: dict[str, Any],
+) -> None:
+    """Fan one :class:`~airframe.hooks.HookEvent` out to the user's observer.
+
+    Shared by every adapter that emits lifecycle hooks. Provides two
+    guarantees the adapters would otherwise have to duplicate:
+
+    1. **No-op when no observer is registered** — adapters can call
+       this from every event-emission site without an extra ``if
+       self._on_event is not None:`` guard.
+    2. **Exception safety** — a raising observer must not break the
+       session. We catch ``BaseException`` (excluding
+       ``KeyboardInterrupt`` / ``SystemExit``) and debug-log; the
+       session's vendor-side work continues uninterrupted.
+
+    The ``kind`` parameter is typed as plain ``str`` rather than
+    :data:`~airframe.hooks.HookEventKind` so adapters can pass the
+    literal string directly without a cast; the
+    :class:`~airframe.hooks.HookEvent` constructor's :class:`Literal`
+    type-checks the value at the type-check layer.
+    """
+    if callback is None:
+        return
+    # Lazy import keeps airframe.sessions free of a runtime
+    # dependency on airframe.hooks at module load.
+    from airframe.hooks import HookEvent
+
+    event = HookEvent(
+        kind=kind,  # type: ignore[arg-type]
+        session_id=session_id,
+        payload=payload,
+    )
+    try:
+        callback(event)
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except Exception as exc:  # noqa: BLE001 — observer must not break session
+        import logging
+
+        logging.getLogger(__name__).debug(
+            "hook_observer_raised kind=%s session_id=%s error=%r",
+            kind,
+            session_id,
+            exc,
+        )
+
+
+def _check_budget_supported(
+    *,
+    max_turns: int | None,
+    max_budget_usd: float | None,
+    adapter_label: str,
+    supports: Callable[[Feature], bool],
+) -> None:
+    """Gate ``execute(max_turns=..., max_budget_usd=...)`` against the
+    two budget capability flags.
+
+    Phase 5 Iteration A scaffolds both kwargs on every
+    :meth:`AgentSession.execute` / :meth:`AgentSession.stream`
+    signature; per-adapter enforcement lands in Iteration D. The
+    gate raises with the *specific* feature of the first non-None
+    kwarg whose flag is False — so passing both kwargs to an
+    adapter that supports neither raises with
+    ``feature=BUDGET_TURN_CAP`` (since ``max_turns`` is checked
+    first).
+
+    A ``None`` value is always permitted — it's the no-op default.
+
+    Args:
+        max_turns: The turn cap, or ``None``.
+        max_budget_usd: The USD cap, or ``None``.
+        adapter_label: Adapter name for the error message.
+        supports: Bound :meth:`~airframe.protocol.AgentRuntime.supports`.
+
+    Raises:
+        UnsupportedFeatureError: A non-None kwarg whose matching
+            :class:`Feature` flag is False on this adapter.
+    """
+    if max_turns is not None and not supports(Feature.BUDGET_TURN_CAP):
+        raise UnsupportedFeatureError(
+            f"{adapter_label}: max_turns= is not wired on this adapter "
+            f"yet. Check runtime.supports(Feature.BUDGET_TURN_CAP) before "
+            f"passing max_turns=.",
+            feature=Feature.BUDGET_TURN_CAP,
+        )
+    if max_budget_usd is not None and not supports(Feature.BUDGET_USD_CAP):
+        raise UnsupportedFeatureError(
+            f"{adapter_label}: max_budget_usd= is not wired on this "
+            f"adapter yet. Check runtime.supports(Feature.BUDGET_USD_CAP) "
+            f"before passing max_budget_usd=.",
+            feature=Feature.BUDGET_USD_CAP,
+        )
+
+
+def _enforce_budget_pre_turn(
+    *,
+    max_turns: int | None,
+    max_budget_usd: float | None,
+    cumulative_cost_usd: float,
+    turn_count: int,
+    adapter_label: str,
+) -> None:
+    """Raise :class:`RuntimeBudgetExceededError` if a cap would trip.
+
+    Called by every wiring adapter at the start of
+    :meth:`AgentSession.execute` / :meth:`AgentSession.stream` —
+    *before* the vendor call fires. v0 enforcement is at the turn
+    boundary; mid-turn interrupts are additive later via the
+    existing :meth:`AgentSession.cancel` plumbing.
+
+    ``max_turns`` checks against ``turn_count``: would the about-to-start
+    turn push the running count above the cap?  ``turn_count`` is
+    the count *before* the current turn — so the condition is
+    ``turn_count >= max_turns``.
+
+    ``max_budget_usd`` checks against ``cumulative_cost_usd`` — the
+    running total of every prior turn's
+    :attr:`RuntimeResult.cost.cost_usd`. The condition is
+    ``cumulative_cost_usd >= max_budget_usd`` — we abort *before*
+    spending more if we're already at the cap.
+
+    Args:
+        max_turns: Caller-supplied turn cap, or ``None`` for no cap.
+        max_budget_usd: Caller-supplied USD cap, or ``None`` for no
+            cap.
+        cumulative_cost_usd: The session's running USD total.
+        turn_count: The session's running turn count.
+        adapter_label: Adapter name for the error message.
+
+    Raises:
+        RuntimeBudgetExceededError: A cap would trip. ``kind="turns"``
+            when ``max_turns`` is the offender (checked first),
+            ``kind="usd"`` when ``max_budget_usd`` is.
+    """
+    from airframe.errors import RuntimeBudgetExceededError
+
+    if max_turns is not None and turn_count >= max_turns:
+        raise RuntimeBudgetExceededError(
+            f"{adapter_label}: max_turns={max_turns} exceeded "
+            f"(current={turn_count}). The session has already used the "
+            f"turn budget; open a new session or raise the cap.",
+            cap=float(max_turns),
+            current=float(turn_count),
+            kind="turns",
+        )
+    if max_budget_usd is not None and cumulative_cost_usd >= max_budget_usd:
+        raise RuntimeBudgetExceededError(
+            f"{adapter_label}: max_budget_usd=${max_budget_usd:.4f} "
+            f"exceeded (current=${cumulative_cost_usd:.4f}). The "
+            f"session has already spent the budget; open a new session "
+            f"or raise the cap.",
+            cap=float(max_budget_usd),
+            current=float(cumulative_cost_usd),
+            kind="usd",
+        )
+
+
 class _ThinAgentSession:
     """Iteration B :class:`AgentSession` — thin wrapper over ``runtime.execute()``.
 
@@ -426,10 +668,15 @@ def _open_thin_session(
 
 __all__ = [
     "_ThinAgentSession",
+    "_check_budget_supported",
+    "_check_hooks_supported",
     "_check_mcp_servers_supported",
+    "_check_permission_supported",
     "_check_tools_supported",
     "_coerce_prompt_or_raise",
     "_compose_mcp_headers",
+    "_enforce_budget_pre_turn",
+    "_fire_hook_event",
     "_mcp_servers_fingerprint",
     "_open_thin_session",
     "_split_prompt_parts",

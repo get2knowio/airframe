@@ -84,12 +84,23 @@ from airframe.protocol import (
     RuntimeResult,
     UnsupportedBindingError,
 )
-from airframe.sessions import _MCP_TRANSPORT_TO_FEATURE, _split_prompt_parts
+from airframe.sessions import (
+    _MCP_TRANSPORT_TO_FEATURE,
+    _check_budget_supported,
+    _check_hooks_supported,
+    _check_permission_supported,
+    _enforce_budget_pre_turn,
+    _fire_hook_event,
+    _split_prompt_parts,
+)
 from airframe.thinking import ThinkingMode
 from airframe.tools import FunctionTool, McpServerRef
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Callable
+
+    from airframe.hooks import HookEvent
+    from airframe.permission import PermissionCallback
 
 logger = logging.getLogger(__name__)
 
@@ -185,6 +196,77 @@ def _translate_thinking_for_codex(thinking: ThinkingMode) -> str | None:
         f"codex: unsupported thinking= value {thinking!r}",
         feature=Feature.REASONING_EFFORT,
     )
+
+
+#: Sentinel :attr:`PermissionRequest.tool_name` used when Codex
+#: resolves its session-wide :class:`ApprovalMode` from the user's
+#: :class:`~airframe.permission.PermissionCallback`. The wildcard
+#: signals "all tools, session-wide" — the granularity Codex
+#: actually supports.
+CODEX_SESSION_PERMISSION_TOOL = "*"
+
+
+_PERMISSION_DECISION_TO_APPROVAL_MODE: dict[str, str] = {
+    "allow": "never",
+    "deny": "untrusted",
+    "defer": "on-request",
+}
+
+
+async def _resolve_codex_approval_policy(
+    callback: PermissionCallback,
+) -> str:
+    """Derive Codex's :data:`ApprovalMode` from one
+    :class:`~airframe.permission.PermissionCallback` invocation.
+
+    Codex's permission surface is **session-wide**: the
+    :attr:`ThreadOptions.approval_policy` enum is baked at
+    :meth:`Codex.start_thread` time and never re-evaluated per tool
+    call. To bridge airframe's per-call
+    :class:`~airframe.permission.PermissionCallback` contract onto
+    that shape, we call the user's callback **once** at first
+    :meth:`execute` with a sentinel
+    :class:`~airframe.permission.PermissionRequest`
+    (``tool_name="*"``, empty ``tool_args``, an explanatory
+    ``reason``) and translate the returned
+    :data:`~airframe.permission.PermissionDecision`:
+
+    * ``"allow"`` → ``"never"`` — the CLI never prompts for
+      approval; everything is auto-approved.
+    * ``"deny"`` → ``"untrusted"`` — strictest policy; the CLI
+      denies most operations.
+    * ``"defer"`` → ``"on-request"`` — Codex's default; the CLI
+      prompts the user per call.
+
+    The result is cached on the session for the rest of its
+    lifetime. Consumers needing per-call interception should use
+    Claude or Copilot, whose SDKs expose a per-call permission
+    channel.
+    """
+    from airframe.permission import PermissionRequest
+
+    sentinel = PermissionRequest(
+        tool_name=CODEX_SESSION_PERMISSION_TOOL,
+        tool_args={},
+        reason=(
+            "codex session policy resolution: airframe is invoking "
+            "your PermissionCallback once at session start to derive a "
+            "session-wide Codex ApprovalMode. The Codex Python SDK "
+            "exposes only session-wide approval, not per-call. The "
+            "decision maps to ApprovalMode as: 'allow'→'never', "
+            "'deny'→'untrusted', 'defer'→'on-request' (Codex's "
+            "default per-call prompting)."
+        ),
+    )
+    decision = await callback.handle(sentinel)
+    mapped = _PERMISSION_DECISION_TO_APPROVAL_MODE.get(decision)
+    if mapped is None:  # pragma: no cover — Literal narrows this
+        raise UnsupportedFeatureError(
+            f"codex: PermissionCallback returned unrecognised decision "
+            f"{decision!r}; expected one of 'allow', 'deny', 'defer'.",
+            feature=Feature.PERMISSION_CALLBACK,
+        )
+    return mapped
 
 
 def _build_codex_input(
@@ -311,6 +393,31 @@ class CodexRuntime(AgentRuntime):
     #: ``REASONING_BUDGET_TOKENS`` stays False — Codex uses the
     #: literal enum, not a token budget. Pass a literal effort string
     #: instead.
+    #:
+    #: * ``PERMISSION_CALLBACK`` — wired by deriving Codex's
+    #:   session-wide :attr:`ThreadOptions.approval_policy` from a
+    #:   **single** up-front call to the user's
+    #:   :class:`~airframe.permission.PermissionCallback`. The
+    #:   callback fires once with a sentinel
+    #:   :class:`~airframe.permission.PermissionRequest`
+    #:   (``tool_name="*"``) at first ``execute()``; the returned
+    #:   :data:`~airframe.permission.PermissionDecision` maps to
+    #:   :data:`ApprovalMode`: ``"allow"`` → ``"never"`` (auto-approve
+    #:   everything), ``"deny"`` → ``"untrusted"`` (strictest mode),
+    #:   ``"defer"`` → ``"on-request"`` (Codex's default per-call
+    #:   prompting). **Per-call interception isn't possible** through
+    #:   the Codex Python SDK — the policy is session-wide. Consumers
+    #:   needing per-call decisions should use Claude or Copilot
+    #:   (Phase 5, Iteration B).
+    #: * ``LIFECYCLE_HOOKS`` — wired by synthesising
+    #:   :class:`~airframe.hooks.HookEvent` from the
+    #:   :class:`ItemStartedEvent` / :class:`ItemCompletedEvent`
+    #:   stream :meth:`Thread.run_streamed` exposes. Emittable kinds:
+    #:   ``session_start``, ``session_end``, ``user_prompt_submit``,
+    #:   ``pre_tool_use``, ``post_tool_use``, ``tool_failure``.
+    #:   ``pre_compact`` / ``rate_limit`` are **not emittable** —
+    #:   the Codex SDK has no equivalent events today (Phase 5,
+    #:   Iteration C).
     SUPPORTED_FEATURES: ClassVar[frozenset[Feature]] = frozenset(
         {
             Feature.STRUCTURED_OUTPUT_JSON_SCHEMA,
@@ -320,6 +427,28 @@ class CodexRuntime(AgentRuntime):
             Feature.REASONING_EFFORT,
             Feature.VISION_INPUT,
             Feature.FILE_INPUT,
+            Feature.PERMISSION_CALLBACK,
+            Feature.LIFECYCLE_HOOKS,
+            # Phase 5 Iteration D: client-side accumulation on every
+            # turn. Both caps enforced at turn boundary in v0
+            # (mid-turn interrupt is additive later).
+            Feature.BUDGET_USD_CAP,
+            Feature.BUDGET_TURN_CAP,
+        }
+    )
+
+    #: The :class:`~airframe.hooks.HookEventKind` literals this
+    #: adapter can emit through ``on_event=``. The Codex Python
+    #: SDK has no compaction / rate-limit events; those kinds
+    #: stay unemitted.
+    EMITTABLE_HOOK_KINDS: ClassVar[frozenset[str]] = frozenset(
+        {
+            "session_start",
+            "session_end",
+            "user_prompt_submit",
+            "pre_tool_use",
+            "post_tool_use",
+            "tool_failure",
         }
     )
 
@@ -426,6 +555,8 @@ class CodexRuntime(AgentRuntime):
         model: ProviderModel | None = None,
         tools: list[FunctionTool] | None = None,
         mcp_servers: list[McpServerRef] | None = None,
+        on_permission: PermissionCallback | None = None,
+        on_event: Callable[[HookEvent], None] | None = None,
         provider_options: Any | None = None,
     ) -> AgentSession:
         """Open a bespoke :class:`CodexAgentSession`.
@@ -475,6 +606,18 @@ class CodexRuntime(AgentRuntime):
                 :data:`~airframe.features.Feature.TOOLS_MCP_HTTP` /
                 :data:`~airframe.features.Feature.TOOLS_MCP_SSE`
                 still works.
+            on_permission: Phase 5 scaffolding accepted by the
+                signature; non-None raises
+                :class:`~airframe.errors.UnsupportedFeatureError`
+                until Phase 5 Iteration B wires Codex's session-wide
+                :attr:`Thread.approval_policy` (the user's callback
+                fires once to derive the enum value, since Codex has
+                no per-call permission channel).
+            on_event: Phase 5 scaffolding accepted by the signature;
+                non-None raises until Phase 5 Iteration C synthesises
+                :class:`~airframe.hooks.HookEvent` from
+                :class:`ItemStartedEvent` / :class:`ItemCompletedEvent`
+                on the thread stream.
             provider_options: Reserved for Phase 2+ (currently unused).
         """
         if tools:
@@ -505,6 +648,16 @@ class CodexRuntime(AgentRuntime):
                 f"before passing mcp_servers=.",
                 feature=feature,
             )
+        _check_permission_supported(
+            on_permission,
+            adapter_label=self.label,
+            supports=self.supports,
+        )
+        _check_hooks_supported(
+            on_event,
+            adapter_label=self.label,
+            supports=self.supports,
+        )
         # provider_options accepted but unused — Phase 2+ fills each
         # ProviderOptions dataclass as the corresponding feature lands.
         del provider_options
@@ -514,6 +667,8 @@ class CodexRuntime(AgentRuntime):
             resume=resume,
             system=system,
             model_id=model_id,
+            on_permission=on_permission,
+            on_event=on_event,
         )
 
     async def list_models(self) -> list[ModelInfo]:
@@ -738,6 +893,8 @@ class CodexAgentSession:
         resume: str | None,
         system: str | None,
         model_id: str,
+        on_permission: PermissionCallback | None = None,
+        on_event: Callable[[HookEvent], None] | None = None,
     ) -> None:
         self._runtime = runtime
         self._resume = resume
@@ -758,6 +915,30 @@ class CodexAgentSession:
         # Seeded from resume= so consumer code that branches on
         # session.id before the first turn sees the right value.
         self.id: str | None = resume
+        # Phase 5 Iteration B: permission callback. Codex's
+        # approval_policy is *session-wide*; we resolve it lazily on
+        # first execute() by calling the user's callback once with a
+        # sentinel request, then cache for the session's lifetime.
+        # ``_approval_policy_resolved`` distinguishes "haven't asked
+        # yet" from "asked and got None" (which doesn't happen today
+        # but keeps the slot honest).
+        self._on_permission: PermissionCallback | None = on_permission
+        self._approval_policy: str | None = None
+        self._approval_policy_resolved = False
+        # Phase 5 Iteration C: lifecycle-hook observer. Codex has no
+        # native subscription channel; the adapter synthesises
+        # events from execute()/stream() boundaries and the
+        # ItemStartedEvent/ItemCompletedEvent stream. session_start
+        # fires once on first execute(); session_end fires on
+        # close() (gated on having fired session_start first).
+        self._on_event: Callable[[HookEvent], None] | None = on_event
+        self._session_start_fired = False
+        self._session_end_fired = False
+        # Phase 5 Iteration D: per-session budget trackers. Both
+        # caps enforced at turn boundary in v0; mid-turn interrupt
+        # is additive later via the existing cancel() plumbing.
+        self._cumulative_cost_usd: float = 0.0
+        self._turn_count: int = 0
 
     async def execute(
         self,
@@ -765,19 +946,42 @@ class CodexAgentSession:
         *,
         schema: type[BaseModel] | None = None,
         thinking: ThinkingMode = None,
+        max_turns: int | None = None,
+        max_budget_usd: float | None = None,
         timeout: float = 600.0,
     ) -> RuntimeResult:
         if self._closed:
             raise RuntimeError("session is closed")
+        _check_budget_supported(
+            max_turns=max_turns,
+            max_budget_usd=max_budget_usd,
+            adapter_label=self._runtime.label,
+            supports=self._runtime.supports,
+        )
+        _enforce_budget_pre_turn(
+            max_turns=max_turns,
+            max_budget_usd=max_budget_usd,
+            cumulative_cost_usd=self._cumulative_cost_usd,
+            turn_count=self._turn_count,
+            adapter_label=self._runtime.label,
+        )
         text, images, files = _split_prompt_parts(
             prompt,
             adapter_label=self._runtime.label,
             supports_vision=True,
             supports_file=True,
         )
+        await self._resolve_approval_policy()
         thread = self._ensure_thread(thinking=thinking)
         full_text = text if not self._system else f"{self._system}\n\n{text}"
         run_input = _build_codex_input(full_text, images, files)
+        self._fire_session_start_if_needed()
+        _fire_hook_event(
+            self._on_event,
+            "user_prompt_submit",
+            session_id=self.id,
+            payload={"prompt": text, "length": len(text)},
+        )
 
         from openai_codex_sdk import AbortController
         from openai_codex_sdk.abort import AbortError
@@ -810,7 +1014,15 @@ class CodexAgentSession:
             self._abort_controller = None
 
         self._update_id_from_thread()
-        return self._build_result(turn, schema=schema)
+        # Phase 5 Iteration C: synthesise per-tool hooks from
+        # turn.items after the turn completes. execute() doesn't see
+        # the per-event stream, so we replay item state at end-of-turn.
+        if self._on_event is not None:
+            self._fire_item_hooks_post_execute(turn)
+        result = self._build_result(turn, schema=schema)
+        self._turn_count += 1
+        self._cumulative_cost_usd += result.cost.cost_usd or 0.0
+        return result
 
     async def stream(
         self,
@@ -818,27 +1030,53 @@ class CodexAgentSession:
         *,
         schema: type[BaseModel] | None = None,
         thinking: ThinkingMode = None,
+        max_turns: int | None = None,
+        max_budget_usd: float | None = None,
         timeout: float = 600.0,
     ) -> AsyncIterator[RuntimeEvent]:
         if self._closed:
             raise RuntimeError("session is closed")
+        _check_budget_supported(
+            max_turns=max_turns,
+            max_budget_usd=max_budget_usd,
+            adapter_label=self._runtime.label,
+            supports=self._runtime.supports,
+        )
+        _enforce_budget_pre_turn(
+            max_turns=max_turns,
+            max_budget_usd=max_budget_usd,
+            cumulative_cost_usd=self._cumulative_cost_usd,
+            turn_count=self._turn_count,
+            adapter_label=self._runtime.label,
+        )
         text, images, files = _split_prompt_parts(
             prompt,
             adapter_label=self._runtime.label,
             supports_vision=True,
             supports_file=True,
         )
+        await self._resolve_approval_policy()
         thread = self._ensure_thread(thinking=thinking)
         full_text = text if not self._system else f"{self._system}\n\n{text}"
         run_input = _build_codex_input(full_text, images, files)
+        self._fire_session_start_if_needed()
+        _fire_hook_event(
+            self._on_event,
+            "user_prompt_submit",
+            session_id=self.id,
+            payload={"prompt": text, "length": len(text)},
+        )
 
         from openai_codex_sdk import AbortController
         from openai_codex_sdk.abort import AbortError
         from openai_codex_sdk.errors import ThreadRunError
         from openai_codex_sdk.types import (
             AgentMessageItem,
+            CommandExecutionItem,
             ItemCompletedEvent,
+            ItemStartedEvent,
             ItemUpdatedEvent,
+            McpToolCallItem,
             ReasoningItem,
             TurnCompletedEvent,
             TurnFailedEvent,
@@ -868,9 +1106,14 @@ class CodexAgentSession:
         usage: Any = None
         failure: str | None = None
         self._in_flight = True
+        # Tool items we've already emitted pre_tool_use for. The SDK
+        # may send multiple ItemUpdatedEvents per item (status
+        # in_progress→in_progress); we only want one pre_tool_use per
+        # item id.
+        tool_pre_fired: set[str] = set()
         try:
             async for event in streamed.events:
-                if isinstance(event, ItemUpdatedEvent | ItemCompletedEvent):
+                if isinstance(event, ItemStartedEvent | ItemUpdatedEvent | ItemCompletedEvent):
                     item = event.item
                     if isinstance(item, AgentMessageItem):
                         tail = item.text[last_lengths.get(item.id, 0) :]
@@ -884,6 +1127,21 @@ class CodexAgentSession:
                         if tail:
                             last_lengths[item.id] = len(item.text)
                             yield ReasoningDelta(text=tail)
+                    elif isinstance(item, CommandExecutionItem | McpToolCallItem):
+                        # Phase 5 Iteration C — synthesise tool hooks
+                        # from the item event stream. pre_tool_use on
+                        # first sighting; post_tool_use / tool_failure
+                        # when status flips to completed/failed.
+                        if self._on_event is not None and item.id not in tool_pre_fired:
+                            tool_pre_fired.add(item.id)
+                            self._fire_codex_tool_hook(item, kind="pre_tool_use")
+                        if isinstance(event, ItemCompletedEvent) and self._on_event is not None:
+                            kind = (
+                                "post_tool_use"
+                                if getattr(item, "status", "") != "failed"
+                                else "tool_failure"
+                            )
+                            self._fire_codex_tool_hook(item, kind=kind)
                 elif isinstance(event, TurnCompletedEvent):
                     usage = event.usage
                 elif isinstance(event, TurnFailedEvent):
@@ -932,6 +1190,8 @@ class CodexAgentSession:
             finish="stop",
             raw=None,
         )
+        self._turn_count += 1
+        self._cumulative_cost_usd += result.cost.cost_usd or 0.0
         yield TurnComplete(result=result)
 
     async def cancel(self) -> None:
@@ -947,7 +1207,25 @@ class CodexAgentSession:
             logger.debug("%s.session_abort_failed error=%s", self._runtime.label, exc)
 
     async def close(self) -> None:
+        # Phase 5 Iteration C: synthesise session_end at close if
+        # session_start ever fired and we haven't already emitted
+        # session_end on this close. Repeat close() calls are
+        # idempotent — gated on both flags.
+        already_closed = self._closed
         self._closed = True
+        if (
+            not already_closed
+            and self._on_event is not None
+            and self._session_start_fired
+            and not self._session_end_fired
+        ):
+            self._session_end_fired = True
+            _fire_hook_event(
+                self._on_event,
+                "session_end",
+                session_id=self.id,
+                payload={"model": self._model_id},
+            )
         # Best-effort cancel of any in-flight turn so the underlying
         # subprocess winds down rather than leaks.
         await self.cancel()
@@ -977,6 +1255,32 @@ class CodexAgentSession:
 
     # --- Internals ---------------------------------------------------------
 
+    async def _resolve_approval_policy(self) -> str | None:
+        """Resolve Codex's session-wide :data:`ApprovalMode` from the
+        user's permission callback.
+
+        Codex bakes :attr:`ThreadOptions.approval_policy` at
+        ``start_thread()`` time and never re-evaluates it. We ask the
+        user's callback exactly once per session (on first
+        :meth:`execute` / :meth:`stream`) with a sentinel
+        :class:`~airframe.permission.PermissionRequest` whose
+        ``reason`` explains the situation, then cache the resulting
+        ``ApprovalMode`` for the rest of the session.
+
+        Returns ``None`` when ``on_permission`` wasn't supplied — the
+        Thread is built without ``approval_policy`` and Codex uses
+        its own default.
+        """
+        if self._approval_policy_resolved:
+            return self._approval_policy
+        if self._on_permission is None:
+            self._approval_policy = None
+            self._approval_policy_resolved = True
+            return None
+        self._approval_policy = await _resolve_codex_approval_policy(self._on_permission)
+        self._approval_policy_resolved = True
+        return self._approval_policy
+
     def _ensure_thread(self, *, thinking: ThinkingMode = None) -> Any:
         effort = _translate_thinking_for_codex(thinking)
         if self._thread is not None and self._thread_effort == effort:
@@ -995,6 +1299,10 @@ class CodexAgentSession:
         }
         if effort is not None:
             thread_options["modelReasoningEffort"] = effort
+        # Phase 5 Iteration B: session-wide approval policy derived
+        # lazily in _resolve_approval_policy() and cached on self.
+        if self._approval_policy is not None:
+            thread_options["approval_policy"] = self._approval_policy
         try:
             if self._resume is not None:
                 thread = client.resume_thread(self._resume, thread_options)
@@ -1005,6 +1313,101 @@ class CodexAgentSession:
         self._thread = thread
         self._thread_effort = effort
         return thread
+
+    def _fire_session_start_if_needed(self) -> None:
+        """Emit ``session_start`` once per session at first execute().
+
+        Codex's SDK has no native ``session_start`` event; the
+        adapter synthesises it from the first ``execute()`` /
+        ``stream()`` call. Subsequent turns don't re-fire (a single
+        session is one ``start`` / ``end`` pair).
+        """
+        if self._on_event is None or self._session_start_fired:
+            return
+        self._session_start_fired = True
+        _fire_hook_event(
+            self._on_event,
+            "session_start",
+            session_id=self.id,
+            payload={
+                "model": self._model_id,
+                "resumed": self._resume is not None,
+            },
+        )
+
+    def _fire_codex_tool_hook(self, item: Any, *, kind: str) -> None:
+        """Translate a :class:`CommandExecutionItem` /
+        :class:`McpToolCallItem` into a tool-use
+        :class:`~airframe.hooks.HookEvent`.
+
+        Field set is unified across the two item shapes:
+
+        * ``tool_name`` — ``item.command[:64]`` for command items
+          (the first 64 chars of the shell command — long enough to
+          identify, short enough to fit in a log line);
+          ``f"{server}/{tool}"`` for MCP items so consumers can
+          distinguish servers in mixed sessions.
+        * ``tool_call_id`` — :attr:`item.id`.
+        * ``output`` / ``error`` — captured from
+          :attr:`aggregated_output` / :attr:`exit_code` (command) or
+          :attr:`result` / :attr:`error` (MCP) on the completion path.
+        """
+        payload: dict[str, Any] = {"tool_call_id": getattr(item, "id", "")}
+        tool_type = getattr(item, "type", None)
+        if tool_type == "command_execution":
+            command = getattr(item, "command", "") or ""
+            payload["tool_name"] = command[:64]
+            if kind != "pre_tool_use":
+                payload["exit_code"] = getattr(item, "exit_code", None)
+                payload["output"] = getattr(item, "aggregated_output", "") or ""
+        elif tool_type == "mcp_tool_call":
+            server = getattr(item, "server", "") or ""
+            tool = getattr(item, "tool", "") or ""
+            payload["tool_name"] = f"{server}/{tool}" if server else tool
+            if kind == "pre_tool_use":
+                payload["arguments"] = getattr(item, "arguments", None)
+            else:
+                if kind == "tool_failure":
+                    err = getattr(item, "error", None)
+                    if err is not None:
+                        payload["error"] = getattr(err, "message", str(err))
+                else:
+                    result = getattr(item, "result", None)
+                    if result is not None:
+                        payload["output"] = result
+        else:  # pragma: no cover — defensive; only the two item types reach here
+            payload["tool_name"] = str(tool_type)
+        _fire_hook_event(
+            self._on_event,
+            kind,
+            session_id=self.id,
+            payload=payload,
+        )
+
+    def _fire_item_hooks_post_execute(self, turn: Any) -> None:
+        """Emit pre/post tool hooks from ``turn.items`` after a
+        non-streaming :meth:`execute` completes.
+
+        execute() doesn't iterate the event stream — the
+        ``thread.run()`` call returns a single :class:`Turn` after
+        the entire turn finishes. To honour the
+        :class:`LIFECYCLE_HOOKS` contract on the execute path, we
+        replay the per-item state at end-of-turn: each command /
+        MCP tool item fires pre_tool_use + post_tool_use (or
+        tool_failure) back-to-back. Consumers observing pure
+        hooks rather than streams see the same kind set on either
+        path, in the same per-tool order.
+        """
+        from openai_codex_sdk.types import CommandExecutionItem, McpToolCallItem
+
+        items = getattr(turn, "items", []) or []
+        for item in items:
+            if not isinstance(item, CommandExecutionItem | McpToolCallItem):
+                continue
+            self._fire_codex_tool_hook(item, kind="pre_tool_use")
+            status = getattr(item, "status", "")
+            kind = "tool_failure" if status == "failed" else "post_tool_use"
+            self._fire_codex_tool_hook(item, kind=kind)
 
     def _update_id_from_thread(self) -> None:
         if self._thread is None:

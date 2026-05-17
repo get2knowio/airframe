@@ -86,9 +86,14 @@ from airframe.protocol import (
     UnsupportedBindingError,
 )
 from airframe.sessions import (
+    _check_budget_supported,
+    _check_hooks_supported,
     _check_mcp_servers_supported,
+    _check_permission_supported,
     _check_tools_supported,
     _compose_mcp_headers,
+    _enforce_budget_pre_turn,
+    _fire_hook_event,
     _mcp_servers_fingerprint,
     _split_prompt_parts,
 )
@@ -96,7 +101,10 @@ from airframe.thinking import ThinkingMode
 from airframe.tools import FunctionTool, McpServerRef
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Callable
+
+    from airframe.hooks import HookEvent
+    from airframe.permission import PermissionCallback
 
 logger = logging.getLogger(__name__)
 
@@ -199,6 +207,29 @@ class CopilotRuntime(AgentRuntime):
     #:   stays False per the implementation plan: SSE refs surface a
     #:   transport-specific decline pointing consumers at ``http``
     #:   instead (Phase 4, Iteration C).
+    #: * ``PERMISSION_CALLBACK`` — wired by translating
+    #:   :class:`~airframe.permission.PermissionCallback` into the
+    #:   SDK's ``on_permission_request=`` callable (replacing the
+    #:   ``PermissionHandler.approve_all`` default the adapter uses
+    #:   when no callback is supplied). airframe's
+    #:   :data:`~airframe.permission.PermissionDecision` maps to
+    #:   Copilot's :class:`PermissionRequestResultKind`:
+    #:   ``"allow"`` → ``"approve-once"``, ``"deny"`` → ``"reject"``,
+    #:   ``"defer"`` → ``"user-not-available"`` (lets Copilot's
+    #:   own default policy take over). Callback identity joins the
+    #:   session cache key (Phase 5, Iteration B).
+    #: * ``LIFECYCLE_HOOKS`` — wired by registering a
+    #:   :meth:`CopilotSession.on` subscriber at session creation
+    #:   that translates the SDK's typed ``*Data`` events into
+    #:   :class:`~airframe.hooks.HookEvent`. Emittable kinds:
+    #:   ``session_start``, ``session_end``, ``user_prompt_submit``,
+    #:   ``pre_tool_use``, ``post_tool_use``, ``tool_failure``,
+    #:   ``pre_compact`` (via :class:`SessionCompactionStartData`).
+    #:   ``rate_limit`` is **not emittable** — Copilot's SDK has no
+    #:   explicit rate-limit event today. ``session_end`` is
+    #:   synthesised at :meth:`close` if no
+    #:   :class:`SessionShutdownData` was observed during the
+    #:   session's lifetime (Phase 5, Iteration C).
     SUPPORTED_FEATURES: ClassVar[frozenset[Feature]] = frozenset(
         {
             Feature.STRUCTURED_OUTPUT_JSON_SCHEMA,
@@ -211,6 +242,31 @@ class CopilotRuntime(AgentRuntime):
             Feature.TOOLS_FUNCTION,
             Feature.TOOLS_MCP_STDIO,
             Feature.TOOLS_MCP_HTTP,
+            Feature.PERMISSION_CALLBACK,
+            Feature.LIFECYCLE_HOOKS,
+            # Phase 5 Iteration D: client-side accumulation against
+            # ``RuntimeResult.cost.cost_usd``. ``BUDGET_TURN_CAP`` is
+            # *not* in the set — Copilot caps internal turns at the
+            # vendor level (the CLI's ``--max-turns`` config), so a
+            # user-facing ``max_turns=`` on per-execute would be a
+            # no-op surface that misleads consumers. Declining is the
+            # honest signal.
+            Feature.BUDGET_USD_CAP,
+        }
+    )
+
+    #: The :class:`~airframe.hooks.HookEventKind` literals this
+    #: adapter can emit through ``on_event=``. ``rate_limit`` is
+    #: excluded — Copilot's SDK has no explicit rate-limit event.
+    EMITTABLE_HOOK_KINDS: ClassVar[frozenset[str]] = frozenset(
+        {
+            "session_start",
+            "session_end",
+            "user_prompt_submit",
+            "pre_tool_use",
+            "post_tool_use",
+            "tool_failure",
+            "pre_compact",
         }
     )
 
@@ -327,6 +383,8 @@ class CopilotRuntime(AgentRuntime):
         model: ProviderModel | None = None,
         tools: list[FunctionTool] | None = None,
         mcp_servers: list[McpServerRef] | None = None,
+        on_permission: PermissionCallback | None = None,
+        on_event: Callable[[HookEvent], None] | None = None,
         provider_options: Any | None = None,
     ) -> AgentSession:
         """Open a bespoke :class:`CopilotAgentSession`.
@@ -372,6 +430,17 @@ class CopilotRuntime(AgentRuntime):
                 Phase 4 Iteration C. ``tools=`` and ``mcp_servers=``
                 coexist; they pass through separate ``create_session``
                 kwargs so no collision is possible at the slot level.
+            on_permission: Phase 5 scaffolding accepted by the
+                signature; non-None raises
+                :class:`~airframe.errors.UnsupportedFeatureError`
+                until Phase 5 Iteration B wires Copilot's
+                ``on_permission_request=`` channel on
+                :meth:`CopilotClient.create_session`.
+            on_event: Phase 5 scaffolding accepted by the signature;
+                non-None raises until Phase 5 Iteration C wires a
+                :meth:`CopilotSession.on` subscriber that translates
+                the SDK's typed ``*Data`` events into
+                :class:`~airframe.hooks.HookEvent`.
             provider_options: Reserved for Phase 2+ (currently unused).
         """
         _check_tools_supported(
@@ -401,6 +470,16 @@ class CopilotRuntime(AgentRuntime):
             adapter_label=self.label,
             supports=self.supports,
         )
+        _check_permission_supported(
+            on_permission,
+            adapter_label=self.label,
+            supports=self.supports,
+        )
+        _check_hooks_supported(
+            on_event,
+            adapter_label=self.label,
+            supports=self.supports,
+        )
         # provider_options accepted but unused — Phase 2+ fills each
         # ProviderOptions dataclass as the corresponding feature lands.
         del provider_options
@@ -412,6 +491,8 @@ class CopilotRuntime(AgentRuntime):
             model_id=model_id,
             tools=tools,
             mcp_servers=mcp_servers,
+            on_permission=on_permission,
+            on_event=on_event,
         )
 
     async def list_models(self) -> list[ModelInfo]:
@@ -613,6 +694,8 @@ class CopilotAgentSession:
         model_id: str,
         tools: list[FunctionTool] | None = None,
         mcp_servers: list[McpServerRef] | None = None,
+        on_permission: PermissionCallback | None = None,
+        on_event: Callable[[HookEvent], None] | None = None,
     ) -> None:
         self._runtime = runtime
         self._resume = resume
@@ -647,6 +730,25 @@ class CopilotAgentSession:
         # so a refs-change forces a session rebuild.
         self._mcp_servers: list[McpServerRef] = list(mcp_servers or [])
         self._mcp_servers_fingerprint = _mcp_servers_fingerprint(self._mcp_servers)
+        # Phase 5 Iteration B: permission callback baked at
+        # create_session() time via on_permission_request=. Callback
+        # identity joins the cache key so a swap forces a session
+        # rebuild.
+        self._on_permission: PermissionCallback | None = on_permission
+        self._permission_fingerprint = _permission_fingerprint(on_permission)
+        # Phase 5 Iteration C: lifecycle-hook observer. Registered
+        # at create_session() time via session.on(...); the
+        # subscription handle is tracked so close() can clean up.
+        # Tracked separately from _unsubscribe_capture so the
+        # hook-event subscription survives session rebuilds.
+        self._on_event: Callable[[HookEvent], None] | None = on_event
+        self._unsubscribe_event: Any | None = None
+        self._session_end_fired = False
+        # Phase 5 Iteration D: per-session running USD total. Copilot
+        # doesn't declare BUDGET_TURN_CAP (vendor enforces internally)
+        # so we don't track a turn counter on this adapter.
+        self._cumulative_cost_usd: float = 0.0
+        self._turn_count: int = 0
 
     async def execute(
         self,
@@ -654,10 +756,25 @@ class CopilotAgentSession:
         *,
         schema: type[BaseModel] | None = None,
         thinking: ThinkingMode = None,
+        max_turns: int | None = None,
+        max_budget_usd: float | None = None,
         timeout: float = 600.0,
     ) -> RuntimeResult:
         if self._closed:
             raise RuntimeError("session is closed")
+        _check_budget_supported(
+            max_turns=max_turns,
+            max_budget_usd=max_budget_usd,
+            adapter_label=self._runtime.label,
+            supports=self._runtime.supports,
+        )
+        _enforce_budget_pre_turn(
+            max_turns=max_turns,
+            max_budget_usd=max_budget_usd,
+            cumulative_cost_usd=self._cumulative_cost_usd,
+            turn_count=self._turn_count,
+            adapter_label=self._runtime.label,
+        )
         text, images, files = _split_prompt_parts(
             prompt,
             adapter_label=self._runtime.label,
@@ -684,7 +801,10 @@ class CopilotAgentSession:
         finally:
             self._in_flight = False
 
-        return self._build_result(schema=schema)
+        result = self._build_result(schema=schema)
+        self._turn_count += 1
+        self._cumulative_cost_usd += result.cost.cost_usd or 0.0
+        return result
 
     async def stream(
         self,
@@ -692,10 +812,25 @@ class CopilotAgentSession:
         *,
         schema: type[BaseModel] | None = None,
         thinking: ThinkingMode = None,
+        max_turns: int | None = None,
+        max_budget_usd: float | None = None,
         timeout: float = 600.0,
     ) -> AsyncIterator[RuntimeEvent]:
         if self._closed:
             raise RuntimeError("session is closed")
+        _check_budget_supported(
+            max_turns=max_turns,
+            max_budget_usd=max_budget_usd,
+            adapter_label=self._runtime.label,
+            supports=self._runtime.supports,
+        )
+        _enforce_budget_pre_turn(
+            max_turns=max_turns,
+            max_budget_usd=max_budget_usd,
+            cumulative_cost_usd=self._cumulative_cost_usd,
+            turn_count=self._turn_count,
+            adapter_label=self._runtime.label,
+        )
         text, images, files = _split_prompt_parts(
             prompt,
             adapter_label=self._runtime.label,
@@ -804,6 +939,8 @@ class CopilotAgentSession:
             self._in_flight = False
 
         result = self._build_result(schema=schema)
+        self._turn_count += 1
+        self._cumulative_cost_usd += result.cost.cost_usd or 0.0
         yield TurnComplete(result=result)
 
     async def cancel(self) -> None:
@@ -819,15 +956,35 @@ class CopilotAgentSession:
             logger.debug("%s.session_abort_failed error=%s", self._runtime.label, exc)
 
     async def close(self) -> None:
+        # Phase 5 Iteration C: synthesise session_end at close if the
+        # SDK never emitted SessionShutdownData. Fires before tearing
+        # down so consumer observers see the event before subscribers
+        # are unhooked. Repeat close() calls are idempotent — gated
+        # on _session_end_fired and the prior _closed state.
+        already_closed = self._closed
         self._closed = True
-        # Tear down the per-session capture subscription.
-        unsubscribe = self._unsubscribe_capture
-        self._unsubscribe_capture = None
-        if unsubscribe is not None:
-            try:
-                unsubscribe()
-            except Exception as exc:  # noqa: BLE001
-                logger.debug("%s.session_unsubscribe_failed error=%s", self._runtime.label, exc)
+        if not already_closed and self._on_event is not None and not self._session_end_fired:
+            self._session_end_fired = True
+            _fire_hook_event(
+                self._on_event,
+                "session_end",
+                session_id=self.id,
+                payload={"model": self._model_id},
+            )
+        # Tear down per-session subscriptions (capture + hook-event).
+        for slot, attr in (("capture", "_unsubscribe_capture"), ("event", "_unsubscribe_event")):
+            unsubscribe = getattr(self, attr)
+            setattr(self, attr, None)
+            if unsubscribe is not None:
+                try:
+                    unsubscribe()
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug(
+                        "%s.session_unsubscribe_failed slot=%s error=%s",
+                        self._runtime.label,
+                        slot,
+                        exc,
+                    )
         # Destroy the vendor session. The runtime owns the CopilotClient
         # and lives independently — don't tear it down here.
         session = self._session
@@ -881,23 +1038,38 @@ class CopilotAgentSession:
         reasoning_effort = _translate_thinking_for_copilot(thinking)
         tools_fragment = f"tools={self._tools_fingerprint}"
         mcp_fragment = f"mcp={self._mcp_servers_fingerprint}"
-        cache_key = f"{schema_fragment}|effort={reasoning_effort}|{tools_fragment}|{mcp_fragment}"
+        permission_fragment = f"perm={self._permission_fingerprint}"
+        cache_key = (
+            f"{schema_fragment}|effort={reasoning_effort}|{tools_fragment}|"
+            f"{mcp_fragment}|{permission_fragment}"
+        )
         if self._session is not None and self._session_key == cache_key:
             return self._session
 
-        # Schema OR thinking OR tools OR mcp_servers fingerprint
-        # changed (or first turn) — tear down any stale session before
-        # rebuilding so we don't leak it. ``reasoning_effort``,
-        # ``tools=``, and ``mcp_servers=`` are all baked at
-        # create_session time, so each joins schema in the cache key.
+        # Schema OR thinking OR tools OR mcp_servers OR permission
+        # callback fingerprint changed (or first turn) — tear down any
+        # stale session before rebuilding so we don't leak it.
+        # ``reasoning_effort``, ``tools=``, ``mcp_servers=``, and
+        # ``on_permission_request`` are all baked at create_session
+        # time, so each joins schema in the cache key.
         await self._tear_down_session()
 
         client = await self._runtime._ensure_client()
 
         from copilot.session import PermissionHandler
 
+        # Phase 5 Iteration B: route through the user's callback when
+        # supplied; otherwise fall back to the SDK's approve_all
+        # default (preserves pre-Phase-5 behaviour for sessions that
+        # don't pass on_permission=).
+        permission_handler: Any
+        if self._on_permission is not None:
+            permission_handler = _translate_permission_for_copilot(self._on_permission)
+        else:
+            permission_handler = PermissionHandler.approve_all
+
         create_kwargs: dict[str, Any] = {
-            "on_permission_request": PermissionHandler.approve_all,
+            "on_permission_request": permission_handler,
             "model": self._model_id,
         }
         if reasoning_effort is not None:
@@ -960,6 +1132,11 @@ class CopilotAgentSession:
 
         # Always-on capture subscription for usage / error / final message.
         self._unsubscribe_capture = session.on(self._on_capture_event)
+        # Phase 5 Iteration C: lifecycle-hook subscription. Tracked
+        # separately so it survives session rebuilds (the previous
+        # session's subscription is torn down in _tear_down_session).
+        if self._on_event is not None:
+            self._unsubscribe_event = session.on(self._on_copilot_hook_event)
         self._session = session
         self._session_key = cache_key
         # Surface the live session ID. resume= callers may see a
@@ -970,17 +1147,19 @@ class CopilotAgentSession:
         return session
 
     async def _tear_down_session(self) -> None:
-        unsubscribe = self._unsubscribe_capture
-        self._unsubscribe_capture = None
-        if unsubscribe is not None:
-            try:
-                unsubscribe()
-            except Exception as exc:  # noqa: BLE001
-                logger.debug(
-                    "%s.session_unsubscribe_failed error=%s",
-                    self._runtime.label,
-                    exc,
-                )
+        for slot, attr in (("capture", "_unsubscribe_capture"), ("event", "_unsubscribe_event")):
+            unsubscribe = getattr(self, attr)
+            setattr(self, attr, None)
+            if unsubscribe is not None:
+                try:
+                    unsubscribe()
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug(
+                        "%s.session_unsubscribe_failed slot=%s error=%s",
+                        self._runtime.label,
+                        slot,
+                        exc,
+                    )
         session = self._session
         self._session = None
         self._session_key = None
@@ -1010,6 +1189,113 @@ class CopilotAgentSession:
             self._captured_error = data
         elif isinstance(data, AssistantMessageData):
             self._last_assistant_message = event
+
+    def _on_copilot_hook_event(self, event: Any) -> None:
+        """Translate one Copilot session event into a
+        :class:`~airframe.hooks.HookEvent` and fan out to the user's
+        ``on_event=`` observer.
+
+        Runs synchronously off the SDK dispatch — keep it cheap. Only
+        the SDK event-data types airframe recognises produce
+        :class:`HookEvent` emissions; unrecognised types are silently
+        ignored (they're not in airframe's normalised 8-kind enum and
+        belong behind :meth:`AgentRuntime.unwrap` for consumers that
+        need vendor-specific observability).
+        """
+        from copilot.generated.session_events import (
+            SessionCompactionStartData,
+            SessionShutdownData,
+            SessionStartData,
+            ToolExecutionCompleteData,
+            ToolExecutionStartData,
+            UserMessageData,
+        )
+
+        data = getattr(event, "data", None)
+        if data is None:
+            return
+        sid = self.id
+        if isinstance(data, SessionStartData):
+            _fire_hook_event(
+                self._on_event,
+                "session_start",
+                session_id=sid,
+                payload={"model": self._model_id},
+            )
+        elif isinstance(data, SessionShutdownData):
+            self._session_end_fired = True
+            _fire_hook_event(
+                self._on_event,
+                "session_end",
+                session_id=sid,
+                payload={"model": self._model_id},
+            )
+        elif isinstance(data, UserMessageData):
+            content = getattr(data, "content", "") or ""
+            _fire_hook_event(
+                self._on_event,
+                "user_prompt_submit",
+                session_id=sid,
+                payload={
+                    "prompt": content,
+                    "length": len(content) if isinstance(content, str) else 0,
+                },
+            )
+        elif isinstance(data, ToolExecutionStartData):
+            tool_name = getattr(data, "tool_name", "") or ""
+            if tool_name == SUBMIT_RESULT_TOOL:
+                # Internal forced-tool plumbing — not a user-visible
+                # tool. Suppress consistently with the streaming
+                # event-translation logic.
+                return
+            _fire_hook_event(
+                self._on_event,
+                "pre_tool_use",
+                session_id=sid,
+                payload={
+                    "tool_name": tool_name,
+                    "tool_call_id": getattr(data, "tool_call_id", ""),
+                    "arguments": _serialize_copilot_tool_arguments(
+                        getattr(data, "arguments", None)
+                    ),
+                },
+            )
+        elif isinstance(data, ToolExecutionCompleteData):
+            # Same submit_result suppression as on pre_tool_use; the
+            # tool_call_id is what we'd track in the streaming path
+            # but the hook is best-effort (we don't have the start's
+            # tool_name on the complete event). Skip by checking the
+            # nested tool name when the SDK exposes it.
+            tool_name = ""
+            result = getattr(data, "result", None)
+            if result is not None:
+                tool_name = getattr(result, "tool_name", "") or ""
+            if tool_name == SUBMIT_RESULT_TOOL:
+                return
+            success = bool(getattr(data, "success", True))
+            kind = "post_tool_use" if success else "tool_failure"
+            payload: dict[str, Any] = {
+                "tool_call_id": getattr(data, "tool_call_id", ""),
+                "success": success,
+            }
+            output = _copilot_tool_result_output(data)
+            if success:
+                payload["output"] = output
+            else:
+                payload["error"] = output
+            _fire_hook_event(
+                self._on_event,
+                kind,
+                session_id=sid,
+                payload=payload,
+            )
+        elif isinstance(data, SessionCompactionStartData):
+            _fire_hook_event(
+                self._on_event,
+                "pre_compact",
+                session_id=sid,
+                payload={},
+            )
 
     def _build_result(self, *, schema: type[BaseModel] | None) -> RuntimeResult:
         if self._captured_error is not None:
@@ -1205,6 +1491,97 @@ def _translate_mcp_servers_for_copilot(
                 feature=Feature.TOOLS_MCP_SSE,
             )
     return out
+
+
+def _translate_permission_for_copilot(callback: PermissionCallback) -> Any:
+    """Wrap an airframe :class:`PermissionCallback` as Copilot's
+    ``on_permission_request=`` handler.
+
+    Copilot's :data:`_PermissionHandlerFn` takes
+    ``(PermissionRequest, dict[str, str])`` and returns a
+    :class:`PermissionRequestResult` (sync or async). We build an
+    airframe :class:`~airframe.permission.PermissionRequest`, await
+    the user's callback, and map the
+    :data:`~airframe.permission.PermissionDecision` to Copilot's
+    :data:`PermissionRequestResultKind`:
+
+    * ``"allow"`` → ``"approve-once"`` (this specific call only).
+    * ``"deny"`` → ``"reject"``.
+    * ``"defer"`` → ``"user-not-available"``. Copilot interprets
+      this as "no decision available; fall through to the SDK's
+      default handling" — which is exactly the "defer" intent.
+
+    The mapping is shape-stable; Copilot exposes only four
+    :data:`PermissionRequestResultKind` values today
+    (``approve-once``, ``reject``, ``user-not-available``,
+    ``no-result``); ``no-result`` is reserved for protocol-level
+    errors and isn't reachable through this path.
+
+    ``tool_args`` is built from the SDK request's :attr:`tool_args`
+    field (falling back to :attr:`args` when the SDK normalised
+    them); ``reason`` is the SDK's :attr:`reason` /
+    :attr:`tool_description` / :attr:`intention` (first non-empty).
+    """
+    from copilot.session import PermissionRequestResult
+
+    from airframe.permission import PermissionRequest
+
+    async def _on_permission_request(
+        request: Any,
+        _invocation: dict[str, str],
+    ) -> Any:
+        # Copilot's PermissionRequest carries many vendor-specific
+        # fields; airframe normalises down to (tool_name, tool_args,
+        # reason). Fall back across plausible SDK field names so the
+        # mapping survives SDK additions.
+        tool_name = (
+            getattr(request, "tool_name", None)
+            or getattr(request, "tool_title", None)
+            or getattr(request, "kind", "")
+        ) or ""
+        tool_args = getattr(request, "tool_args", None) or getattr(request, "args", None) or {}
+        # Coerce non-dict args to a dict so the airframe contract
+        # holds (the Copilot SDK sometimes uses ``Any`` for args).
+        if not isinstance(tool_args, dict):
+            tool_args = {"args": tool_args}
+        reason = (
+            getattr(request, "reason", None)
+            or getattr(request, "tool_description", None)
+            or getattr(request, "intention", None)
+        )
+        airframe_request = PermissionRequest(
+            tool_name=str(tool_name),
+            tool_args=tool_args,
+            reason=reason,
+        )
+        decision = await callback.handle(airframe_request)
+        if decision == "allow":
+            return PermissionRequestResult(kind="approve-once")
+        if decision == "deny":
+            return PermissionRequestResult(kind="reject")
+        # "defer" — let Copilot's default policy decide.
+        logger.debug(
+            "copilot: PermissionCallback returned 'defer' for tool=%r; "
+            "mapping to 'user-not-available' (Copilot's default policy "
+            "takes over)",
+            tool_name,
+        )
+        return PermissionRequestResult(kind="user-not-available")
+
+    return _on_permission_request
+
+
+def _permission_fingerprint(callback: PermissionCallback | None) -> str:
+    """Deterministic fingerprint of the permission-callback identity.
+
+    Used in the :meth:`CopilotAgentSession._ensure_session` cache key
+    so a callback swap between turns forces a session rebuild
+    (Copilot bakes ``on_permission_request`` at
+    :meth:`CopilotClient.create_session` time).
+    """
+    if callback is None:
+        return "__no_permission__"
+    return f"id={id(callback)}|type={type(callback).__name__}"
 
 
 def _copilot_tools_fingerprint(tools: list[FunctionTool]) -> str:

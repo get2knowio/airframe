@@ -39,27 +39,50 @@ def test_agent_session_protocol_methods() -> None:
 
 
 def test_agent_session_execute_signature() -> None:
-    """``execute(prompt, *, schema=None, thinking=None, timeout=600.0)``.
+    """``execute(prompt, *, schema=None, thinking=None, max_turns=None,
+    max_budget_usd=None, timeout=600.0)``.
 
-    Phase 2 Iteration A added the ``thinking=`` kwarg between ``schema=``
-    and ``timeout=``. Defaults are all None / 600.0 so consumers can
-    drop a single positional ``prompt`` and get the same behaviour
-    they got pre-Phase-2.
+    Phase 2 Iteration A added ``thinking=``. Phase 5 Iteration A
+    added ``max_turns=`` and ``max_budget_usd=`` between ``thinking=``
+    and ``timeout=`` so the budget caps sit with the other policy
+    knobs. Defaults are all None / 600.0 so consumers can drop a
+    single positional ``prompt`` and get the pre-Phase-5 behaviour.
     """
     sig = inspect.signature(AgentSession.execute)
-    assert list(sig.parameters) == ["self", "prompt", "schema", "thinking", "timeout"]
+    assert list(sig.parameters) == [
+        "self",
+        "prompt",
+        "schema",
+        "thinking",
+        "max_turns",
+        "max_budget_usd",
+        "timeout",
+    ]
     assert sig.parameters["schema"].default is None
     assert sig.parameters["thinking"].default is None
+    assert sig.parameters["max_turns"].default is None
+    assert sig.parameters["max_budget_usd"].default is None
     assert sig.parameters["timeout"].default == 600.0
 
 
 def test_agent_session_stream_signature() -> None:
-    """``stream(prompt, *, schema=None, thinking=None, timeout=600.0)``.
+    """``stream(prompt, *, schema=None, thinking=None, max_turns=None,
+    max_budget_usd=None, timeout=600.0)``.
 
-    Same kwarg shape as ``execute()`` — Phase 2 keeps them in sync.
+    Same kwarg shape as ``execute()`` — Phase 5 keeps them in sync.
     """
     sig = inspect.signature(AgentSession.stream)
-    assert list(sig.parameters) == ["self", "prompt", "schema", "thinking", "timeout"]
+    assert list(sig.parameters) == [
+        "self",
+        "prompt",
+        "schema",
+        "thinking",
+        "max_turns",
+        "max_budget_usd",
+        "timeout",
+    ]
     assert sig.parameters["schema"].default is None
     assert sig.parameters["thinking"].default is None
+    assert sig.parameters["max_turns"].default is None
+    assert sig.parameters["max_budget_usd"].default is None
     assert sig.parameters["timeout"].default == 600.0
