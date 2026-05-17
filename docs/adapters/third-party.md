@@ -3,14 +3,13 @@
 Airframe's adapter surface is intentionally pluggable — third-party
 adapters live in their own pip package, register via the
 `airframe.adapters` entry-point group, and inherit the shared
-conformance contract suite. Same pattern as SQLAlchemy dialects
-and JDBC drivers.
+conformance contract suite. Same pattern as SQLAlchemy dialects.
 
 Two shapes of adapter:
 
 1. **OpenAI-compatible HTTP** — subclass `OpenAICompatibleRuntime`.
    ~30 lines of code; ships the base's HTTP execute, list_models,
-   error classification, envelope unwrap, and the full Phase 1–5
+   error classification, envelope unwrap, and the full
    session class. Example: `OpenCodeZenRuntime` in
    `src/airframe/adapters/opencode_zen.py`.
 2. **SDK-based (subprocess / native types)** — inherit
@@ -87,9 +86,9 @@ That's it. The base class handles:
 - Async HTTP via `openai.AsyncOpenAI`.
 - Structured output via `response_format={"type":"json_schema",...}`.
 - `list_models()` enriched from `METADATA`.
-- The full Phase 1–5 session class
-  (`OpenAICompatibleSession`) with streaming, cancellation, tool
-  loops, lifecycle hooks, budget caps, polymorphic prompts.
+- The full session class (`OpenAICompatibleSession`) with
+  streaming, cancellation, tool loops, lifecycle hooks, budget
+  caps, polymorphic prompts.
 - Error classification onto `Runtime*Error`.
 - Single-key envelope unwrap.
 
@@ -106,14 +105,14 @@ When your vendor ships its own Python SDK (subprocess-based or
 otherwise) that doesn't fit OpenAI's wire format, inherit
 `AgentRuntime` directly. Implement all the methods on the
 protocol. This is more work — typically 500–1500 lines depending
-on how much of Phase 1–5 you wire — but you get full control over
+on which features you wire — but you get full control over
 session lifecycle, native streaming, vendor-specific tool channels,
 etc.
 
 Use the four in-tree adapters as templates:
 
-- **`src/airframe/adapters/claude_code.py`** — full Phase 1–5
-  wiring; the broadest reference.
+- **`src/airframe/adapters/claude_code.py`** — full feature wiring;
+  the broadest reference.
 - **`src/airframe/adapters/copilot.py`** — subprocess + JSON-RPC,
   forced `submit_result` tool for structured output.
 - **`src/airframe/adapters/codex.py`** — per-turn subprocess, no
@@ -297,7 +296,7 @@ Before publishing your adapter to PyPI:
 - [ ] `PROVIDER_ID`, `REQUIRES_PACKAGE`, `EXTRA_NAME` ClassVars
       declared.
 - [ ] `SUPPORTED_FEATURES` ClassVar honestly declares which
-      Phase 1–5 features you wire.
+      features you wire.
 - [ ] `EMITTABLE_HOOK_KINDS` ClassVar (if you declare
       `LIFECYCLE_HOOKS=True`) names the subset of the 8 canonical
       kinds you emit.

@@ -63,15 +63,15 @@ class AgentRuntime(Protocol):
 
 - **`execute`** — single-turn convenience over `session().execute() + close()`.
 - **`session`** — multi-turn `AgentSession` factory (see below).
-- **`reset`** — no-op on every built-in adapter (the runtime is
-  sessionless post-Phase-1-G). Kept for protocol completeness.
+- **`reset`** — no-op on every built-in adapter today (the runtime
+  is sessionless). Kept for protocol completeness.
 - **`close`** — idempotent, never raises. Safe in `finally` blocks.
 - **`validate_binding`** — cheap predicate; doesn't make network calls.
 - **`list_models`** — hits the vendor's models endpoint; requires
   credentials. Raises `RuntimeAuthError` / `RuntimeTransientError`.
 - **`supports`** — capability predicate. See [capabilities.md](./capabilities.md).
-- **`unwrap`** — JDBC-`Wrapper`-style escape hatch. Returns the
-  native vendor object; raises `TypeError` for unsupported casts.
+- **`unwrap`** — vendor-native escape hatch. Returns the
+  underlying SDK object; raises `TypeError` for unsupported casts.
 
 ## `AgentSession` protocol
 

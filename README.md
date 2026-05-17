@@ -5,10 +5,10 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![CI](https://github.com/get2knowio/airframe/actions/workflows/ci.yml/badge.svg)](https://github.com/get2knowio/airframe/actions/workflows/ci.yml)
 
-**JDBC for LLM agent SDKs.** Vendor-neutral agent runtime for
-Python — write your agent against a small `AgentRuntime` protocol
-and switch between Claude Code, GitHub Copilot, OpenAI Codex, and
-OpenCode Zen by swapping a single object.
+**One protocol, every agent SDK.** Vendor-neutral runtime for
+Python AI agents — write once against a small `AgentRuntime`
+protocol and run on Claude Code, GitHub Copilot, OpenAI Codex, or
+OpenCode Zen by changing a single config value.
 
 ## Quickstart
 
@@ -27,7 +27,7 @@ class Brief(BaseModel):
 # Provider ID comes from config — YAML, env, CLI flag, whatever.
 provider_id = "claude"  # or "github-copilot", "codex", "opencode"
 
-cls = runtime_for(provider_id)       # JDBC-style driver lookup
+cls = runtime_for(provider_id)       # discovery lookup by ID
 runtime = cls()                      # auth resolves from env / credential files
 result = await runtime.execute(
     "Brief me on the project structure.",
@@ -41,7 +41,7 @@ await runtime.close()
 
 The same agent code now serves any installed adapter — swap
 `provider_id` (and `model`) in config, no import or instantiation
-changes. That's the JDBC analogy at work.
+changes. Add a new vendor to your project's YAML and ship.
 
 Direct imports still work when you only ever need one adapter:
 
@@ -88,7 +88,7 @@ structured-output contract.
 
 ## Capability matrix
 
-End-of-Phase-5 snapshot (run
+Current snapshot (run
 `uv run python examples/probe_supports.py` for the live version):
 
 | Feature | Claude | Copilot | Codex | OpenAI-compat |
@@ -139,8 +139,13 @@ behaviour belongs.
 
 Anything *above* the protocol — retry policy, fallback across
 vendors, conversation memory, multi-agent orchestration — is left
-to the consumer. Airframe is the driver layer; the application
+to the consumer. Airframe is the adapter layer; the application
 composes its own behaviour on top.
+
+The shape — one narrow protocol plus pluggable vendor adapters,
+discovered by ID — is borrowed from JDBC, with the same goal:
+let the application code stay vendor-agnostic while each adapter
+absorbs its vendor's quirks.
 
 ## Install
 
@@ -235,7 +240,7 @@ Full list and the rest of the hierarchy in
 ## Escape hatch: `unwrap()`
 
 When the portable surface doesn't expose a vendor-specific knob,
-reach the native SDK object via JDBC-`Wrapper`-style `unwrap()`:
+reach the native SDK object via `unwrap()`:
 
 ```python
 from claude_agent_sdk import ClaudeSDKClient
@@ -271,8 +276,8 @@ Full list with one-line descriptions in
 
 ## Documentation
 
-- **[Architecture & design](docs/architecture.md)** — the JDBC
-  analogy, runtime-vs-session split, streaming event taxonomy.
+- **[Architecture & design](docs/architecture.md)** — protocol
+  shape, runtime-vs-session split, streaming event taxonomy.
 - **[Capabilities](docs/capabilities.md)** — per-`Feature`
   semantics across adapters.
 - **[Authentication](docs/auth.md)** — per-adapter credential

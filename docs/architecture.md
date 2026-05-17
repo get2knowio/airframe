@@ -33,7 +33,7 @@ Airframe is two collaborating protocols. **`AgentRuntime`** is the
 runtime-wide entry point — auth, model discovery, capability flags,
 one-shot execution, session factory. **`AgentSession`** is the
 multi-turn conversation handle that owns vendor session state for
-its lifetime. Phase 1 introduced the split (shipped in v0.5.0).
+its lifetime. The runtime/session split shipped in v0.5.0.
 
 ```
 ┌────────────────────────────────────────────────────────────────────┐
@@ -92,7 +92,7 @@ flags, binding-validity predicates) and stays out of the way.
 
 ## Runtime vs session: who owns what
 
-Phase 1 Iteration G drew a clean line:
+The runtime/session split draws a clean line:
 
 | Lives on the runtime | Lives on the session |
 |---|---|
@@ -122,7 +122,7 @@ types from `airframe.events`:
 |---|---|
 | `TextDelta(text)` | A chunk of assistant-visible text. Concatenating all `TextDelta.text` for one turn equals the final result's `text`. |
 | `ReasoningDelta(text)` | A chunk of hidden reasoning / extended-thinking text. Distinct from `TextDelta` — the model's private chain-of-thought. |
-| `ToolCallStart(tool_name, tool_call_id, arguments_preview)` | The model asked to invoke a tool. Phase 3 wired user-supplied `FunctionTool` round-trips on Claude / Copilot / OpenAI-compat; Phase 4 added external `McpServerRef` routes on Claude / Copilot. |
+| `ToolCallStart(tool_name, tool_call_id, arguments_preview)` | The model asked to invoke a tool. User-supplied `FunctionTool` round-trips wire on Claude / Copilot / OpenAI-compat; external `McpServerRef` routes wire on Claude / Copilot. |
 | `ToolCallResult(tool_call_id, output, is_error)` | A tool invocation completed. Pairs with the matching `ToolCallStart`. |
 | `TurnComplete(result)` | Final event in every successful stream. Carries the same `RuntimeResult` `execute()` would have returned. |
 
@@ -132,15 +132,14 @@ renaming or removing is a major-version break. Adding a new variant
 later is safe (consumers branch with a wildcard / `isinstance`).
 
 Adapters declaring `Feature.STREAMING` emit fine-grained deltas as
-the vendor produces them. Adapters that don't (none today after
-Phase 1) may emit a single `TextDelta` carrying the full response
-immediately before `TurnComplete`.
+the vendor produces them. Adapters that don't (none today) may emit
+a single `TextDelta` carrying the full response immediately before
+`TurnComplete`.
 
 ## Capability negotiation
 
 Each adapter declares which protocol features it implements via
-`runtime.supports(Feature.X)`. The capability matrix at the end of
-Phase 5 (all four phase rollouts complete):
+`runtime.supports(Feature.X)`. Current capability matrix:
 
 | Feature | Claude Code | Copilot | Codex | OpenAI-compat |
 |---|---|---|---|---|
@@ -162,12 +161,12 @@ Phase 5 (all four phase rollouts complete):
 | `LIFECYCLE_HOOKS` | ✓ (8 kinds) | ✓ (7 kinds, no `rate_limit`) | ✓ (6 kinds, synthesised) | ✓ (6 kinds, synthesised) |
 | `BUDGET_USD_CAP` | ✓ | ✓ | ✓ | ✓ |
 | `BUDGET_TURN_CAP` | ✓ | ✗ (vendor caps internally) | ✓ | ✓ |
-| `SANDBOX` / `SUBAGENTS` | (Phase 6 / signal-gated) | (Phase 6) | (Phase 6) | (Phase 6) |
+| `SANDBOX` / `SUBAGENTS` | ✗ (planned, signal-gated) | ✗ (planned) | ✗ (planned) | ✗ (planned) |
 
 `supports()` is a cheap static lookup — no network, no SDK version
 sniffing. The conformance suite (`airframe.testing.contracts`)
 asserts every adapter's `supports(STRUCTURED_OUTPUT_JSON_SCHEMA)` is
-True plus the structural contracts for Phase 1–5 features (each
+True plus the structural contracts for every feature surface (each
 declared-True flag must accept the corresponding kwarg without
 raising `UnsupportedFeatureError`; each declared-False flag must
 raise with the correct `feature=` attribute). Behavioural contracts
@@ -231,7 +230,7 @@ type without needing per-adapter knowledge:
 | `RuntimeServerStartError` | Adapter couldn't bring its backend up at all. |
 | `RuntimeCancelledError` | Caller-initiated abort (`session.cancel()`). |
 | `UnsupportedBindingError` | Programming error — adapter doesn't serve this `(provider, model)` pair. |
-| `UnsupportedFeatureError` | Capability decline — adapter doesn't wire this feature. Phase 1+ companion to `UnsupportedBindingError` that honours the "no silent fallbacks" principle. |
+| `UnsupportedFeatureError` | Capability decline — adapter doesn't wire this feature. Companion to `UnsupportedBindingError` that honours the "no silent fallbacks" principle. |
 
 Adapters classify their vendor's failures into these buckets at the
 adapter boundary. What to *do* with each — retry, fall back to a
@@ -347,11 +346,11 @@ logged at debug level and swallowed. This matters because
 real exception. Both `AgentRuntime.close()` and `AgentSession.close()`
 honour this.
 
-`reset()` is also idempotent — and, after Phase 1 Iteration G, a
-no-op on every adapter. Per-call sessions own their state; the
-runtime has nothing scope-bound to drop. `reset()` is kept on the
-protocol for completeness and back-compat with consumers that
-called it pre-Iteration-G.
+`reset()` is also idempotent — and a no-op on every adapter today.
+Per-call sessions own their state; the runtime has nothing
+scope-bound to drop. `reset()` is kept on the protocol for
+completeness and back-compat with consumers that called it before
+the runtime/session split.
 
 `cancel()` on `AgentSession` is cheap and idempotent: no-op when no
 turn is in flight; adapters not declaring `Feature.CANCEL` raise
@@ -376,10 +375,9 @@ each adapter's `_PRICING` / `_METADATA` dict.
 
 ## Where to look next
 
-* `dev-docs/implementation-plan.md` — phased rollout (Phase 0
-  through 6 / 7+), version targets, gating decisions, and the
-  criteria for cutting v1.0. *(Dev-internal; not published to
-  PyPI.)*
+* `dev-docs/implementation-plan.md` — iteration plan, version
+  targets, gating decisions, and the criteria for cutting v1.0.
+  *(Dev-internal; not published to PyPI.)*
 * `dev-docs/feature-roadmap.md` — per-SDK feature audit and
   prioritised cross-vendor work. *(Dev-internal.)*
 * `examples/probe_*.py` — live-vendor probes that exercise each
@@ -389,20 +387,20 @@ each adapter's `_PRICING` / `_METADATA` dict.
   - `probe_session_resume.py` — two-turn resume via `session(resume=)`
     on the three SDK adapters.
   - `probe_supports.py` — the `Feature × adapter` capability matrix.
-  - `probe_thinking.py` / `probe_vision.py` — Phase 2 inputs &
-    reasoning.
-  - `probe_tools.py` — Phase 3 `FunctionTool` round-trip.
-  - `probe_mcp.py` — Phase 4 `McpServerRef` registration across
-    stdio / http / sse transports.
-  - `probe_permission.py` — Phase 5 `PermissionCallback` per-call
+  - `probe_thinking.py` / `probe_vision.py` — reasoning controls and
+    polymorphic image/file prompts.
+  - `probe_tools.py` — `FunctionTool` round-trip.
+  - `probe_mcp.py` — `McpServerRef` registration across stdio / http
+    / sse transports.
+  - `probe_permission.py` — `PermissionCallback` per-call
     interception.
-  - `probe_hooks.py` — Phase 5 `HookEvent` observation; prints the
+  - `probe_hooks.py` — `HookEvent` observation; prints the
     declared `EMITTABLE_HOOK_KINDS` and the per-kind histogram.
-  - `probe_budget.py` — Phase 5 `max_turns=` / `max_budget_usd=`;
+  - `probe_budget.py` — `max_turns=` / `max_budget_usd=`;
     deliberately tiny cap demonstrates `RuntimeBudgetExceededError`.
 * `airframe.testing.contracts` — shared structural conformance
-  contracts every adapter satisfies (Phase 0 schema round-trip plus
-  Phase 1–5 capability-vs-API agreement).
+  contracts every adapter satisfies (schema round-trip plus the
+  full capability-vs-API agreement).
 * `airframe.testing.integration` — pytest-marker-gated live-vendor
   probes mirroring the `examples/probe_*.py` set. Run with
   `pytest -m integration` once credentials are configured.

@@ -36,33 +36,33 @@ uv run python examples/probe_supports.py
 uv run python examples/probe_supports.py --provider claude
 ```
 
-## Phase 1 — sessions, streaming, resume, cancel
+## Sessions, streaming, resume, cancel
 
 | Probe | What it does |
 |---|---|
 | `examples/probe_streaming.py` | `session.stream(prompt)` against any installed adapter; prints each `TextDelta` / `ReasoningDelta` / `ToolCallStart` / `TurnComplete` |
 | `examples/probe_session_resume.py` | Two-turn `session(resume=)` against the three SDK adapters; verifies the second turn sees first-turn context |
 
-## Phase 2 — reasoning + vision/file inputs
+## Reasoning + vision/file inputs
 
 | Probe | What it does |
 |---|---|
 | `examples/probe_thinking.py` | `execute(thinking="medium")` round-trips on adapters declaring `REASONING_EFFORT`; demonstrates `thinking="disabled"` and the `{"budget_tokens": N}` Claude shape |
 | `examples/probe_vision.py` | `execute([text, ImageInput(...)])` polymorphic prompt; covers path-, bytes-, and url-based image inputs |
 
-## Phase 3 — function tools
+## Function tools
 
 | Probe | What it does |
 |---|---|
 | `examples/probe_tools.py` | `session(tools=[FunctionTool])` round-trip; the model calls `add(17, 25)` and the handler's `42` lands in the final response |
 
-## Phase 4 — external MCP servers
+## External MCP servers
 
 | Probe | What it does |
 |---|---|
 | `examples/probe_mcp.py` | `session(mcp_servers=[McpServerRef])` with the public `@modelcontextprotocol/server-everything` stdio server; lists the server's tools and calls `echo` |
 
-## Phase 5 — permission, hooks, budget
+## Permission, hooks, budget
 
 | Probe | What it does |
 |---|---|

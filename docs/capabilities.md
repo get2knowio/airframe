@@ -11,7 +11,7 @@ attribute at the gate.
 The string values of every `Feature` member are public surface —
 locked at v0.3.0. Renaming would be a major-version break.
 
-## End-of-Phase-5 matrix
+## Capability matrix
 
 | Feature | Claude | Copilot | Codex | OpenAI-compat |
 |---|---|---|---|---|
@@ -33,7 +33,7 @@ locked at v0.3.0. Renaming would be a major-version break.
 | `LIFECYCLE_HOOKS` | ✓ (8 kinds) | ✓ (7 kinds) | ✓ (6 kinds) | ✓ (6 kinds) |
 | `BUDGET_USD_CAP` | ✓ | ✓ | ✓ | ✓ |
 | `BUDGET_TURN_CAP` | ✓ | ✗ | ✓ | ✓ |
-| `SANDBOX` / `SUBAGENTS` | (Phase 6) | (Phase 6) | (Phase 6) | (Phase 6) |
+| `SANDBOX` / `SUBAGENTS` | ✗ (planned) | ✗ (planned) | ✗ (planned) | ✗ (planned) |
 
 Run `uv run python examples/probe_supports.py` for the live matrix
 against your installed adapters.
@@ -249,7 +249,7 @@ On Claude, the kwarg additionally rides into
 
 ### `SANDBOX` / `SUBAGENTS`
 
-Phase 6 features — signal-gated. Will flip True when the
+Planned, signal-gated features. Will flip True when the
 corresponding API ships. `runtime.supports(...)` returns False
 today on every adapter; the kwargs aren't exposed yet, so there's
 nothing to gate.
