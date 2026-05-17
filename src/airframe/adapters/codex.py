@@ -138,6 +138,34 @@ _CODEX_METADATA: dict[str, tuple[str, int, float, float]] = {
 _PRICING: dict[str, tuple[float, float]] = {k: (v[2], v[3]) for k, v in _CODEX_METADATA.items()}
 
 
+def _strictify_schema(node: Any) -> Any:
+    """Recursively annotate object nodes with ``additionalProperties: false``.
+
+    OpenAI's Responses-backed endpoints (which newer Codex models like
+    ``gpt-5.5`` / ``gpt-5.4`` route to) reject any structured-output
+    schema that doesn't pin ``additionalProperties: false`` on every
+    object node. Pydantic's :meth:`BaseModel.model_json_schema` doesn't
+    emit that key by default. We post-process the schema dict here so
+    consumers don't need to set ``ConfigDict(extra="forbid")`` on every
+    response model.
+
+    Walks the schema in place, descending into ``properties`` values,
+    array ``items``, ``$defs`` entries, and ``anyOf`` / ``oneOf`` /
+    ``allOf`` branches. Leaves an explicit ``additionalProperties`` key
+    (whatever the value) untouched so callers can still pass a schema
+    that allows extras intentionally.
+    """
+    if isinstance(node, dict):
+        if node.get("type") == "object" and "additionalProperties" not in node:
+            node["additionalProperties"] = False
+        for value in node.values():
+            _strictify_schema(value)
+    elif isinstance(node, list):
+        for item in node:
+            _strictify_schema(item)
+    return node
+
+
 def _resolve_api_key(api_key: str | None) -> str | None:
     """Resolve the OpenAI API key from explicit arg → env → opencode auth.json.
 
@@ -874,7 +902,9 @@ class CodexRuntime(AgentRuntime):
                 or "not found" in msg
                 or "does not exist" in msg
             ):
-                return RuntimeModelNotFoundError(f"codex: model unavailable on this binding: {exc}")
+                return RuntimeModelNotFoundError(
+                    f"codex: model unavailable on this binding: {exc}"
+                )
             if "schema" in msg or "json" in msg:
                 return RuntimeStructuredOutputError(
                     f"codex: structured output failed: {exc}", body=None
@@ -1040,7 +1070,7 @@ class CodexAgentSession:
 
         turn_options: dict[str, Any] = {"signal": controller.signal}
         if schema is not None:
-            turn_options["outputSchema"] = schema.model_json_schema()
+            turn_options["outputSchema"] = _strictify_schema(schema.model_json_schema())
 
         self._in_flight = True
         try:
@@ -1136,7 +1166,7 @@ class CodexAgentSession:
 
         turn_options: dict[str, Any] = {"signal": controller.signal}
         if schema is not None:
-            turn_options["outputSchema"] = schema.model_json_schema()
+            turn_options["outputSchema"] = _strictify_schema(schema.model_json_schema())
 
         try:
             streamed = await thread.run_streamed(run_input, turn_options)

@@ -31,6 +31,7 @@ from airframe.adapters.codex import (
     DEFAULT_CODEX_MODEL,
     CodexRuntime,
     _resolve_api_key,
+    _strictify_schema,
 )
 from airframe.errors import (
     AgentRuntimeError,
@@ -303,7 +304,13 @@ async def test_execute_passes_output_schema(mock_sdk: dict[str, Any]) -> None:
     call_args = mock_sdk["thread"].run.call_args
     prompt_arg, turn_options = call_args.args
     assert prompt_arg == "hi"
-    assert turn_options["outputSchema"] == _Schema.model_json_schema()
+    # outputSchema is the Pydantic schema with additionalProperties:false
+    # injected — required by OpenAI Responses-backed Codex endpoints.
+    schema_sent = turn_options["outputSchema"]
+    assert schema_sent["type"] == "object"
+    assert schema_sent["additionalProperties"] is False
+    assert schema_sent["properties"] == _Schema.model_json_schema()["properties"]
+    assert schema_sent["required"] == _Schema.model_json_schema()["required"]
 
 
 @pytest.mark.asyncio
@@ -635,6 +642,64 @@ def test_resolve_api_key_returns_none_when_nothing_resolves(
     monkeypatch.setenv("OPENCODE_AUTH_PATH", str(tmp_path / "nonexistent.json"))
 
     assert _resolve_api_key(None) is None
+
+
+def test_strictify_schema_adds_additional_properties_false_to_objects() -> None:
+    schema = {
+        "type": "object",
+        "properties": {
+            "answer": {"type": "integer"},
+            "nested": {
+                "type": "object",
+                "properties": {"deep": {"type": "string"}},
+                "required": ["deep"],
+            },
+            "items": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {"x": {"type": "number"}},
+                    "required": ["x"],
+                },
+            },
+        },
+        "required": ["answer", "nested", "items"],
+    }
+    out = _strictify_schema(schema)
+    assert out["additionalProperties"] is False
+    assert out["properties"]["nested"]["additionalProperties"] is False
+    assert out["properties"]["items"]["items"]["additionalProperties"] is False
+
+
+def test_strictify_schema_walks_defs_and_anyof() -> None:
+    schema = {
+        "$defs": {
+            "Inner": {"type": "object", "properties": {"y": {"type": "string"}}},
+        },
+        "type": "object",
+        "properties": {
+            "field": {
+                "anyOf": [
+                    {"$ref": "#/$defs/Inner"},
+                    {"type": "null"},
+                ],
+            },
+        },
+    }
+    out = _strictify_schema(schema)
+    assert out["additionalProperties"] is False
+    assert out["$defs"]["Inner"]["additionalProperties"] is False
+
+
+def test_strictify_schema_respects_explicit_additional_properties() -> None:
+    schema = {
+        "type": "object",
+        "properties": {"loose": {"type": "object", "additionalProperties": True}},
+        "additionalProperties": True,
+    }
+    out = _strictify_schema(schema)
+    assert out["additionalProperties"] is True
+    assert out["properties"]["loose"]["additionalProperties"] is True
 
 
 def test_resolve_api_key_ignores_malformed_auth_file(

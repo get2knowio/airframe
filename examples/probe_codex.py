@@ -121,13 +121,13 @@ async def main() -> int:
             f"\nFAIL: {err}\n\n"
             "  Hint: this auth path doesn't serve this model. If you "
             "authenticated via\n  `codex login` (ChatGPT account), the "
-            "openai-codex-sdk routes calls\n  through OpenAI's "
-            "ChatGPT-account-restricted endpoint, which rejects most\n"
-            "  model IDs that the interactive `codex` CLI itself accepts.\n"
-            "  The reliable path is API-billed auth:\n"
-            "    export OPENAI_API_KEY=sk-...\n"
-            "    uv run python examples/probe_codex.py\n"
-            "  Or try a different model via --model / CODEX_PROBE_MODEL."
+            "codex-tuned variants (gpt-5-codex,\n  gpt-5-codex-mini) require "
+            "API-billed auth. Your ChatGPT subscription\n  serves the models "
+            "listed in ~/.codex/models_cache.json — typically\n  gpt-5.5, "
+            "gpt-5.4, gpt-5.4-mini, gpt-5.3-codex. Retry with one of those:\n"
+            "    uv run python examples/probe_codex.py --model gpt-5.5\n"
+            "  Or switch to API-billed auth:\n"
+            "    export OPENAI_API_KEY=sk-..."
         )
         await runtime.close()
         return 1
