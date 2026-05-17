@@ -1156,3 +1156,418 @@ async def test_no_tools_omits_mcp_servers_and_allowed_tools(
     # And no MCP server was created.
     assert mock_sdk["server_calls"] == []
     await sess.close()
+
+
+# ---------------------------------------------------------------------------
+# External MCP server refs (Phase 4 Iteration B)
+# ---------------------------------------------------------------------------
+
+
+def _make_final_only_receive() -> Any:
+    """Convenience: a ``receive_response`` that yields one ResultMessage."""
+
+    async def fake_receive() -> Any:
+        yield _FakeResultMessage(result="ok")
+
+    return fake_receive
+
+
+async def test_mcp_stdio_translates_to_typed_dict(mock_sdk: dict[str, Any]) -> None:
+    """``McpServerRef(transport='stdio', command=[...])`` builds the SDK's
+    stdio TypedDict (``type``, ``command``, ``args``)."""
+    from airframe import McpServerRef
+
+    mock_sdk["client"].receive_response = _make_final_only_receive()
+
+    rt = ClaudeCodeRuntime()
+    ref = McpServerRef(
+        name="everything",
+        transport="stdio",
+        command=["uvx", "mcp-server-everything", "--flag"],
+    )
+    sess = rt.session(mcp_servers=[ref])
+    try:
+        await sess.execute("anything")
+    finally:
+        await sess.close()
+
+    opts = mock_sdk["options_kwargs"][0]
+    assert "mcp_servers" in opts
+    assert "everything" in opts["mcp_servers"]
+    cfg = opts["mcp_servers"]["everything"]
+    assert cfg["type"] == "stdio"
+    # argv head/tail split — SDK takes command: str, args: list[str].
+    assert cfg["command"] == "uvx"
+    assert cfg["args"] == ["mcp-server-everything", "--flag"]
+    # No url / headers leaks onto a stdio config.
+    assert "url" not in cfg
+    assert "headers" not in cfg
+
+
+async def test_mcp_stdio_single_element_command_omits_args(
+    mock_sdk: dict[str, Any],
+) -> None:
+    """A 1-element ``command`` produces no ``args`` key (minimal wire shape)."""
+    from airframe import McpServerRef
+
+    mock_sdk["client"].receive_response = _make_final_only_receive()
+
+    rt = ClaudeCodeRuntime()
+    sess = rt.session(
+        mcp_servers=[McpServerRef(name="solo", transport="stdio", command=["mcp-bin"])]
+    )
+    try:
+        await sess.execute("hi")
+    finally:
+        await sess.close()
+
+    cfg = mock_sdk["options_kwargs"][0]["mcp_servers"]["solo"]
+    assert cfg == {"type": "stdio", "command": "mcp-bin"}
+
+
+async def test_mcp_http_translates_to_typed_dict_with_auth_header(
+    mock_sdk: dict[str, Any],
+) -> None:
+    """``auth_token=`` becomes ``Authorization: Bearer …`` on http transport."""
+    from airframe import McpServerRef
+
+    mock_sdk["client"].receive_response = _make_final_only_receive()
+
+    rt = ClaudeCodeRuntime()
+    ref = McpServerRef(
+        name="remote",
+        transport="http",
+        url="https://mcp.example.com",
+        auth_token="secret-token",
+    )
+    sess = rt.session(mcp_servers=[ref])
+    try:
+        await sess.execute("anything")
+    finally:
+        await sess.close()
+
+    cfg = mock_sdk["options_kwargs"][0]["mcp_servers"]["remote"]
+    assert cfg["type"] == "http"
+    assert cfg["url"] == "https://mcp.example.com"
+    assert cfg["headers"]["Authorization"] == "Bearer secret-token"
+    # And no stdio leakage.
+    assert "command" not in cfg
+
+
+async def test_mcp_sse_translates_to_typed_dict(mock_sdk: dict[str, Any]) -> None:
+    """``transport='sse'`` produces the SSE TypedDict shape."""
+    from airframe import McpServerRef
+
+    mock_sdk["client"].receive_response = _make_final_only_receive()
+
+    rt = ClaudeCodeRuntime()
+    sess = rt.session(
+        mcp_servers=[
+            McpServerRef(
+                name="sse-feed",
+                transport="sse",
+                url="https://mcp.example.com/sse",
+                headers={"X-Trace": "trace-123"},
+            )
+        ]
+    )
+    try:
+        await sess.execute("anything")
+    finally:
+        await sess.close()
+
+    cfg = mock_sdk["options_kwargs"][0]["mcp_servers"]["sse-feed"]
+    assert cfg["type"] == "sse"
+    assert cfg["url"] == "https://mcp.example.com/sse"
+    assert cfg["headers"] == {"X-Trace": "trace-123"}
+
+
+async def test_mcp_caller_headers_override_auth_token(
+    mock_sdk: dict[str, Any],
+) -> None:
+    """Caller-supplied ``Authorization`` in ``headers=`` wins over ``auth_token=``."""
+    from airframe import McpServerRef
+
+    mock_sdk["client"].receive_response = _make_final_only_receive()
+
+    rt = ClaudeCodeRuntime()
+    sess = rt.session(
+        mcp_servers=[
+            McpServerRef(
+                name="remote",
+                transport="http",
+                url="https://mcp.example.com",
+                auth_token="shorthand",
+                headers={"Authorization": "Bearer caller-explicit"},
+            )
+        ]
+    )
+    try:
+        await sess.execute("anything")
+    finally:
+        await sess.close()
+
+    cfg = mock_sdk["options_kwargs"][0]["mcp_servers"]["remote"]
+    assert cfg["headers"]["Authorization"] == "Bearer caller-explicit"
+
+
+async def test_mcp_mixed_transports_in_one_session(mock_sdk: dict[str, Any]) -> None:
+    """A list with all three transports lands as one dict keyed by name."""
+    from airframe import McpServerRef
+
+    mock_sdk["client"].receive_response = _make_final_only_receive()
+
+    rt = ClaudeCodeRuntime()
+    sess = rt.session(
+        mcp_servers=[
+            McpServerRef(name="local", transport="stdio", command=["a"]),
+            McpServerRef(name="rest", transport="http", url="https://h.example.com"),
+            McpServerRef(name="feed", transport="sse", url="https://s.example.com"),
+        ]
+    )
+    try:
+        await sess.execute("anything")
+    finally:
+        await sess.close()
+
+    servers = mock_sdk["options_kwargs"][0]["mcp_servers"]
+    assert set(servers.keys()) == {"local", "rest", "feed"}
+    assert servers["local"]["type"] == "stdio"
+    assert servers["rest"]["type"] == "http"
+    assert servers["feed"]["type"] == "sse"
+    # And each external server gets a wildcard allowed_tools entry.
+    allowed = mock_sdk["options_kwargs"][0]["allowed_tools"]
+    assert "mcp__local__*" in allowed
+    assert "mcp__rest__*" in allowed
+    assert "mcp__feed__*" in allowed
+
+
+async def test_mcp_servers_coexist_with_tools(mock_sdk: dict[str, Any]) -> None:
+    """``tools=`` (in-process) + ``mcp_servers=`` (external) merge into one dict."""
+    from airframe import McpServerRef
+
+    mock_sdk["client"].receive_response = _make_final_only_receive()
+
+    rt = ClaudeCodeRuntime()
+    sess = rt.session(
+        tools=[_build_tool()],
+        mcp_servers=[McpServerRef(name="external", transport="stdio", command=["a"])],
+    )
+    try:
+        await sess.execute("anything")
+    finally:
+        await sess.close()
+
+    opts = mock_sdk["options_kwargs"][0]
+    servers = opts["mcp_servers"]
+    assert "airframe_tools" in servers  # in-process FunctionTool server
+    assert "external" in servers
+    # Both the per-tool allowed name and the per-server wildcard appear.
+    allowed = opts["allowed_tools"]
+    assert "mcp__airframe_tools__add" in allowed
+    assert "mcp__external__*" in allowed
+
+
+async def test_mcp_external_name_colliding_with_in_process_raises(
+    mock_sdk: dict[str, Any],
+) -> None:
+    """Reserving the in-process server name catches the collision early."""
+    from airframe import McpServerRef
+    from airframe.adapters.claude_code import AIRFRAME_MCP_SERVER_NAME
+
+    mock_sdk["client"].receive_response = _make_final_only_receive()
+
+    rt = ClaudeCodeRuntime()
+    sess = rt.session(
+        tools=[_build_tool()],
+        mcp_servers=[
+            McpServerRef(name=AIRFRAME_MCP_SERVER_NAME, transport="stdio", command=["x"])
+        ],
+    )
+    try:
+        with pytest.raises(ValueError, match="reserved"):
+            await sess.execute("anything")
+    finally:
+        await sess.close()
+
+
+async def test_mcp_refs_change_between_sessions_reconnects(
+    mock_sdk: dict[str, Any],
+) -> None:
+    """Switching ``mcp_servers=`` builds a fresh client (mcp_servers is connect-bound)."""
+    from airframe import McpServerRef
+
+    mock_sdk["client"].receive_response = _make_final_only_receive()
+
+    rt = ClaudeCodeRuntime()
+    sess1 = rt.session(mcp_servers=[McpServerRef(name="one", transport="stdio", command=["x"])])
+    try:
+        await sess1.execute("turn 1")
+    finally:
+        await sess1.close()
+
+    factory_after_first = mock_sdk["factory"].call_count
+
+    sess2 = rt.session(mcp_servers=[McpServerRef(name="two", transport="stdio", command=["x"])])
+    try:
+        await sess2.execute("turn 2")
+    finally:
+        await sess2.close()
+
+    assert mock_sdk["factory"].call_count > factory_after_first
+
+
+async def test_mcp_refs_change_within_session_invalidates_cache() -> None:
+    """The fingerprint differs when refs change → cache key changes.
+
+    Driven via the helper directly so the test doesn't depend on a
+    second session boundary.
+    """
+    from airframe import McpServerRef
+    from airframe.sessions import _mcp_servers_fingerprint
+
+    a = [McpServerRef(name="one", transport="stdio", command=["x"])]
+    b = [McpServerRef(name="two", transport="stdio", command=["x"])]
+    assert _mcp_servers_fingerprint(a) != _mcp_servers_fingerprint(b)
+    # Same name + transport + command → same fingerprint (deterministic).
+    assert _mcp_servers_fingerprint(a) == _mcp_servers_fingerprint(
+        [McpServerRef(name="one", transport="stdio", command=["x"])]
+    )
+
+
+async def test_mcp_fingerprint_excludes_auth_token_and_header_values() -> None:
+    """Rotating an ``auth_token`` or header value must not change the fingerprint."""
+    from airframe import McpServerRef
+    from airframe.sessions import _mcp_servers_fingerprint
+
+    base = [
+        McpServerRef(
+            name="r",
+            transport="http",
+            url="https://h",
+            headers={"X-Trace": "v1"},
+            auth_token="t1",
+        )
+    ]
+    rotated_token = [
+        McpServerRef(
+            name="r",
+            transport="http",
+            url="https://h",
+            headers={"X-Trace": "v1"},
+            auth_token="t2",
+        )
+    ]
+    rotated_header_value = [
+        McpServerRef(
+            name="r",
+            transport="http",
+            url="https://h",
+            headers={"X-Trace": "v2"},
+            auth_token="t1",
+        )
+    ]
+    assert _mcp_servers_fingerprint(base) == _mcp_servers_fingerprint(rotated_token)
+    assert _mcp_servers_fingerprint(base) == _mcp_servers_fingerprint(rotated_header_value)
+
+    # Adding a new header key DOES change the fingerprint (the key set
+    # participates, just not the values).
+    add_header = [
+        McpServerRef(
+            name="r",
+            transport="http",
+            url="https://h",
+            headers={"X-Trace": "v1", "X-Extra": "new"},
+            auth_token="t1",
+        )
+    ]
+    assert _mcp_servers_fingerprint(base) != _mcp_servers_fingerprint(add_header)
+
+
+async def test_stream_strips_external_mcp_prefix(mock_sdk: dict[str, Any]) -> None:
+    """Tool calls routed through an external MCP server come back with the bare name."""
+    from airframe import McpServerRef
+    from airframe.events import ToolCallStart
+
+    assistant = _FakeAssistantMessage(
+        content=[
+            _FakeToolUseBlock(
+                id="toolu_99",
+                name="mcp__github_remote__search_repos",
+                input={"q": "airframe"},
+            )
+        ]
+    )
+    final = _FakeResultMessage(result="found")
+
+    async def fake_receive() -> Any:
+        yield assistant
+        yield final
+
+    mock_sdk["client"].receive_response = fake_receive
+
+    rt = ClaudeCodeRuntime()
+    sess = rt.session(
+        mcp_servers=[
+            McpServerRef(name="github_remote", transport="http", url="https://example.com")
+        ]
+    )
+    starts: list[ToolCallStart] = []
+    try:
+        async for event in sess.stream("search"):
+            if isinstance(event, ToolCallStart):
+                starts.append(event)
+    finally:
+        await sess.close()
+
+    assert len(starts) == 1
+    # External server's prefix was stripped just like the in-process server's is.
+    assert starts[0].tool_name == "search_repos"
+
+
+async def test_stream_unknown_mcp_prefix_passes_through(mock_sdk: dict[str, Any]) -> None:
+    """Tools from servers not in the registered set keep their raw vendor name.
+
+    The plan's risk-note #6: ``Unrecognised prefixes pass through
+    verbatim so consumers can still inspect raw vendor tool names if
+    needed.`` This protects consumers who reach into
+    :meth:`AgentRuntime.unwrap` and register a server out-of-band.
+    """
+    from airframe.events import ToolCallStart
+
+    assistant = _FakeAssistantMessage(
+        content=[
+            _FakeToolUseBlock(
+                id="toolu_88",
+                name="mcp__not_registered__do_thing",
+                input={},
+            )
+        ]
+    )
+    final = _FakeResultMessage(result="ok")
+
+    async def fake_receive() -> Any:
+        yield assistant
+        yield final
+
+    mock_sdk["client"].receive_response = fake_receive
+
+    rt = ClaudeCodeRuntime()
+    sess = rt.session()  # no tools=, no mcp_servers=
+    starts: list[ToolCallStart] = []
+    try:
+        async for event in sess.stream("anything"):
+            if isinstance(event, ToolCallStart):
+                starts.append(event)
+    finally:
+        await sess.close()
+
+    assert len(starts) == 1
+    assert starts[0].tool_name == "mcp__not_registered__do_thing"
+
+
+def test_mcp_fingerprint_empty_list_is_constant() -> None:
+    """Empty / None refs collapse to the same sentinel so no-op sessions cache."""
+    from airframe.sessions import _mcp_servers_fingerprint
+
+    assert _mcp_servers_fingerprint([]) == "__no_mcp_servers__"

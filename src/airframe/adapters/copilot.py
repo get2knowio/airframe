@@ -85,9 +85,15 @@ from airframe.protocol import (
     RuntimeResult,
     UnsupportedBindingError,
 )
-from airframe.sessions import _check_tools_supported, _split_prompt_parts
+from airframe.sessions import (
+    _check_mcp_servers_supported,
+    _check_tools_supported,
+    _compose_mcp_headers,
+    _mcp_servers_fingerprint,
+    _split_prompt_parts,
+)
 from airframe.thinking import ThinkingMode
-from airframe.tools import FunctionTool
+from airframe.tools import FunctionTool, McpServerRef
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -179,6 +185,20 @@ class CopilotRuntime(AgentRuntime):
     #:   When ``schema=`` is also set, the adapter prepends the existing
     #:   forced ``submit_result`` tool so structured-output coexists
     #:   (Phase 3, Iteration C).
+    #: * ``TOOLS_MCP_STDIO`` / ``TOOLS_MCP_HTTP`` — wired by
+    #:   translating each :class:`McpServerRef` into the matching
+    #:   Copilot dict shape (``{type:"local", command, args}`` for
+    #:   stdio; ``{type:"http", url, headers}`` for http) and passing
+    #:   the keyed dict via :meth:`CopilotClient.create_session`'s
+    #:   ``mcp_servers=`` slot. ``auth_token`` becomes an
+    #:   ``Authorization: Bearer …`` header on http. Tool calls
+    #:   routed through external servers surface as the same
+    #:   :class:`~airframe.events.ToolCallStart` /
+    #:   :class:`~airframe.events.ToolCallResult` events Phase 3
+    #:   already emits — no new filtering needed. ``TOOLS_MCP_SSE``
+    #:   stays False per the implementation plan: SSE refs surface a
+    #:   transport-specific decline pointing consumers at ``http``
+    #:   instead (Phase 4, Iteration C).
     SUPPORTED_FEATURES: ClassVar[frozenset[Feature]] = frozenset(
         {
             Feature.STRUCTURED_OUTPUT_JSON_SCHEMA,
@@ -189,6 +209,8 @@ class CopilotRuntime(AgentRuntime):
             Feature.VISION_INPUT,
             Feature.FILE_INPUT,
             Feature.TOOLS_FUNCTION,
+            Feature.TOOLS_MCP_STDIO,
+            Feature.TOOLS_MCP_HTTP,
         }
     )
 
@@ -304,6 +326,7 @@ class CopilotRuntime(AgentRuntime):
         system: str | None = None,
         model: ProviderModel | None = None,
         tools: list[FunctionTool] | None = None,
+        mcp_servers: list[McpServerRef] | None = None,
         provider_options: Any | None = None,
     ) -> AgentSession:
         """Open a bespoke :class:`CopilotAgentSession`.
@@ -336,12 +359,47 @@ class CopilotRuntime(AgentRuntime):
                 When ``schema=`` is also set, the forced
                 ``submit_result`` tool is prepended to the user's
                 list so structured-output coexists with custom tools.
+            mcp_servers: List of :class:`~airframe.tools.McpServerRef`
+                identifying external MCP servers the model may invoke.
+                Stdio + http transports translate to the matching
+                Copilot dict shape (``{type:"local", command, args}``
+                or ``{type:"http", url, headers}``) and pass via
+                :meth:`CopilotClient.create_session`'s ``mcp_servers=``
+                kwarg. SSE refs raise
+                :class:`~airframe.errors.UnsupportedFeatureError`
+                with an actionable pointer at the ``http`` transport
+                — the implementation plan declines SSE on Copilot per
+                Phase 4 Iteration C. ``tools=`` and ``mcp_servers=``
+                coexist; they pass through separate ``create_session``
+                kwargs so no collision is possible at the slot level.
             provider_options: Reserved for Phase 2+ (currently unused).
         """
         _check_tools_supported(
             tools,
             adapter_label=self.label,
             feature_supported=self.supports(Feature.TOOLS_FUNCTION),
+        )
+        # Phase 4 Iteration C — Copilot supports stdio + http natively;
+        # SSE is declined per the plan. Surface a Copilot-specific
+        # message pointing at the ``http`` transport (the wire shape
+        # is similar enough that switching is usually a one-line
+        # change in the consumer's McpServerRef construction) before
+        # the shared capability gate runs with its generic message.
+        for ref in mcp_servers or ():
+            if ref.transport == "sse":
+                raise UnsupportedFeatureError(
+                    f"{self.label}: McpServerRef(name={ref.name!r}, "
+                    f"transport='sse'): the implementation plan declines "
+                    f"SSE on Copilot for Phase 4. Switch the ref to "
+                    f"transport='http' (Copilot serves remote MCP servers "
+                    f"over HTTP). Check runtime.supports(Feature.TOOLS_MCP_SSE) "
+                    f"before passing an sse-transport ref.",
+                    feature=Feature.TOOLS_MCP_SSE,
+                )
+        _check_mcp_servers_supported(
+            mcp_servers,
+            adapter_label=self.label,
+            supports=self.supports,
         )
         # provider_options accepted but unused — Phase 2+ fills each
         # ProviderOptions dataclass as the corresponding feature lands.
@@ -353,6 +411,7 @@ class CopilotRuntime(AgentRuntime):
             system=system,
             model_id=model_id,
             tools=tools,
+            mcp_servers=mcp_servers,
         )
 
     async def list_models(self) -> list[ModelInfo]:
@@ -553,6 +612,7 @@ class CopilotAgentSession:
         system: str | None,
         model_id: str,
         tools: list[FunctionTool] | None = None,
+        mcp_servers: list[McpServerRef] | None = None,
     ) -> None:
         self._runtime = runtime
         self._resume = resume
@@ -581,6 +641,12 @@ class CopilotAgentSession:
         # schema and reasoning-effort follow).
         self._tools: list[FunctionTool] = list(tools or [])
         self._tools_fingerprint = _copilot_tools_fingerprint(self._tools)
+        # Phase 4 Iteration C: external MCP servers. Translated lazily
+        # at create_session() time and passed via the SDK's
+        # ``mcp_servers=`` kwarg. The fingerprint joins the cache key
+        # so a refs-change forces a session rebuild.
+        self._mcp_servers: list[McpServerRef] = list(mcp_servers or [])
+        self._mcp_servers_fingerprint = _mcp_servers_fingerprint(self._mcp_servers)
 
     async def execute(
         self,
@@ -814,14 +880,16 @@ class CopilotAgentSession:
         )
         reasoning_effort = _translate_thinking_for_copilot(thinking)
         tools_fragment = f"tools={self._tools_fingerprint}"
-        cache_key = f"{schema_fragment}|effort={reasoning_effort}|{tools_fragment}"
+        mcp_fragment = f"mcp={self._mcp_servers_fingerprint}"
+        cache_key = f"{schema_fragment}|effort={reasoning_effort}|{tools_fragment}|{mcp_fragment}"
         if self._session is not None and self._session_key == cache_key:
             return self._session
 
-        # Schema OR thinking OR tools fingerprint changed (or first
-        # turn) — tear down any stale session before rebuilding so we
-        # don't leak it. ``reasoning_effort`` and ``tools=`` are baked
-        # at create_session time, so both join schema in the cache key.
+        # Schema OR thinking OR tools OR mcp_servers fingerprint
+        # changed (or first turn) — tear down any stale session before
+        # rebuilding so we don't leak it. ``reasoning_effort``,
+        # ``tools=``, and ``mcp_servers=`` are all baked at
+        # create_session time, so each joins schema in the cache key.
         await self._tear_down_session()
 
         client = await self._runtime._ensure_client()
@@ -834,6 +902,8 @@ class CopilotAgentSession:
         }
         if reasoning_effort is not None:
             create_kwargs["reasoning_effort"] = reasoning_effort
+        if self._mcp_servers:
+            create_kwargs["mcp_servers"] = _translate_mcp_servers_for_copilot(self._mcp_servers)
 
         # Assemble the tools list: forced ``submit_result`` first (when
         # schema= is set) so the model sees the structured-output gate
@@ -1077,6 +1147,64 @@ def _translate_thinking_for_copilot(thinking: ThinkingMode) -> str | None:
         f"copilot: unrecognised thinking mode {thinking!r}",
         feature="reasoning_effort",
     )
+
+
+def _translate_mcp_servers_for_copilot(
+    refs: list[McpServerRef],
+) -> dict[str, dict[str, Any]]:
+    """Translate :class:`McpServerRef` list into Copilot's ``mcp_servers``
+    dict shape.
+
+    :meth:`CopilotClient.create_session` accepts a dict keyed by server
+    name. Each value is the wire shape the Copilot CLI consumes:
+
+    * **stdio** → ``{"type": "local", "command": <head>, "args": <tail>}``.
+      The Copilot CLI's enum value for local-subprocess transport is
+      ``"local"`` (not ``"stdio"`` — that's what the typeddict alias
+      is named after on the SDK side, but the wire enum is
+      :class:`MCPServerConfigLocalType.LOCAL`). Splits the airframe
+      argv list at the head/tail boundary; ``args`` is always emitted
+      (Copilot's wire schema requires the field, even if empty).
+    * **http** → ``{"type": "http", "url": <url>, "headers": <merged>}``.
+      ``auth_token`` becomes ``Authorization: Bearer <token>`` via
+      :func:`~airframe.sessions._compose_mcp_headers`; the caller's
+      explicit ``headers={"Authorization": ...}`` wins on collision.
+      ``headers`` key is dropped when both are absent so the wire
+      payload stays minimal.
+    * **sse** → raises. The Copilot SSE decline is enforced at the
+      :meth:`CopilotRuntime.session` boundary with an actionable
+      message before this translator runs; if it ever sees one, that
+      indicates a bug in the gating layer (defensive raise).
+
+    Returns a fresh dict each call — never mutates the caller's refs.
+    """
+    out: dict[str, dict[str, Any]] = {}
+    for ref in refs:
+        if ref.transport == "stdio":
+            # __post_init__ guarantees command is a non-empty list.
+            assert ref.command
+            cfg: dict[str, Any] = {
+                "type": "local",
+                "command": ref.command[0],
+                "args": list(ref.command[1:]),
+            }
+            out[ref.name] = cfg
+        elif ref.transport == "http":
+            assert ref.url
+            cfg = {"type": "http", "url": ref.url}
+            merged = _compose_mcp_headers(ref)
+            if merged:
+                cfg["headers"] = merged
+            out[ref.name] = cfg
+        else:  # pragma: no cover — defensive; session() gates SSE upstream
+            raise UnsupportedFeatureError(
+                f"copilot: McpServerRef(name={ref.name!r}, "
+                f"transport={ref.transport!r}): SSE transport is not "
+                f"wired on Copilot per the implementation plan. Use "
+                f"transport='http' instead.",
+                feature=Feature.TOOLS_MCP_SSE,
+            )
+    return out
 
 
 def _copilot_tools_fingerprint(tools: list[FunctionTool]) -> str:

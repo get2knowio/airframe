@@ -71,9 +71,13 @@ from airframe.protocol import (
     RuntimeResult,
     UnsupportedBindingError,
 )
-from airframe.sessions import _check_tools_supported, _split_prompt_parts
+from airframe.sessions import (
+    _MCP_TRANSPORT_TO_FEATURE,
+    _check_tools_supported,
+    _split_prompt_parts,
+)
 from airframe.thinking import ThinkingMode
-from airframe.tools import FunctionTool
+from airframe.tools import FunctionTool, McpServerRef
 
 logger = logging.getLogger(__name__)
 
@@ -301,6 +305,7 @@ class OpenAICompatibleRuntime(AgentRuntime):
         system: str | None = None,
         model: ProviderModel | None = None,
         tools: list[FunctionTool] | None = None,
+        mcp_servers: list[McpServerRef] | None = None,
         provider_options: Any | None = None,
     ) -> AgentSession:
         """Open a bespoke :class:`OpenAICompatibleSession`.
@@ -326,6 +331,22 @@ class OpenAICompatibleRuntime(AgentRuntime):
                 runaway is surfaced as
                 :class:`~airframe.errors.RuntimeProtocolError`).
                 Phase 3 Iteration B.
+            mcp_servers: Accepted for protocol parity but the Chat
+                Completions wire shape this base wraps has no MCP-as-
+                tool slot — that translation is Responses-API only.
+                Non-empty list raises
+                :class:`~airframe.errors.UnsupportedFeatureError`
+                pointing at the (future) ``OpenAIResponsesRuntime``,
+                which would be the path for MCP on the OpenAI side.
+                The decline is **permanent** for the chat-completions
+                family (Phase 4 Iteration D); the
+                :attr:`~airframe.errors.UnsupportedFeatureError.feature`
+                attribute carries the first ref's transport so
+                consumer code branching on
+                :data:`~airframe.features.Feature.TOOLS_MCP_STDIO` /
+                :data:`~airframe.features.Feature.TOOLS_MCP_HTTP` /
+                :data:`~airframe.features.Feature.TOOLS_MCP_SSE`
+                still works.
 
         Raises:
             UnsupportedFeatureError: when ``resume`` is non-None.
@@ -344,6 +365,26 @@ class OpenAICompatibleRuntime(AgentRuntime):
             adapter_label=self.label,
             feature_supported=self.supports(Feature.TOOLS_FUNCTION),
         )
+        if mcp_servers:
+            # Phase 4 Iteration D — the chat-completions wire shape
+            # this base wraps has no MCP-as-tool slot. The Responses
+            # API does, but that's a separate adapter family. Surface
+            # an OpenAI-compat-specific decline pointing at the
+            # future direct-API option instead of the generic
+            # shared-helper message.
+            first = mcp_servers[0]
+            feature = _MCP_TRANSPORT_TO_FEATURE.get(first.transport, Feature.TOOLS_MCP_STDIO)
+            raise UnsupportedFeatureError(
+                f"{type(self).__name__}.session(mcp_servers=...) is not "
+                f"supported — Chat Completions has no MCP-as-tool wire "
+                f"shape; that lives on the Responses API. A future "
+                f"``OpenAIResponsesRuntime`` (separate from this compat "
+                f"family) could translate to the Responses-API "
+                f'``{{"type": "mcp", ...}}`` tool shape. Check '
+                f"runtime.supports(Feature.TOOLS_MCP_STDIO) before "
+                f"passing mcp_servers=.",
+                feature=feature,
+            )
         # provider_options accepted but unused — Phase 2+ fills each
         # ProviderOptions dataclass as the corresponding feature lands.
         del provider_options

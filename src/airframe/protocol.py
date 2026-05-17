@@ -44,7 +44,7 @@ if TYPE_CHECKING:
     from airframe.inputs import Prompt
     from airframe.models import ModelInfo
     from airframe.thinking import ThinkingMode
-    from airframe.tools import FunctionTool
+    from airframe.tools import FunctionTool, McpServerRef
 
 T = TypeVar("T")
 
@@ -342,6 +342,7 @@ class AgentRuntime(Protocol):
         system: str | None = None,
         model: ProviderModel | None = None,
         tools: list[FunctionTool] | None = None,
+        mcp_servers: list[McpServerRef] | None = None,
         provider_options: Any | None = None,
     ) -> AgentSession:
         """Open a multi-turn session against this runtime.
@@ -386,6 +387,21 @@ class AgentRuntime(Protocol):
                 ``TOOLS_FUNCTION`` flag is False raise
                 :class:`~airframe.errors.UnsupportedFeatureError` on
                 a non-None ``tools=``.
+            mcp_servers: List of :class:`~airframe.tools.McpServerRef`
+                identifying Model Context Protocol servers the model
+                may invoke tools on for the session's lifetime.
+                ``None`` (the default) means no MCP servers. Phase 4
+                of the implementation plan flips the per-transport
+                :data:`~airframe.features.Feature.TOOLS_MCP_STDIO` /
+                :data:`~airframe.features.Feature.TOOLS_MCP_HTTP` /
+                :data:`~airframe.features.Feature.TOOLS_MCP_SSE`
+                flags True per adapter (Claude — all three; Copilot
+                — stdio + http; Codex + OpenAI-compat decline all).
+                Adapters whose transport flag is False raise
+                :class:`~airframe.errors.UnsupportedFeatureError` on
+                a ref of that transport. ``tools=`` and
+                ``mcp_servers=`` coexist — both end up routed through
+                the same vendor MCP slot.
             provider_options: Vendor-specific extension namespace
                 (see :mod:`airframe.options`). Accepted in Phase 1
                 but unused — each :class:`ProviderOptions` dataclass

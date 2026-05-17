@@ -38,8 +38,8 @@ The associated APIs:
   ``prompt=``. Phase 2.
 * :data:`Feature.TOOLS_FUNCTION` — caller-defined function tools via
   ``session(tools=[...])``. Phase 3.
-* :data:`Feature.TOOLS_MCP_STDIO` / ``_HTTP`` / ``_IN_PROCESS`` — MCP
-  server registration variants. Phase 4.
+* :data:`Feature.TOOLS_MCP_STDIO` / ``_HTTP`` / ``_SSE`` / ``_IN_PROCESS``
+  — MCP server registration variants. Phase 4.
 * :data:`Feature.PERMISSION_CALLBACK` — pre-tool-execution permission
   callback. Phase 5.
 * :data:`Feature.LIFECYCLE_HOOKS` — typed event observation. Phase 5.
@@ -115,6 +115,9 @@ class Feature(StrEnum):
 
     TOOLS_MCP_HTTP = "tools_mcp_http"
     """Registers HTTP-transport MCP servers via ``session(mcp_servers=...)``."""
+
+    TOOLS_MCP_SSE = "tools_mcp_sse"
+    """Registers SSE-transport MCP servers via ``session(mcp_servers=...)``."""
 
     TOOLS_MCP_IN_PROCESS = "tools_mcp_in_process"
     """Registers in-process MCP servers (zero IPC overhead)."""

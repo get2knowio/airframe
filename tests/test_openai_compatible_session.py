@@ -1124,3 +1124,91 @@ async def test_stream_iteration_cap_raises_runtime_protocol_error(
     finally:
         await sess.close()
     assert mock_openai.chat.completions.create.await_count == MAX_TOOL_ITERATIONS
+
+
+# ---------------------------------------------------------------------------
+# MCP server refs (Phase 4 Iteration D — OpenAI-compat declines)
+# ---------------------------------------------------------------------------
+
+
+async def test_session_mcp_servers_declines_with_responses_api_pointer() -> None:
+    """``mcp_servers=`` raises UnsupportedFeatureError with the
+    Responses-API pointer.
+
+    Iteration D replaces the generic shared-helper decline with an
+    OpenAI-compat-specific message pointing at a future
+    ``OpenAIResponsesRuntime``. The decline is **permanent** for the
+    chat-completions family — Chat Completions has no MCP-as-tool
+    wire shape; that lives on the Responses API.
+    """
+    from airframe import McpServerRef
+    from airframe.errors import UnsupportedFeatureError
+
+    rt = _make_runtime()
+    with pytest.raises(UnsupportedFeatureError) as exc_info:
+        rt.session(
+            mcp_servers=[
+                McpServerRef(
+                    name="everything",
+                    transport="stdio",
+                    command=["uvx", "mcp-server-everything"],
+                )
+            ]
+        )
+    assert exc_info.value.feature == Feature.TOOLS_MCP_STDIO
+    message = str(exc_info.value)
+    text = message.lower()
+    # Pin the actionable pointer.
+    assert "responses" in text
+    assert "chat completions" in text
+    # Mentions the future direct-API class so consumers know the path.
+    assert "openairesponsesruntime" in text.replace(" ", "")
+
+
+async def test_session_mcp_servers_decline_carries_transport_feature() -> None:
+    """The ``.feature`` attribute matches the *first* ref's transport."""
+    from airframe import McpServerRef
+    from airframe.errors import UnsupportedFeatureError
+
+    rt = _make_runtime()
+    cases: list[tuple[McpServerRef, Feature]] = [
+        (
+            McpServerRef(name="s", transport="stdio", command=["x"]),
+            Feature.TOOLS_MCP_STDIO,
+        ),
+        (
+            McpServerRef(name="h", transport="http", url="https://h"),
+            Feature.TOOLS_MCP_HTTP,
+        ),
+        (
+            McpServerRef(name="e", transport="sse", url="https://h/sse"),
+            Feature.TOOLS_MCP_SSE,
+        ),
+    ]
+    for ref, expected_feature in cases:
+        with pytest.raises(UnsupportedFeatureError) as exc_info:
+            rt.session(mcp_servers=[ref])
+        assert exc_info.value.feature == expected_feature, (
+            f"expected feature={expected_feature.name!r} for {ref.transport!r}; "
+            f"got {exc_info.value.feature!r}"
+        )
+
+
+async def test_session_mcp_servers_none_or_empty_still_opens_cleanly() -> None:
+    """``mcp_servers=None`` / ``mcp_servers=[]`` are both no-ops."""
+    rt = _make_runtime()
+    sess_none = rt.session(mcp_servers=None)
+    sess_empty = rt.session(mcp_servers=[])
+    assert sess_none is not None
+    assert sess_empty is not None
+    await sess_none.close()
+    await sess_empty.close()
+
+
+def test_openai_compat_declines_every_mcp_transport() -> None:
+    """The chat-completions family permanently declines every transport flag."""
+    rt = _make_runtime()
+    assert rt.supports(Feature.TOOLS_MCP_STDIO) is False
+    assert rt.supports(Feature.TOOLS_MCP_HTTP) is False
+    assert rt.supports(Feature.TOOLS_MCP_SSE) is False
+    assert rt.supports(Feature.TOOLS_MCP_IN_PROCESS) is False

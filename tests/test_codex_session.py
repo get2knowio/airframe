@@ -867,3 +867,102 @@ def test_codex_runtime_does_not_declare_tools_function() -> None:
     tool-registration channel."""
     rt = CodexRuntime()
     assert rt.supports(Feature.TOOLS_FUNCTION) is False
+
+
+# ---------------------------------------------------------------------------
+# MCP server refs (Phase 4 Iteration D — Codex declines)
+# ---------------------------------------------------------------------------
+
+
+async def test_session_mcp_servers_declines_with_cli_config_pointer(
+    mock_sdk: dict[str, Any],
+) -> None:
+    """``mcp_servers=`` raises UnsupportedFeatureError with the
+    ``~/.codex/config.toml`` workaround.
+
+    Iteration D replaces the generic shared-helper decline with a
+    Codex-specific message symmetric with Phase 3 Iteration D's
+    ``tools=`` decline. The decline is **permanent** — the Codex
+    Python SDK has no programmatic MCP-registration channel.
+    """
+    from airframe import McpServerRef
+    from airframe.errors import UnsupportedFeatureError
+
+    rt = CodexRuntime()
+    with pytest.raises(UnsupportedFeatureError) as exc_info:
+        rt.session(
+            mcp_servers=[
+                McpServerRef(
+                    name="everything",
+                    transport="stdio",
+                    command=["uvx", "mcp-server-everything"],
+                )
+            ]
+        )
+    # The first ref's transport surfaces on .feature so consumer code
+    # branching on Feature.TOOLS_MCP_STDIO still works.
+    assert exc_info.value.feature == Feature.TOOLS_MCP_STDIO
+    message = str(exc_info.value).lower()
+    # Pin the actionable text — message rot would defeat the whole
+    # point of the swap.
+    assert "config" in message
+    assert "codex" in message
+    assert "[[mcp_servers]]" in message
+
+
+async def test_session_mcp_servers_decline_carries_transport_feature(
+    mock_sdk: dict[str, Any],
+) -> None:
+    """The ``.feature`` attribute matches the *first* ref's transport.
+
+    Plan requirement (Iteration D): "the first ref's transport, since
+    the Codex Python SDK declines all transports equally". Verified
+    for each transport variant.
+    """
+    from airframe import McpServerRef
+    from airframe.errors import UnsupportedFeatureError
+
+    rt = CodexRuntime()
+    cases: list[tuple[McpServerRef, Feature]] = [
+        (
+            McpServerRef(name="s", transport="stdio", command=["x"]),
+            Feature.TOOLS_MCP_STDIO,
+        ),
+        (
+            McpServerRef(name="h", transport="http", url="https://h"),
+            Feature.TOOLS_MCP_HTTP,
+        ),
+        (
+            McpServerRef(name="e", transport="sse", url="https://h/sse"),
+            Feature.TOOLS_MCP_SSE,
+        ),
+    ]
+    for ref, expected_feature in cases:
+        with pytest.raises(UnsupportedFeatureError) as exc_info:
+            rt.session(mcp_servers=[ref])
+        assert exc_info.value.feature == expected_feature, (
+            f"expected feature={expected_feature.name!r} for {ref.transport!r}; "
+            f"got {exc_info.value.feature!r}"
+        )
+
+
+async def test_session_mcp_servers_none_or_empty_still_opens_cleanly(
+    mock_sdk: dict[str, Any],
+) -> None:
+    """``mcp_servers=None`` / ``mcp_servers=[]`` are both no-ops."""
+    rt = CodexRuntime()
+    sess_none = rt.session(mcp_servers=None)
+    sess_empty = rt.session(mcp_servers=[])
+    assert sess_none is not None
+    assert sess_empty is not None
+    await sess_none.close()
+    await sess_empty.close()
+
+
+def test_codex_runtime_declines_every_mcp_transport() -> None:
+    """Codex permanently declines every transport flag."""
+    rt = CodexRuntime()
+    assert rt.supports(Feature.TOOLS_MCP_STDIO) is False
+    assert rt.supports(Feature.TOOLS_MCP_HTTP) is False
+    assert rt.supports(Feature.TOOLS_MCP_SSE) is False
+    assert rt.supports(Feature.TOOLS_MCP_IN_PROCESS) is False

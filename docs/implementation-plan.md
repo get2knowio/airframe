@@ -35,7 +35,7 @@ Phase 2 — Inputs & reasoning
 Phase 3 — Function tools (Tier 1)
    │  tools= on AgentSession; tool-result round-trip
    ▼
-Phase 4 — MCP server refs (Tier 2)            [gated on divergence signal]
+Phase 4 — MCP server refs (Tier 2)            [✅ shipped]
    │
    ▼
 Phase 5 — Permission, hooks, budget
@@ -805,8 +805,11 @@ or to roll straight into Phase 4 (MCP server refs).
 **Goal.** Roadmap §3 P2 "Tool / MCP server registration" — the
 Tier-2 half.
 
-**Status: signal-gated.** This phase lands only when the divergence
-signal in the next paragraph fires.
+**Status: ✅ complete.** Shipped per (a) below on the
+`phase-4-mcp-server-refs` branch. Iterations A–D landed sequentially;
+all four adapters report their final truth (Claude all three
+transports, Copilot stdio + http, Codex + OpenAI-compat permanent
+declines with vendor-specific actionable messages).
 
 **Divergence signal.** Today: Claude (in-process + stdio + sse +
 http), Copilot (stdio + http). Codex has MCP plumbing only via CLI
@@ -875,9 +878,8 @@ def session(
 ### Iteration breakdown
 
 Phase 4 lands in four iterations, mirroring Phase 3's A–D shape.
-Status: pending; awaiting consumer signal per the gating discussion
-above. When the signal fires, work resumes from a fresh
-`phase-4-mcp-server-refs` branch.
+Status: **Phase 4 complete** on the `phase-4-mcp-server-refs`
+branch — Iterations A through D all green.
 
 Coverage matrix (target after Iteration D):
 
@@ -888,7 +890,7 @@ Coverage matrix (target after Iteration D):
 | `CodexRuntime` | ✗ | ✗ | ✗ | Permanent decline — MCP wired through `~/.codex/config.toml` only. |
 | `OpenAICompatibleRuntime` | ✗ | ✗ | ✗ | Permanent decline on this family — MCP-as-tool is Responses-only; a future `OpenAIResponsesRuntime` could wire it. |
 
-#### Iteration A — Protocol scaffolding (no behaviour)
+#### Iteration A — Protocol scaffolding (no behaviour) ✅
 
 Lock the public surface; defer the wiring.
 
@@ -928,7 +930,7 @@ Lock the public surface; defer the wiring.
 `session()` signature; non-None list raises immediately. No
 per-adapter behaviour yet.
 
-#### Iteration B — Wire Claude (broadest transport coverage)
+#### Iteration B — Wire Claude (broadest transport coverage) ✅
 
 Claude's SDK has typed configs for all three transports
 (`McpStdioServerConfig` / `McpHttpServerConfig` /
@@ -966,7 +968,7 @@ pattern for Copilot to follow.
 **Stopping point.** Claude fully wired. Copilot still raises on
 `mcp_servers=`.
 
-#### Iteration C — Wire Copilot (stdio + http; decline SSE)
+#### Iteration C — Wire Copilot (stdio + http; decline SSE) ✅
 
 Copilot's SDK has stdio + http but no SSE. The decline message for
 SSE refs needs to be specific.
@@ -997,7 +999,7 @@ SSE refs needs to be specific.
 truth. Codex + OpenAI-compat still accept `mcp_servers=` and
 ignore it — fixed in D.
 
-#### Iteration D — Codex + OpenAI-compat declination, probe, wrap-up
+#### Iteration D — Codex + OpenAI-compat declination, probe, wrap-up ✅
 
 - **Codex.** `CodexRuntime.session(mcp_servers=<non-empty>)` raises
   `UnsupportedFeatureError(feature=Feature.TOOLS_MCP_STDIO)` (the

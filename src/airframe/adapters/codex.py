@@ -84,9 +84,9 @@ from airframe.protocol import (
     RuntimeResult,
     UnsupportedBindingError,
 )
-from airframe.sessions import _split_prompt_parts
+from airframe.sessions import _MCP_TRANSPORT_TO_FEATURE, _split_prompt_parts
 from airframe.thinking import ThinkingMode
-from airframe.tools import FunctionTool
+from airframe.tools import FunctionTool, McpServerRef
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -425,6 +425,7 @@ class CodexRuntime(AgentRuntime):
         system: str | None = None,
         model: ProviderModel | None = None,
         tools: list[FunctionTool] | None = None,
+        mcp_servers: list[McpServerRef] | None = None,
         provider_options: Any | None = None,
     ) -> AgentSession:
         """Open a bespoke :class:`CodexAgentSession`.
@@ -460,6 +461,20 @@ class CodexRuntime(AgentRuntime):
                 API and consumers branching on
                 ``runtime.supports(Feature.TOOLS_FUNCTION)`` should
                 treat Codex as a tools-incapable runtime.
+            mcp_servers: Accepted for protocol parity but the Codex
+                Python SDK has no programmatic MCP-registration
+                channel — non-empty list raises
+                :class:`~airframe.errors.UnsupportedFeatureError`
+                pointing consumers at the ``[[mcp_servers]]`` block
+                in ``~/.codex/config.toml`` instead. The decline is
+                **permanent** (Phase 4 Iteration D); the
+                :attr:`~airframe.errors.UnsupportedFeatureError.feature`
+                attribute carries the first ref's transport so
+                consumer code branching on
+                :data:`~airframe.features.Feature.TOOLS_MCP_STDIO` /
+                :data:`~airframe.features.Feature.TOOLS_MCP_HTTP` /
+                :data:`~airframe.features.Feature.TOOLS_MCP_SSE`
+                still works.
             provider_options: Reserved for Phase 2+ (currently unused).
         """
         if tools:
@@ -471,6 +486,24 @@ class CodexRuntime(AgentRuntime):
                 f"Check runtime.supports(Feature.TOOLS_FUNCTION) before "
                 f"passing tools=.",
                 feature=Feature.TOOLS_FUNCTION,
+            )
+        if mcp_servers:
+            # Phase 4 Iteration D — Codex declines MCP registration the
+            # same way it declines function tools: its Python SDK
+            # surface has no MCP-registration channel. Point consumers
+            # at the CLI config-file workaround instead of the generic
+            # shared-helper message.
+            first = mcp_servers[0]
+            feature = _MCP_TRANSPORT_TO_FEATURE.get(first.transport, Feature.TOOLS_MCP_STDIO)
+            raise UnsupportedFeatureError(
+                f"{self.label}: MCP servers cannot be wired through the "
+                f"Codex Python SDK — its surface has no programmatic "
+                f"MCP-registration channel. Configure MCP servers through "
+                f"the codex CLI's config file "
+                f"(``~/.codex/config.toml``'s ``[[mcp_servers]]`` block) "
+                f"instead. Check runtime.supports(Feature.TOOLS_MCP_STDIO) "
+                f"before passing mcp_servers=.",
+                feature=feature,
             )
         # provider_options accepted but unused — Phase 2+ fills each
         # ProviderOptions dataclass as the corresponding feature lands.

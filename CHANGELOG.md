@@ -6,13 +6,268 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-Phase 3 of the [implementation plan](docs/implementation-plan.md) is
-complete — function tools (Tier 1). Iteration A landed the
-protocol-surface shape locks; Iteration B wired the OpenAI-compatible
-family; Iteration C wired Claude + Copilot through their respective
-SDK tool-registration channels; Iteration D codifies Codex's permanent
-decline and ships the multi-provider probe. Ready for release as
-``v0.6.0`` or to roll straight into Phase 4 (MCP server refs).
+**Phase 4 of the [implementation plan](docs/implementation-plan.md) is
+complete — MCP server references (Tier 2).** Iteration A landed the
+protocol-surface shape locks (the :class:`McpServerRef` dataclass,
+the new :data:`Feature.TOOLS_MCP_SSE` enum member, and the
+``mcp_servers=`` kwarg on every adapter's :meth:`session` signature
+gated by the shared capability helper). Iteration B wired
+:class:`ClaudeCodeRuntime` — all three transports (stdio, http, sse).
+Iteration C wired :class:`CopilotRuntime` — stdio + http natively;
+SSE declined per the plan with an actionable "switch to http"
+message. Iteration D codifies the Codex + OpenAI-compat permanent
+declines with vendor-specific actionable pointers (``~/.codex/config.toml``
+for Codex, a future ``OpenAIResponsesRuntime`` for OpenAI-compat),
+ships the multi-provider probe, and pins the final transport matrix.
+Ready for release as ``v0.7.0`` or to roll straight into Phase 5
+(permission, hooks, budget).
+
+### Added (Phase 4, Iteration D — declines, probe, wrap-up)
+
+- `CodexRuntime.session(mcp_servers=<non-empty>)` raises
+  :class:`~airframe.errors.UnsupportedFeatureError` with a
+  Codex-specific message pointing consumers at the
+  ``[[mcp_servers]]`` block in ``~/.codex/config.toml``. Symmetric
+  with Phase 3 Iteration D's ``tools=`` decline — the decline is
+  **permanent**, not a "wait for the next iteration" gate. The
+  :attr:`~airframe.errors.UnsupportedFeatureError.feature` attribute
+  carries the *first ref's transport* so consumer code branching on
+  ``Feature.TOOLS_MCP_STDIO`` / ``TOOLS_MCP_HTTP`` / ``TOOLS_MCP_SSE``
+  still works.
+- `OpenAICompatibleRuntime.session(mcp_servers=<non-empty>)` raises
+  with an OpenAI-compat-specific message: ``"Chat Completions has no
+  MCP-as-tool wire shape; that lives on the Responses API. A future
+  ``OpenAIResponsesRuntime`` (separate from this compat family) could
+  translate to the Responses-API ``{"type": "mcp", ...}`` tool
+  shape."`` Pointer to the future direct-API option. Same
+  first-ref-transport on ``.feature`` as Codex.
+- `examples/probe_mcp.py` — multi-provider live probe. Registers
+  one external stdio MCP server (default:
+  ``@modelcontextprotocol/server-everything`` launched via
+  ``npx``), prompts the model to list the server's tools (and call
+  ``echo`` if available), and prints the
+  :class:`~airframe.events.ToolCallStart` /
+  :class:`~airframe.events.ToolCallResult` /
+  :class:`~airframe.events.TextDelta` /
+  :class:`~airframe.events.TurnComplete` sequence from
+  :meth:`AgentSession.stream`. Defaults to ``claude`` (broadest
+  transport coverage); accepts
+  ``--provider claude|github-copilot|codex|opencode`` and
+  ``--transport stdio|http|sse``. Adapters that decline surface
+  their message verbatim — probe-as-docs, same pattern Phase 3
+  used.
+- 8 new unit tests in `tests/test_codex_session.py` and
+  `tests/test_openai_compatible_session.py` covering per-adapter
+  decline messages (both content *and* ``feature=`` attribute),
+  per-transport feature mapping, ``mcp_servers=None`` /
+  ``mcp_servers=[]`` no-op paths, and the
+  ``supports(TOOLS_MCP_*) == False`` capability matrix on both
+  adapters.
+- `tests/test_features.py::test_mcp_transports_final_matrix` pins
+  the Phase-4 endgame table: Claude all three transports, Copilot
+  stdio + http, Codex + OpenAI-compat none. The
+  ``TOOLS_MCP_IN_PROCESS`` flag stays False on every adapter — Phase
+  4 doesn't expose ``transport="in_process"`` on
+  :class:`McpServerRef`; the Phase 3 in-process MCP path on Claude
+  is internal plumbing for ``tools=`` rather than a user-facing
+  capability.
+
+### Changed (Phase 4, Iteration D)
+
+- `CodexRuntime` and `OpenAICompatibleRuntime` no longer call
+  :func:`airframe.sessions._check_mcp_servers_supported`. Both now
+  raise their vendor-specific declines inline (mirroring the way
+  Phase 3 Iteration D unhooked Codex from
+  :func:`~airframe.sessions._check_tools_supported`). The shared
+  helper still services Claude and Copilot (their transport flags
+  flipped True in Iterations B and C mean the helper short-circuits
+  to a no-op).
+- `docs/implementation-plan.md` — Phase 4 marked ✅ complete; each
+  iteration heading marked ✅; dependency-graph annotation updated
+  from ``[gated on divergence signal]`` to ``[✅ shipped]``.
+
+### Added (Phase 4, Iteration C — Copilot MCP wiring)
+
+- `_translate_mcp_servers_for_copilot(refs)` builds the dict shape
+  :meth:`CopilotClient.create_session`'s ``mcp_servers=`` slot
+  expects. **Stdio** maps to ``{"type": "local", "command": <head>,
+  "args": <tail>}`` — Copilot's wire enum is ``"local"``, not
+  ``"stdio"``, and ``args`` is always emitted (the schema requires
+  it). **Http** maps to ``{"type": "http", "url": <url>, "headers":
+  <merged>}``. **Sse** raises defensively — the SSE decline is
+  enforced at the :meth:`CopilotRuntime.session` boundary so the
+  translator should never see one.
+- `CopilotAgentSession(mcp_servers=...)` — accepted on the session
+  factory; translated lazily at :meth:`_ensure_session` and passed
+  via :meth:`CopilotClient.create_session`'s ``mcp_servers=`` kwarg.
+  Co-exists with ``tools=`` (FunctionTool) and the forced
+  ``submit_result`` tool — the three-way combination passes through
+  separate ``create_session`` kwargs, no shadowing.
+- `_ensure_session` cache key gains an ``mcp=<fingerprint>``
+  fragment (Copilot bakes ``mcp_servers`` at create-session time,
+  same as ``tools=`` and ``reasoning_effort``). Refs change → session
+  destroy + rebuild.
+- `Feature.TOOLS_MCP_STDIO` / `TOOLS_MCP_HTTP` flipped True on
+  :attr:`CopilotRuntime.SUPPORTED_FEATURES`. ``TOOLS_MCP_SSE`` stays
+  **False per the plan**; refs of that transport surface a
+  Copilot-specific :class:`~airframe.errors.UnsupportedFeatureError`
+  pointing consumers at the ``http`` transport. The decline runs
+  *before* the shared capability gate so the consumer gets the
+  actionable message rather than the generic one.
+- 12 new unit tests in `tests/test_copilot_session.py` covering
+  stdio→``local`` translation (with the always-emit-``args``
+  invariant), http with bearer-auth + header merging precedence,
+  the SSE-rejection-with-http-hint path, mixed-transport sessions,
+  ``tools=`` + ``mcp_servers=`` coexistence, the three-way
+  ``submit_result`` + custom tools + MCP combination, the
+  no-``mcp_servers=`` ⇒ kwarg-omitted path, cache invalidation on
+  refs-change, and the per-flag capability matrix.
+
+### Changed (Phase 4, Iteration C)
+
+- **Shared helpers extracted to `airframe.sessions`.**
+  `_mcp_servers_fingerprint(refs)` and `_compose_mcp_headers(ref)`
+  moved out of `claude_code.py` so Copilot reuses the same
+  secret-free fingerprint logic and the same
+  ``Authorization: Bearer`` shorthand-with-caller-override merge.
+  Previous Claude callers updated; tests updated to import from the
+  new home.
+- `tests/test_features.py`:
+  `test_non_claude_adapters_still_decline_mcp_transports` and
+  `test_session_mcp_servers_kwarg_raises_on_non_claude_adapters`
+  evolved into per-adapter expectations now that Copilot also
+  declares stdio + http True. New tests
+  `test_copilot_declares_stdio_and_http_but_not_sse`,
+  `test_codex_and_openai_compat_still_decline_all_mcp_transports`,
+  `test_copilot_session_sse_decline_carries_http_hint`, and
+  `test_session_mcp_servers_kwarg_raises_on_codex_and_openai_compat`
+  pin the Iteration-C matrix.
+
+### Note: SDK observation
+
+While wiring this, we noticed Copilot's
+:class:`MCPServerConfigHTTPType` enum exposes both
+``HTTP`` and ``SSE`` as valid remote transports — i.e. the Copilot
+SDK does have an SSE channel today. The plan was written when this
+was not the case and explicitly declines SSE on Copilot. This
+iteration follows the plan as written; flipping
+:data:`Feature.TOOLS_MCP_SSE` True on Copilot would be a small
+follow-up if a downstream consumer needs it (the translator change
+is one line: extend the ``"http"`` arm to also accept ``"sse"``;
+the gate change is removing the pre-helper SSE decline).
+
+### Added (Phase 4, Iteration B — Claude MCP wiring)
+
+- `_translate_mcp_servers_for_claude(refs)` builds a dict keyed by
+  :attr:`McpServerRef.name` where each value is the matching SDK
+  TypedDict — :class:`McpStdioServerConfig` /
+  :class:`McpHttpServerConfig` / :class:`McpSSEServerConfig`.
+  Stdio splits :attr:`McpServerRef.command` (an argv list) into the
+  SDK's ``command: str`` + ``args: list[str]``; ``args`` is omitted
+  for a one-element command. Http / sse pass :attr:`McpServerRef.url`
+  through verbatim. :attr:`McpServerRef.auth_token` becomes
+  ``Authorization: Bearer <token>`` (merged with
+  :attr:`McpServerRef.headers`; caller-supplied ``Authorization``
+  wins on collision).
+- `ClaudeCodeSession(mcp_servers=...)` — accepted on the session
+  factory. Translated lazily at connect time; the translated dict is
+  **merged** with the in-process tools server (Phase 3) into
+  :attr:`ClaudeAgentOptions.mcp_servers`. Tool-name collisions with
+  the reserved ``airframe_tools`` slot raise
+  :class:`ValueError` at connect — no silent shadowing.
+- `_mcp_servers_fingerprint(refs)` — deterministic, secret-free
+  fingerprint added to :meth:`ClaudeCodeSession._ensure_client`'s
+  cache key. Participates from ``name``, ``transport``, ``command``,
+  ``url``, and the *sorted keys* of ``headers``; never includes
+  header values or ``auth_token``, so rotating a bearer token doesn't
+  accidentally invalidate the cache (and sensitive material doesn't
+  enter cache identity).
+- `_strip_mcp_prefix` generalised from the Phase-3 single-server form
+  to a multi-server set the session tracks: the in-process
+  ``airframe_tools`` (when ``tools=`` is set) plus every
+  :attr:`McpServerRef.name`. Tool calls routed through a recognised
+  server come back with the bare name on
+  :class:`~airframe.events.ToolCallStart`; unrecognised prefixes pass
+  through verbatim per Phase 4 risk note #6.
+- Per-server wildcard allowed-tools entry: each external server adds
+  ``mcp__<server>__*`` to :attr:`ClaudeAgentOptions.allowed_tools`
+  so every tool the server exposes is auto-allowed (parallels the
+  per-tool entries the in-process tools server adds).
+- `Feature.TOOLS_MCP_STDIO` / `TOOLS_MCP_HTTP` / `TOOLS_MCP_SSE`
+  flipped True on :attr:`ClaudeCodeRuntime.SUPPORTED_FEATURES`.
+  `TOOLS_MCP_IN_PROCESS` stays False — Phase 4 doesn't expose an
+  in-process :class:`McpServerRef` transport; the in-process MCP
+  server is internal plumbing for ``tools=``.
+- 14 new unit tests in `tests/test_claude_code_session.py` covering
+  per-transport translation, bearer/header merging precedence,
+  mixed-transport sessions, ``tools=`` + ``mcp_servers=`` coexistence,
+  name collisions, cache invalidation on refs-change, fingerprint
+  determinism + secret exclusion, external-server prefix stripping,
+  and unknown-prefix pass-through.
+
+### Changed (Phase 4, Iteration B)
+
+- `tests/test_features.py`:
+  `test_mcp_transport_features_stay_false_iteration_a` and
+  `test_session_mcp_servers_kwarg_raises_on_every_adapter` evolved
+  into per-adapter expectations now that Claude declares the three
+  transport flags True. New tests
+  `test_claude_declares_all_three_mcp_transports`,
+  `test_non_claude_adapters_still_decline_mcp_transports`,
+  `test_session_mcp_servers_kwarg_raises_on_non_claude_adapters`, and
+  `test_claude_session_mcp_servers_kwarg_opens_cleanly` pin the
+  Iteration-B matrix.
+- `test_unwired_features_stay_false` admits
+  ``TOOLS_MCP_{STDIO,HTTP,SSE}`` into the
+  ``any_adapter_may_support`` set (Claude declares them; the other
+  three still decline).
+
+Phase 3 — function tools (Tier 1) — is complete. Iteration A landed
+the protocol-surface shape locks; Iteration B wired the OpenAI-
+compatible family; Iteration C wired Claude + Copilot through their
+respective SDK tool-registration channels; Iteration D codifies
+Codex's permanent decline and ships the multi-provider probe.
+
+### Added (Phase 4, Iteration A — protocol scaffolding for MCP refs)
+
+- `airframe.tools.McpServerRef` — frozen+slots dataclass with
+  ``name``, ``transport`` (``Literal["stdio", "http", "sse"]``),
+  ``command``, ``url``, ``headers``, ``auth_token``.
+  ``__post_init__`` validates the transport/field combo: stdio
+  requires ``command`` and rejects ``url``; http and sse require
+  ``url`` and reject ``command``. Re-exported at the top level as
+  ``from airframe import McpServerRef``.
+- `Feature.TOOLS_MCP_SSE = "tools_mcp_sse"` — new enum member
+  alongside the existing ``TOOLS_MCP_STDIO`` / ``TOOLS_MCP_HTTP`` /
+  ``TOOLS_MCP_IN_PROCESS``. Snapshotted in
+  `test_feature_string_values_are_stable` from Iteration A onwards
+  so a future rename is caught at PR time.
+- `airframe.sessions._check_mcp_servers_supported(refs, *,
+  adapter_label, supports)` — shared capability gate, symmetric with
+  `_check_tools_supported`. Iterates the list, looks up the matching
+  ``Feature.TOOLS_MCP_{STDIO,HTTP,SSE}`` per ref, and raises
+  :class:`~airframe.errors.UnsupportedFeatureError` on the first
+  decline with the specific feature attached. ``supports`` is a
+  callable so the helper doesn't need a runtime reference.
+- ``mcp_servers: list[McpServerRef] | None = None`` kwarg on
+  :meth:`AgentRuntime.session` and every adapter's :meth:`session`.
+  Each adapter calls ``_check_mcp_servers_supported`` at the top;
+  Iteration A's stopping point is "non-empty list raises immediately,
+  empty list / ``None`` opens cleanly." Iterations B–D flip the True
+  bits and replace the generic decline messages with vendor-specific
+  ones where the decline is *permanent* (Codex's CLI-config pointer,
+  OpenAI-compat's "Responses-API only" pointer).
+- 11 new unit tests in `tests/test_tools.py` pinning the
+  :class:`McpServerRef` shape — frozen+slots, field order, the four
+  validation paths (stdio missing command, stdio with url, http/sse
+  missing url, http/sse with command), bearer/header pass-through,
+  and the top-level export.
+- 3 new unit tests in `tests/test_features.py` pinning the matrix at
+  the start of Phase 4: every transport flag is False on every
+  adapter; ``session(mcp_servers=[<ref>])`` raises with the
+  expected ``feature=`` attribute on every adapter for each
+  transport; ``mcp_servers=None`` / ``mcp_servers=[]`` opens
+  cleanly everywhere.
 
 ### Added (Phase 3, Iteration D — Codex decline + probe + docs)
 

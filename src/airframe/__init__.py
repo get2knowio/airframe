@@ -86,7 +86,7 @@ from airframe.protocol import (
     UnsupportedBindingError,
 )
 from airframe.thinking import ReasoningEffort, ThinkingMode
-from airframe.tools import FunctionTool
+from airframe.tools import FunctionTool, McpServerRef
 
 __version__ = "0.5.0"
 
@@ -119,6 +119,7 @@ __all__ = [
     "FileInput",
     "FunctionTool",
     "ImageInput",
+    "McpServerRef",
     "ModelInfo",
     "OpenAICompatOptions",
     "OpenCodeZenRuntime",
