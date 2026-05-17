@@ -86,6 +86,7 @@ from airframe.protocol import (
     UnsupportedBindingError,
 )
 from airframe.thinking import ReasoningEffort, ThinkingMode
+from airframe.tools import FunctionTool
 
 __version__ = "0.5.0"
 
@@ -116,6 +117,7 @@ __all__ = [
     "CostRecord",
     "Feature",
     "FileInput",
+    "FunctionTool",
     "ImageInput",
     "ModelInfo",
     "OpenAICompatOptions",

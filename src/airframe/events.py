@@ -122,8 +122,13 @@ class TurnComplete:
     progressive UI also consume the deltas in between.
 
     Implementations must yield exactly one :class:`TurnComplete` per
-    turn, and it must be the last event in the stream. Cancelled
-    streams may end without a :class:`TurnComplete` — see
+    *user turn*, and it must be the last event in the stream. Tool
+    round-trips (Phase 3) make a single user turn span multiple
+    model turns under the hood: intermediate :class:`ToolCallStart`
+    and :class:`ToolCallResult` pairs surface while the loop runs,
+    but consumers see only one trailing :class:`TurnComplete` with
+    the *final* model turn's result. Cancelled streams may end
+    without a :class:`TurnComplete` — see
     :meth:`~airframe.protocol.AgentSession.cancel`.
     """
 

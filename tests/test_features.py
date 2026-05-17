@@ -124,6 +124,10 @@ def test_unwired_features_stay_false(adapters: list) -> None:
         # adapters and FILE_INPUT on three (OpenAI-compat stays False).
         Feature.VISION_INPUT,
         Feature.FILE_INPUT,
+        # Phase 3 Iteration B flipped TOOLS_FUNCTION on OpenAI-compat;
+        # Iteration C will flip it on Claude + Copilot; Iteration D
+        # leaves Codex False (no SDK tool-registration channel).
+        Feature.TOOLS_FUNCTION,
     }
     must_be_false = [f for f in Feature if f not in any_adapter_may_support]
     for adapter in adapters:
@@ -339,6 +343,83 @@ def test_three_sdk_adapters_declare_file_input(adapters: list) -> None:
                 "OpenAI-compatible adapters keep FILE_INPUT False — file routing "
                 "varies wildly across compat vendors"
             )
+
+
+def test_tools_function_universal_except_codex(adapters: list) -> None:
+    """Final TOOLS_FUNCTION matrix after Phase 3: Codex is the only adapter
+    that declines.
+
+    Iteration B flipped it on OpenAI-compat (client-side tool-loop);
+    Iteration C wired Claude (in-process MCP server via
+    :func:`claude_agent_sdk.create_sdk_mcp_server`) and Copilot
+    (:func:`copilot.define_tool` registrations on the session);
+    Iteration D codifies Codex's decline. The Codex Python SDK has no
+    tool-registration channel — consumers wire tools through the
+    ``codex`` CLI's config file instead.
+    """
+    from airframe import (
+        ClaudeCodeRuntime,
+        CodexRuntime,
+        CopilotRuntime,
+        OpenCodeZenRuntime,
+    )
+
+    for adapter in adapters:
+        if isinstance(adapter, ClaudeCodeRuntime | CopilotRuntime | OpenCodeZenRuntime):
+            assert adapter.supports(Feature.TOOLS_FUNCTION), (
+                f"{type(adapter).__name__} should declare TOOLS_FUNCTION after Phase 3"
+            )
+        elif isinstance(adapter, CodexRuntime):
+            assert not adapter.supports(Feature.TOOLS_FUNCTION), (
+                "CodexRuntime should NOT declare TOOLS_FUNCTION — the Codex "
+                "Python SDK has no tool-registration channel"
+            )
+
+
+def test_session_tools_kwarg_raises_unsupported_feature_on_codex(
+    adapters: list,
+) -> None:
+    """Iteration D: only Codex raises on ``tools=``; the other three accept it.
+
+    Codex's decline carries an actionable CLI-config pointer rather
+    than the generic "not wired yet" message from the shared
+    capability gate. The other three adapters open cleanly with
+    ``tools=`` and dispatch through their respective SDK channels.
+    """
+    from pydantic import BaseModel
+
+    from airframe import (
+        CodexRuntime,
+        FunctionTool,
+    )
+    from airframe.errors import UnsupportedFeatureError
+
+    class _NoArgs(BaseModel):
+        pass
+
+    async def _noop(_p: _NoArgs) -> None:
+        return None
+
+    tool = FunctionTool(
+        name="noop",
+        description="Test tool — never invoked.",
+        params=_NoArgs,
+        handler=_noop,
+    )
+
+    for adapter in adapters:
+        if isinstance(adapter, CodexRuntime):
+            with pytest.raises(UnsupportedFeatureError) as exc_info:
+                adapter.session(tools=[tool])  # type: ignore[attr-defined]
+            assert exc_info.value.feature == Feature.TOOLS_FUNCTION
+            # Iteration D message must point at the workaround.
+            text = str(exc_info.value).lower()
+            assert "config" in text and "codex" in text
+        else:
+            # The other three open cleanly with tools=.
+            sess = adapter.session(tools=[tool])
+            assert sess is not None
+            del sess
 
 
 def test_supports_accepts_optional_model_arg(adapters: list) -> None:

@@ -44,6 +44,7 @@ if TYPE_CHECKING:
     from airframe.inputs import Prompt
     from airframe.models import ModelInfo
     from airframe.thinking import ThinkingMode
+    from airframe.tools import FunctionTool
 
 T = TypeVar("T")
 
@@ -340,6 +341,7 @@ class AgentRuntime(Protocol):
         resume: str | None = None,
         system: str | None = None,
         model: ProviderModel | None = None,
+        tools: list[FunctionTool] | None = None,
         provider_options: Any | None = None,
     ) -> AgentSession:
         """Open a multi-turn session against this runtime.
@@ -372,6 +374,18 @@ class AgentRuntime(Protocol):
             model: Default :class:`ProviderModel` for every turn in
                 this session. Per-turn overrides are not exposed in
                 Phase 1 — switch sessions to switch models.
+            tools: List of :class:`~airframe.tools.FunctionTool` the
+                model may invoke during this session. ``None`` (the
+                default) means no custom tools. Phase 3 of the
+                implementation plan flips
+                :data:`~airframe.features.Feature.TOOLS_FUNCTION`
+                True on every adapter that natively supports
+                function tools (Claude, Copilot, OpenAI-compat).
+                Codex declines — its Python SDK has no tool
+                registration channel. Adapters whose
+                ``TOOLS_FUNCTION`` flag is False raise
+                :class:`~airframe.errors.UnsupportedFeatureError` on
+                a non-None ``tools=``.
             provider_options: Vendor-specific extension namespace
                 (see :mod:`airframe.options`). Accepted in Phase 1
                 but unused — each :class:`ProviderOptions` dataclass
