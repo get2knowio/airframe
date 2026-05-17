@@ -64,6 +64,7 @@ from airframe.events import RuntimeEvent, TextDelta, ToolCallResult, ToolCallSta
 from airframe.features import Feature
 from airframe.inputs import Prompt
 from airframe.models import ModelInfo
+from airframe.options import OpenAICompatOptions
 from airframe.protocol import (
     AgentRuntime,
     AgentSession,
@@ -75,6 +76,7 @@ from airframe.sessions import (
     _MCP_TRANSPORT_TO_FEATURE,
     _check_budget_supported,
     _check_hooks_supported,
+    _check_provider_options,
     _check_tools_supported,
     _enforce_budget_pre_turn,
     _fire_hook_event,
@@ -87,6 +89,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from airframe.hooks import HookEvent
+    from airframe.options import ProviderOptions
     from airframe.permission import PermissionCallback
 
 logger = logging.getLogger(__name__)
@@ -344,7 +347,7 @@ class OpenAICompatibleRuntime(AgentRuntime):
         mcp_servers: list[McpServerRef] | None = None,
         on_permission: PermissionCallback | None = None,
         on_event: Callable[[HookEvent], None] | None = None,
-        provider_options: Any | None = None,
+        provider_options: ProviderOptions | None = None,
     ) -> AgentSession:
         """Open a bespoke :class:`OpenAICompatibleSession`.
 
@@ -454,11 +457,21 @@ class OpenAICompatibleRuntime(AgentRuntime):
                 f"passing mcp_servers=.",
                 feature=feature,
             )
-        # provider_options accepted but unused — Phase 2+ fills each
-        # ProviderOptions dataclass as the corresponding feature lands.
-        del provider_options
+        _check_provider_options(
+            provider_options,
+            expected_type=OpenAICompatOptions,
+            adapter_label=self.label,
+        )
+        compat_options = (
+            provider_options if isinstance(provider_options, OpenAICompatOptions) else None
+        )
         return OpenAICompatibleSession(
-            self, system=system, model=model, tools=tools, on_event=on_event
+            self,
+            system=system,
+            model=model,
+            tools=tools,
+            on_event=on_event,
+            provider_options=compat_options,
         )
 
     async def list_models(self) -> list[ModelInfo]:
@@ -681,6 +694,7 @@ class OpenAICompatibleSession:
         model: ProviderModel | None = None,
         tools: list[FunctionTool] | None = None,
         on_event: Callable[[HookEvent], None] | None = None,
+        provider_options: OpenAICompatOptions | None = None,
     ) -> None:
         self._runtime = runtime
         self._model = model
@@ -704,6 +718,12 @@ class OpenAICompatibleSession:
         # tool-loop's MAX_TOOL_ITERATIONS runaway guard.
         self._cumulative_cost_usd: float = 0.0
         self._turn_count: int = 0
+        # ProviderOptions — OpenAI-only knobs merged into every
+        # chat.completions.create() call. Compat vendors silently
+        # ignore unrecognised kwargs in their server-side validation,
+        # so passing these to non-OpenAI compat endpoints is a no-op
+        # rather than an error.
+        self._provider_options: OpenAICompatOptions | None = provider_options
         # Tools are fixed for the session's lifetime — translated once
         # and reused on every chat.completions.create() call. ``None``
         # / ``[]`` both mean "don't send the kwarg" so the wire shape
@@ -805,6 +825,7 @@ class OpenAICompatibleSession:
                 create_kwargs["reasoning_effort"] = reasoning_effort
             if self._tools_wire is not None:
                 create_kwargs["tools"] = self._tools_wire
+            self._apply_provider_options(create_kwargs)
             try:
                 response = await client.chat.completions.create(**create_kwargs)
             except Exception as exc:
@@ -964,6 +985,7 @@ class OpenAICompatibleSession:
                     stream_kwargs["reasoning_effort"] = reasoning_effort
                 if self._tools_wire is not None:
                     stream_kwargs["tools"] = self._tools_wire
+                self._apply_provider_options(stream_kwargs)
                 try:
                     stream = await client.chat.completions.create(**stream_kwargs)
                 except Exception as exc:
@@ -1136,6 +1158,37 @@ class OpenAICompatibleSession:
         # Runtime owns the AsyncOpenAI client; never tear it down here.
         # Cancel any in-flight work as a courtesy.
         await self.cancel()
+
+    def _apply_provider_options(self, kwargs: dict[str, Any]) -> None:
+        """Merge :class:`OpenAICompatOptions` fields into a create() kwargs dict.
+
+        Called from both :meth:`_do_execute` and :meth:`stream` before
+        the ``chat.completions.create()`` call so the same fields
+        reach both code paths. Each field is only set when non-None
+        — the OpenAI SDK rejects ``None`` for some of these (e.g.
+        ``service_tier``) so we omit the kwarg entirely rather than
+        passing a sentinel.
+
+        Compat vendors that don't recognise a field silently ignore
+        it in their server-side validation — passing OpenAI-only
+        knobs to Together / Groq / Fireworks / OpenCodeZen is a
+        no-op rather than an error.
+        """
+        po = self._provider_options
+        if po is None:
+            return
+        if po.prompt_cache_key is not None:
+            kwargs["prompt_cache_key"] = po.prompt_cache_key
+        if po.prompt_cache_retention is not None:
+            kwargs["prompt_cache_retention"] = po.prompt_cache_retention
+        if po.service_tier is not None:
+            kwargs["service_tier"] = po.service_tier
+        if po.safety_identifier is not None:
+            kwargs["safety_identifier"] = po.safety_identifier
+        if po.verbosity is not None:
+            kwargs["verbosity"] = po.verbosity
+        if po.store is not None:
+            kwargs["store"] = po.store
 
     def _fire_session_start_if_needed(self) -> None:
         """Emit ``session_start`` once per session at first

@@ -2190,3 +2190,137 @@ async def test_stream_honours_budget_caps(mock_sdk: dict[str, Any]) -> None:
     finally:
         await sess.close()
     assert exc_info.value.kind == "usd"
+
+
+# ---------------------------------------------------------------------------
+# Provider options (v0.5.0-readiness — ClaudeOptions wired)
+# ---------------------------------------------------------------------------
+
+
+async def test_claude_options_append_system_prompt_lands_on_options(
+    mock_sdk: dict[str, Any],
+) -> None:
+    """``ClaudeOptions.append_system_prompt`` rides into
+    :attr:`ClaudeAgentOptions.append_system_prompt` at connect time."""
+    from airframe import ClaudeOptions
+
+    final = _FakeResultMessage(result="ok", total_cost_usd=0.0)
+
+    async def fake_receive() -> Any:
+        yield final
+
+    mock_sdk["client"].receive_response = fake_receive
+    rt = ClaudeCodeRuntime()
+    sess = rt.session(provider_options=ClaudeOptions(append_system_prompt="extra"))
+    try:
+        await sess.execute("hi")
+    finally:
+        await sess.close()
+    opts = mock_sdk["options_kwargs"][0]
+    assert opts["append_system_prompt"] == "extra"
+
+
+async def test_claude_options_fork_session_lands_on_options(
+    mock_sdk: dict[str, Any],
+) -> None:
+    """``ClaudeOptions.fork_session=True`` lands on the SDK options."""
+    from airframe import ClaudeOptions
+
+    final = _FakeResultMessage(result="ok", total_cost_usd=0.0)
+
+    async def fake_receive() -> Any:
+        yield final
+
+    mock_sdk["client"].receive_response = fake_receive
+    rt = ClaudeCodeRuntime()
+    sess = rt.session(resume="sess-x", provider_options=ClaudeOptions(fork_session=True))
+    try:
+        await sess.execute("hi")
+    finally:
+        await sess.close()
+    opts = mock_sdk["options_kwargs"][0]
+    assert opts["fork_session"] is True
+
+
+async def test_claude_options_strict_mcp_config_lands_on_options(
+    mock_sdk: dict[str, Any],
+) -> None:
+    """``ClaudeOptions.strict_mcp_config=True`` lands on the SDK options."""
+    from airframe import ClaudeOptions
+
+    final = _FakeResultMessage(result="ok", total_cost_usd=0.0)
+
+    async def fake_receive() -> Any:
+        yield final
+
+    mock_sdk["client"].receive_response = fake_receive
+    rt = ClaudeCodeRuntime()
+    sess = rt.session(provider_options=ClaudeOptions(strict_mcp_config=True))
+    try:
+        await sess.execute("hi")
+    finally:
+        await sess.close()
+    opts = mock_sdk["options_kwargs"][0]
+    assert opts["strict_mcp_config"] is True
+
+
+async def test_claude_options_default_omits_kwargs(mock_sdk: dict[str, Any]) -> None:
+    """No ``provider_options=`` → the corresponding SDK kwargs are absent."""
+    final = _FakeResultMessage(result="ok", total_cost_usd=0.0)
+
+    async def fake_receive() -> Any:
+        yield final
+
+    mock_sdk["client"].receive_response = fake_receive
+    rt = ClaudeCodeRuntime()
+    sess = rt.session()
+    try:
+        await sess.execute("hi")
+    finally:
+        await sess.close()
+    opts = mock_sdk["options_kwargs"][0]
+    assert "append_system_prompt" not in opts
+    assert "fork_session" not in opts
+    assert "strict_mcp_config" not in opts
+
+
+async def test_claude_options_change_between_turns_forces_reconnect(
+    mock_sdk: dict[str, Any],
+) -> None:
+    """A ``ClaudeOptions`` change across turns invalidates the cache key
+    and forces a reconnect — all three fields bake at connect time."""
+    from airframe import ClaudeOptions
+
+    final = _FakeResultMessage(result="ok", total_cost_usd=0.0)
+
+    async def fake_receive() -> Any:
+        yield final
+
+    mock_sdk["client"].receive_response = fake_receive
+    rt = ClaudeCodeRuntime()
+    sess1 = rt.session(provider_options=ClaudeOptions(strict_mcp_config=False))
+    try:
+        await sess1.execute("a")
+    finally:
+        await sess1.close()
+    sess2 = rt.session(provider_options=ClaudeOptions(strict_mcp_config=True))
+    try:
+        await sess2.execute("b")
+    finally:
+        await sess2.close()
+    assert mock_sdk["client"].connect.await_count == 2
+
+
+async def test_claude_options_wrong_namespace_raises_unsupported_feature(
+    mock_sdk: dict[str, Any],
+) -> None:
+    """Passing :class:`CopilotOptions` to :class:`ClaudeCodeRuntime`
+    raises :class:`UnsupportedFeatureError` at the adapter boundary."""
+    from airframe import CopilotOptions
+    from airframe.errors import UnsupportedFeatureError
+
+    rt = ClaudeCodeRuntime()
+    with pytest.raises(UnsupportedFeatureError) as exc_info:
+        rt.session(provider_options=CopilotOptions())
+    assert "CopilotOptions" in str(exc_info.value)
+    assert "ClaudeOptions" in str(exc_info.value)

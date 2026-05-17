@@ -1,25 +1,49 @@
-"""Shared :class:`AgentSession` helpers.
+"""Shared :class:`AgentSession` helpers used across every built-in adapter.
 
-Phase 1 iteration B lands the :meth:`AgentRuntime.session` factory and
-gives every built-in adapter a minimal session implementation. The
-real per-vendor session lifecycles — Claude Code's ``ClaudeSDKClient``
-ownership migration, Copilot's ``CopilotSession`` resume plumbing,
-Codex's per-turn subprocess, OpenAI-compatible client-side
-``messages=[]`` multi-turn — land in subsequent iterations as each
-adapter's Feature bits (``STREAMING``, ``SESSION_RESUME``, ``CANCEL``)
-flip on.
+All four built-in adapters ship bespoke per-vendor
+:class:`~airframe.protocol.AgentSession` implementations
+(:class:`~airframe.adapters.claude_code.ClaudeCodeSession`,
+:class:`~airframe.adapters.copilot.CopilotAgentSession`,
+:class:`~airframe.adapters.codex.CodexAgentSession`,
+:class:`~airframe.adapters.openai_compatible.OpenAICompatibleSession`).
+This module contains the cross-cutting helpers they share:
 
-Iteration B's :class:`_ThinAgentSession` is the placeholder for that
-work: a thin lifecycle wrapper that forwards :meth:`execute` to the
-underlying runtime, synthesises :meth:`stream` as a single
-:class:`~airframe.events.TurnComplete`, and no-ops :meth:`cancel` /
-:meth:`close`. Adapter sessions today are all instances of this class;
-later iterations replace per-adapter sessions with bespoke
-implementations as needed.
+* **Capability gates** — :func:`_check_tools_supported`,
+  :func:`_check_mcp_servers_supported`,
+  :func:`_check_permission_supported`, :func:`_check_hooks_supported`,
+  :func:`_check_budget_supported`. Each raises
+  :class:`~airframe.errors.UnsupportedFeatureError` with the matching
+  :class:`Feature` attached when the caller asks for something the
+  adapter doesn't declare.
+* **Prompt splitting** — :func:`_split_prompt_parts` translates the
+  polymorphic :class:`Prompt` (str / list[PromptPart]) into the
+  ``(text, images, files)`` triple every adapter feeds into its
+  vendor SDK.
+* **MCP plumbing** — :func:`_compose_mcp_headers`,
+  :func:`_mcp_servers_fingerprint`, :data:`_MCP_TRANSPORT_TO_FEATURE`
+  for translating :class:`McpServerRef` into the per-vendor wire
+  shape and joining the session cache key.
+* **Hooks plumbing** — :func:`_fire_hook_event` fans one
+  :class:`HookEvent` out to the user's observer with no-op-when-None
+  semantics and exception safety so a raising observer can't break
+  the session.
+* **Budget plumbing** — :func:`_enforce_budget_pre_turn` raises
+  :class:`~airframe.errors.RuntimeBudgetExceededError` at the turn
+  boundary when ``max_turns`` or ``max_budget_usd`` would be
+  exceeded by the about-to-fire turn.
 
-The class is intentionally private (leading underscore) — third-party
-adapter authors should target :class:`~airframe.protocol.AgentSession`
-directly, not subclass this helper.
+:class:`_ThinAgentSession` and :func:`_open_thin_session` are
+retained as a reference implementation for third-party adapter
+authors who want the cheapest possible
+:class:`~airframe.protocol.AgentSession` (forwards :meth:`execute`
+to ``runtime.execute()``, synthesises :meth:`stream` as a single
+:class:`~airframe.events.TurnComplete`, no-ops :meth:`cancel` /
+:meth:`close`). None of the built-in adapters use it any more —
+each owns a bespoke session class as of Phase 1 Iteration C.
+
+The helper names are intentionally private (leading underscore);
+third-party adapters import them at their own risk. The capability
+gates are the most likely to stay stable across releases.
 """
 
 from __future__ import annotations
@@ -39,6 +63,7 @@ if TYPE_CHECKING:
     from airframe.events import RuntimeEvent
     from airframe.hooks import HookEvent
     from airframe.inputs import Prompt
+    from airframe.options import ProviderOptions
     from airframe.permission import PermissionCallback
     from airframe.protocol import AgentRuntime, ProviderModel, RuntimeResult
     from airframe.thinking import ThinkingMode
@@ -533,7 +558,17 @@ def _enforce_budget_pre_turn(
 
 
 class _ThinAgentSession:
-    """Iteration B :class:`AgentSession` — thin wrapper over ``runtime.execute()``.
+    """Reference :class:`AgentSession` for third-party adapter authors.
+
+    The cheapest possible :class:`~airframe.protocol.AgentSession` —
+    suitable as a starting point when wiring a new adapter that
+    doesn't yet have a bespoke session class.
+
+    None of the four built-in adapters use this any more (each
+    ships its own per-vendor session as of Phase 1 Iteration C);
+    it survives as a reference impl for third-party adapters and a
+    stable target for the Phase 0 conformance contracts in
+    :mod:`airframe.testing.contracts`.
 
     Does the minimum to satisfy the protocol:
 
@@ -541,13 +576,11 @@ class _ThinAgentSession:
       session's bound ``system`` / ``model`` carried through.
     * :meth:`stream` calls :meth:`execute` and yields a single
       :class:`~airframe.events.TurnComplete` carrying the result.
-      Iteration C+ replaces this with real per-vendor streaming as
-      :data:`~airframe.features.Feature.STREAMING` flips on for each
-      adapter.
+      Real per-vendor streaming requires a bespoke session class.
     * :meth:`cancel` is a no-op when no turn is in flight (the only
-      state this class tracks). Calling it during an in-flight turn
-      raises :class:`~airframe.errors.UnsupportedFeatureError` — every
-      adapter declares ``Feature.CANCEL=False`` today.
+      state this class tracks); raises
+      :class:`~airframe.errors.UnsupportedFeatureError` mid-turn
+      because cancellation requires per-vendor abort plumbing.
     * :meth:`close` flips an idempotent ``_closed`` flag; subsequent
       :meth:`execute` / :meth:`stream` raise :class:`RuntimeError`.
 
@@ -638,7 +671,7 @@ def _open_thin_session(
     resume: str | None,
     system: str | None,
     model: ProviderModel | None,
-    provider_options: Any | None,
+    provider_options: ProviderOptions | None,
 ) -> _ThinAgentSession:
     """Build a :class:`_ThinAgentSession`, enforcing Iteration B's gates.
 
@@ -666,12 +699,51 @@ def _open_thin_session(
     return _ThinAgentSession(runtime, system=system, model=model)
 
 
+def _check_provider_options(
+    provider_options: Any | None,
+    *,
+    expected_type: type,
+    adapter_label: str,
+) -> None:
+    """Reject :class:`ProviderOptions` of the wrong vendor type.
+
+    Every adapter's :meth:`session` calls this at the top to enforce
+    the tagged-union contract — passing
+    :class:`~airframe.options.CopilotOptions` to
+    :class:`~airframe.adapters.claude_code.ClaudeCodeRuntime` is a
+    bug, not a silent no-op. ``None`` is always permitted.
+
+    Args:
+        provider_options: The value the caller passed (or ``None``).
+        expected_type: The matching dataclass for this adapter (e.g.
+            :class:`~airframe.options.ClaudeOptions`).
+        adapter_label: Adapter name for the error message.
+
+    Raises:
+        UnsupportedFeatureError: ``provider_options`` is not ``None``
+            and not an instance of ``expected_type``. ``feature=`` is
+            left as ``None`` because the mismatch isn't a missing
+            capability — it's a wiring mistake.
+    """
+    if provider_options is None:
+        return
+    if isinstance(provider_options, expected_type):
+        return
+    raise UnsupportedFeatureError(
+        f"{adapter_label}: provider_options must be {expected_type.__name__} "
+        f"(or None); got {type(provider_options).__name__}. The ProviderOptions "
+        f"tagged union is type-checked at the adapter boundary — pass the "
+        f"matching dataclass for this runtime.",
+    )
+
+
 __all__ = [
     "_ThinAgentSession",
     "_check_budget_supported",
     "_check_hooks_supported",
     "_check_mcp_servers_supported",
     "_check_permission_supported",
+    "_check_provider_options",
     "_check_tools_supported",
     "_coerce_prompt_or_raise",
     "_compose_mcp_headers",

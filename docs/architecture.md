@@ -122,7 +122,7 @@ types from `airframe.events`:
 |---|---|
 | `TextDelta(text)` | A chunk of assistant-visible text. Concatenating all `TextDelta.text` for one turn equals the final result's `text`. |
 | `ReasoningDelta(text)` | A chunk of hidden reasoning / extended-thinking text. Distinct from `TextDelta` — the model's private chain-of-thought. |
-| `ToolCallStart(tool_name, tool_call_id, arguments_preview)` | The model asked to invoke a tool. Phase 3 wires the call-back path; today only fires for vendor-side tools. |
+| `ToolCallStart(tool_name, tool_call_id, arguments_preview)` | The model asked to invoke a tool. Phase 3 wired user-supplied `FunctionTool` round-trips on Claude / Copilot / OpenAI-compat; Phase 4 added external `McpServerRef` routes on Claude / Copilot. |
 | `ToolCallResult(tool_call_id, output, is_error)` | A tool invocation completed. Pairs with the matching `ToolCallStart`. |
 | `TurnComplete(result)` | Final event in every successful stream. Carries the same `RuntimeResult` `execute()` would have returned. |
 
@@ -140,27 +140,51 @@ immediately before `TurnComplete`.
 
 Each adapter declares which protocol features it implements via
 `runtime.supports(Feature.X)`. The capability matrix at the end of
-Phase 1:
+Phase 5 (all four phase rollouts complete):
 
 | Feature | Claude Code | Copilot | Codex | OpenAI-compat |
 |---|---|---|---|---|
 | `STRUCTURED_OUTPUT_JSON_SCHEMA` | ✓ | ✓ | ✓ | ✓ |
+| `STRUCTURED_OUTPUT_STRICT` | ✗ | ✗ | ✗ | ✗ |
 | `STREAMING` | ✓ | ✓ | ✓ | ✓ |
 | `CANCEL` | ✓ | ✓ | ✓ | ✓ |
 | `SESSION_RESUME` | ✓ | ✓ | ✓ | ✗ (no server-side session) |
-| `STRUCTURED_OUTPUT_STRICT` | ✗ | ✗ | ✗ | ✗ |
-| `REASONING_EFFORT` / `REASONING_BUDGET_TOKENS` | (Phase 2) | (Phase 2) | (Phase 2) | (Phase 2) |
-| `VISION_INPUT` / `FILE_INPUT` | (Phase 2) | (Phase 2) | (Phase 2) | (Phase 2) |
-| `TOOLS_FUNCTION` | (Phase 3) | (Phase 3) | ✗ (no SDK tool API) | (Phase 3) |
-| `TOOLS_MCP_*` | (Phase 4) | (Phase 4) | ✗ | ✗ (Responses-only) |
-| `PERMISSION_CALLBACK`, `LIFECYCLE_HOOKS`, `BUDGET_*` | (Phase 5) | (Phase 5) | (Phase 5) | (Phase 5) |
+| `REASONING_EFFORT` | ✓ | ✓ | ✓ | ✓ |
+| `REASONING_BUDGET_TOKENS` | ✓ | ✗ | ✗ | ✗ |
+| `VISION_INPUT` | ✓ | ✓ | ✓ | ✓ |
+| `FILE_INPUT` | ✓ | ✓ | ✓ | ✗ (chat-completions has no file slot) |
+| `TOOLS_FUNCTION` | ✓ | ✓ | ✗ (no SDK tool API) | ✓ |
+| `TOOLS_MCP_STDIO` | ✓ | ✓ | ✗ (CLI-config only) | ✗ (Responses-only) |
+| `TOOLS_MCP_HTTP` | ✓ | ✓ | ✗ | ✗ |
+| `TOOLS_MCP_SSE` | ✓ | ✗ (declined, switch to http) | ✗ | ✗ |
+| `TOOLS_MCP_IN_PROCESS` | ✗ (internal `tools=` plumbing) | ✗ | ✗ | ✗ |
+| `PERMISSION_CALLBACK` | ✓ | ✓ | ✓ (session-wide) | ✗ (permanent) |
+| `LIFECYCLE_HOOKS` | ✓ (8 kinds) | ✓ (7 kinds, no `rate_limit`) | ✓ (6 kinds, synthesised) | ✓ (6 kinds, synthesised) |
+| `BUDGET_USD_CAP` | ✓ | ✓ | ✓ | ✓ |
+| `BUDGET_TURN_CAP` | ✓ | ✗ (vendor caps internally) | ✓ | ✓ |
+| `SANDBOX` / `SUBAGENTS` | (Phase 6 / signal-gated) | (Phase 6) | (Phase 6) | (Phase 6) |
 
 `supports()` is a cheap static lookup — no network, no SDK version
 sniffing. The conformance suite (`airframe.testing.contracts`)
 asserts every adapter's `supports(STRUCTURED_OUTPUT_JSON_SCHEMA)` is
-True. Behavioural contracts that require live credentials live in
-`airframe.testing.integration` (deferred; the live probes under
-`examples/probe_*.py` cover this today).
+True plus the structural contracts for Phase 1–5 features (each
+declared-True flag must accept the corresponding kwarg without
+raising `UnsupportedFeatureError`; each declared-False flag must
+raise with the correct `feature=` attribute). Behavioural contracts
+that require live credentials live in
+`airframe.testing.integration` (pytest-marker-gated; the live
+probes under `examples/probe_*.py` are the manual counterpart).
+
+**Per-adapter hook subsets.** Every adapter that declares
+`LIFECYCLE_HOOKS=True` also exposes an `EMITTABLE_HOOK_KINDS:
+ClassVar[frozenset[str]]` containing the subset of the eight
+[`HookEventKind`](../src/airframe/hooks.py) literals it can
+honestly emit. Claude has all 8 (native `PreCompact` + `RateLimit`
+events); Copilot drops `rate_limit`; Codex and OpenAI-compat drop
+both `pre_compact` and `rate_limit` since they have to synthesise
+events from their respective event streams / tool loops. Consumers
+writing portable observers can branch defensively on the per-runtime
+set.
 
 ## Why the protocol looks like this
 
@@ -364,3 +388,20 @@ each adapter's `_PRICING` / `_METADATA` dict.
   - `probe_session_resume.py` — two-turn resume via `session(resume=)`
     on the three SDK adapters.
   - `probe_supports.py` — the `Feature × adapter` capability matrix.
+  - `probe_thinking.py` / `probe_vision.py` — Phase 2 inputs &
+    reasoning.
+  - `probe_tools.py` — Phase 3 `FunctionTool` round-trip.
+  - `probe_mcp.py` — Phase 4 `McpServerRef` registration across
+    stdio / http / sse transports.
+  - `probe_permission.py` — Phase 5 `PermissionCallback` per-call
+    interception.
+  - `probe_hooks.py` — Phase 5 `HookEvent` observation; prints the
+    declared `EMITTABLE_HOOK_KINDS` and the per-kind histogram.
+  - `probe_budget.py` — Phase 5 `max_turns=` / `max_budget_usd=`;
+    deliberately tiny cap demonstrates `RuntimeBudgetExceededError`.
+* `airframe.testing.contracts` — shared structural conformance
+  contracts every adapter satisfies (Phase 0 schema round-trip plus
+  Phase 1–5 capability-vs-API agreement).
+* `airframe.testing.integration` — pytest-marker-gated live-vendor
+  probes mirroring the `examples/probe_*.py` set. Run with
+  `pytest -m integration` once credentials are configured.

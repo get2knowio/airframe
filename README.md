@@ -161,26 +161,47 @@ class AgentRuntime(Protocol):
 
     async def execute(
         self,
-        prompt: str,
+        prompt: Prompt,
         *,
         schema: type[BaseModel] | None = None,
         system: str | None = None,
         persona: str | None = None,
         model: ProviderModel | None = None,
+        thinking: ThinkingMode = None,
         timeout: float = 600.0,
     ) -> RuntimeResult: ...
+
+    def session(
+        self,
+        *,
+        resume: str | None = None,
+        system: str | None = None,
+        model: ProviderModel | None = None,
+        tools: list[FunctionTool] | None = None,
+        mcp_servers: list[McpServerRef] | None = None,
+        on_permission: PermissionCallback | None = None,
+        on_event: Callable[[HookEvent], None] | None = None,
+        provider_options: ProviderOptions | None = None,
+    ) -> AgentSession: ...
 
     async def reset(self) -> None: ...
     async def close(self) -> None: ...
     def validate_binding(self, binding: ProviderModel) -> bool: ...
     async def list_models(self) -> list[ModelInfo]: ...
+    def supports(self, feature: Feature, model: ProviderModel | None = None) -> bool: ...
+    def unwrap(self, cls: type[T]) -> T: ...
 ```
 
-* **`execute`** — send one prompt, get back a `RuntimeResult` with
-  text + (optional) structured payload + cost + finish reason.
-* **`reset`** — drop accumulated context for a fresh scope
-  (typically between tasks). Runtime-wide resources (subprocess
-  pool, HTTP client) survive.
+* **`execute`** — single-turn convenience over `session().execute() + close()`.
+  Returns a `RuntimeResult` with text + (optional) structured
+  payload + cost + finish reason.
+* **`session`** — open a multi-turn `AgentSession` (see below).
+  Every later feature kwarg (`tools=`, `mcp_servers=`,
+  `on_permission=`, `on_event=`, `provider_options=`) attaches here,
+  not to `execute()` — this keeps the per-turn surface narrow.
+* **`reset`** — no-op on every built-in adapter as of v0.5.0; kept
+  on the protocol for completeness. Sessions own per-conversation
+  state; the runtime owns nothing scope-bound.
 * **`close`** — full teardown. Idempotent; never raises.
 * **`validate_binding`** — predicate: does this runtime serve a
   given `(provider_id, model_id)`? Cheap and non-async; suitable for
@@ -188,10 +209,60 @@ class AgentRuntime(Protocol):
 * **`list_models`** — hit the vendor's models endpoint with the
   user's resolved credentials, return a list of `ModelInfo` (id,
   display name, context window, pricing, capability flags). Drives
-  UI menus. Async + auth-aware; raises `RuntimeAuthError` /
-  `RuntimeTransientError` so the consumer can surface the failure
-  before letting the user pick a model that would later fail to
-  execute.
+  UI menus.
+* **`supports`** — capability predicate. `runtime.supports(Feature.TOOLS_MCP_HTTP)`
+  before passing `mcp_servers=[McpServerRef(transport="http", ...)]`.
+* **`unwrap`** — JDBC-`Wrapper`-style escape hatch to the native
+  vendor object. `runtime.unwrap(ClaudeSDKClient)` /
+  `session.unwrap(CopilotSession)`, etc.
+
+### `AgentSession`
+
+```python
+class AgentSession(Protocol):
+    id: str | None  # vendor session id, or None for stateless adapters
+
+    async def execute(
+        self,
+        prompt: Prompt,
+        *,
+        schema: type[BaseModel] | None = None,
+        thinking: ThinkingMode = None,
+        max_turns: int | None = None,
+        max_budget_usd: float | None = None,
+        timeout: float = 600.0,
+    ) -> RuntimeResult: ...
+
+    def stream(self, prompt: Prompt, *, ...) -> AsyncIterator[RuntimeEvent]: ...
+    async def cancel(self) -> None: ...
+    async def close(self) -> None: ...
+    def unwrap(self, cls: type[T]) -> T: ...
+```
+
+The session owns conversation state (`messages=[]` buffer for OAI-compat,
+`ClaudeSDKClient` for Claude Code, `CopilotSession` for Copilot,
+`Thread` for Codex). Same `close()` discipline — idempotent, never
+raises. `cancel()` is cheap and idempotent: no-op when no turn is
+in flight; abort+raise `RuntimeCancelledError` mid-turn.
+
+```python
+runtime = ClaudeCodeRuntime()
+sess = runtime.session(system="You are concise.")
+try:
+    async for event in sess.stream("Tell me about Python."):
+        if isinstance(event, TextDelta):
+            print(event.text, end="", flush=True)
+        elif isinstance(event, TurnComplete):
+            print(f"\nfinal: {event.result.cost.cost_usd}")
+finally:
+    await sess.close()
+```
+
+`stream()` yields a discriminated union of five
+[`RuntimeEvent`](src/airframe/events.py) variants:
+`TextDelta`, `ReasoningDelta`, `ToolCallStart`, `ToolCallResult`,
+`TurnComplete`. The variant set is shape-locked — consumer
+`match event:` is safe across releases.
 
 ### Errors
 
@@ -219,56 +290,154 @@ rationale and the operational landmines each adapter mitigates.
 
 ## Examples
 
-Probe scripts under `tests/` exercise each adapter end-to-end against
-a real CLI / HTTP endpoint. They're not part of the unit suite — pytest
-collects `test_*.py` only, so the `probe_*.py` scripts are runnable
-demos that won't be picked up by `make test`.
+Probe scripts under `examples/` exercise each adapter end-to-end
+against a real CLI / HTTP endpoint. They're runnable demos, not part
+of `make test`. Auth issues surface as classified `Runtime*Error`
+so you see exactly what would happen in production if credentials
+were misconfigured.
 
 ```bash
 # Per-adapter execute() probes (require auth for that vendor).
-uv run python tests/probe_claude_code.py
-uv run python tests/probe_copilot.py
-uv run python tests/probe_codex.py
-uv run python tests/probe_opencode_zen.py
+uv run python examples/probe_claude_code.py
+uv run python examples/probe_copilot.py
+uv run python examples/probe_codex.py
+uv run python examples/probe_opencode_zen.py
 
-# Live model-menu probe across every installed adapter.
-uv run python tests/probe_list_models.py
-uv run python tests/probe_list_models.py --provider claude
-uv run python tests/probe_list_models.py --installed-only=false
+# Live capability matrix across every installed adapter.
+uv run python examples/probe_supports.py
+
+# Phase 1+: streaming, session resume, cancellation.
+uv run python examples/probe_streaming.py
+uv run python examples/probe_session_resume.py
+
+# Phase 2: thinking effort, vision/file inputs.
+uv run python examples/probe_thinking.py
+uv run python examples/probe_vision.py
+
+# Phase 3: function-tool round-trip.
+uv run python examples/probe_tools.py
+
+# Phase 4: external MCP server registration.
+uv run python examples/probe_mcp.py
+
+# Phase 5: permission callback, lifecycle hooks, budget caps.
+uv run python examples/probe_permission.py
+uv run python examples/probe_hooks.py
+uv run python examples/probe_budget.py
 ```
-
-Each probe surfaces auth / network issues as classified
-`Runtime*Error` so you can see exactly what would happen in production
-if credentials were misconfigured.
 
 ## Capability negotiation
 
 Each adapter declares which protocol features it implements via
-`runtime.supports(Feature.X)`. The `Feature` enum was fixed at v0.3.0;
-each release flips more bits to `True` as the corresponding API
-lands:
+`runtime.supports(Feature.X)`. The `Feature` enum's string values
+were fixed at v0.3.0; consumer code branches on them safely:
 
 ```python
-from airframe import ClaudeCodeRuntime, Feature
+from airframe import ClaudeCodeRuntime, Feature, McpServerRef
 
 runtime = ClaudeCodeRuntime()
-if runtime.supports(Feature.STRUCTURED_OUTPUT_JSON_SCHEMA):
-    result = await runtime.execute(prompt, schema=MySchema)
+if runtime.supports(Feature.TOOLS_MCP_HTTP):
+    sess = runtime.session(
+        mcp_servers=[McpServerRef(name="docs", transport="http", url="...")]
+    )
 ```
 
-As of v0.5.0 these flip True on every in-tree adapter:
-`STRUCTURED_OUTPUT_JSON_SCHEMA`, `STREAMING`, `CANCEL`,
-`REASONING_EFFORT`, `VISION_INPUT`. `SESSION_RESUME` and
-`FILE_INPUT` flip on the three SDK adapters (Claude / Copilot /
-Codex) but not OpenAI-compat. `REASONING_BUDGET_TOKENS` is
-Claude-only. `TOOLS_FUNCTION`, `TOOLS_MCP_*`, `PERMISSION_CALLBACK`,
-`SUBAGENTS` etc. remain `False` until later phases ship — see
-[docs/implementation-plan.md](docs/implementation-plan.md) for the
-phasing. Run `uv run python examples/probe_supports.py` for the
-live matrix.
+End-of-Phase-5 capability matrix (run
+`uv run python examples/probe_supports.py` for the live version):
 
-Run `uv run python examples/probe_supports.py` for the live
-Feature × adapter matrix.
+| Feature | Claude | Copilot | Codex | OpenAI-compat |
+|---|---|---|---|---|
+| `STRUCTURED_OUTPUT_JSON_SCHEMA` | ✓ | ✓ | ✓ | ✓ |
+| `STREAMING` | ✓ | ✓ | ✓ | ✓ |
+| `CANCEL` | ✓ | ✓ | ✓ | ✓ |
+| `SESSION_RESUME` | ✓ | ✓ | ✓ | ✗ |
+| `REASONING_EFFORT` | ✓ | ✓ | ✓ | ✓ |
+| `REASONING_BUDGET_TOKENS` | ✓ | ✗ | ✗ | ✗ |
+| `VISION_INPUT` | ✓ | ✓ | ✓ | ✓ |
+| `FILE_INPUT` | ✓ | ✓ | ✓ | ✗ |
+| `TOOLS_FUNCTION` | ✓ | ✓ | ✗ | ✓ |
+| `TOOLS_MCP_STDIO` | ✓ | ✓ | ✗ | ✗ |
+| `TOOLS_MCP_HTTP` | ✓ | ✓ | ✗ | ✗ |
+| `TOOLS_MCP_SSE` | ✓ | ✗ | ✗ | ✗ |
+| `PERMISSION_CALLBACK` | ✓ | ✓ | ✓ (session-wide) | ✗ |
+| `LIFECYCLE_HOOKS` | ✓ (8 kinds) | ✓ (7 kinds) | ✓ (6 kinds) | ✓ (6 kinds) |
+| `BUDGET_USD_CAP` | ✓ | ✓ | ✓ | ✓ |
+| `BUDGET_TURN_CAP` | ✓ | ✗ | ✓ | ✓ |
+
+A declined capability raises `UnsupportedFeatureError` with a
+`feature=` attribute, never a silent fallback.
+
+## Sessions, streaming, and the new kwargs
+
+Beyond `execute(schema=)`, every Phase 1–5 capability attaches to
+`runtime.session(...)` / `session.execute(...)` / `session.stream(...)`:
+
+```python
+from airframe import (
+    ClaudeCodeRuntime, FunctionTool, McpServerRef,
+    PermissionCallback, PermissionDecision, PermissionRequest,
+    HookEvent, ClaudeOptions,
+)
+
+class _AddArgs(BaseModel):
+    a: float
+    b: float
+
+async def add(args: _AddArgs) -> float:
+    return args.a + args.b
+
+class ApproveAll(PermissionCallback):
+    async def handle(self, req: PermissionRequest) -> PermissionDecision:
+        return "allow"
+
+def log_event(e: HookEvent) -> None:
+    print(f"[{e.kind}] {e.payload}")
+
+runtime = ClaudeCodeRuntime()
+sess = runtime.session(
+    system="You are a careful math assistant.",
+    tools=[FunctionTool(name="add", description="Add two numbers.",
+                         params=_AddArgs, handler=add)],
+    mcp_servers=[McpServerRef(name="docs", transport="http",
+                              url="https://mcp.example.com",
+                              auth_token="...")],
+    on_permission=ApproveAll(),
+    on_event=log_event,
+    provider_options=ClaudeOptions(strict_mcp_config=True),
+)
+try:
+    result = await sess.execute(
+        "What is 17 + 25?",
+        thinking="medium",
+        max_turns=10,
+        max_budget_usd=0.05,
+    )
+    print(result.text)
+finally:
+    await sess.close()
+```
+
+* **`tools=`** — `FunctionTool` instances the model may invoke. The
+  session drives the round-trip (Claude/Copilot/OpenAI-compat) or
+  declines permanently (Codex — no SDK tool-registration channel).
+* **`mcp_servers=`** — `McpServerRef` entries pointing at external
+  Model Context Protocol servers. Stdio + http on Claude/Copilot;
+  SSE on Claude only.
+* **`on_permission=`** — callback receives `PermissionRequest` and
+  returns `"allow"` / `"deny"` / `"defer"`. Per-call on Claude /
+  Copilot; session-wide on Codex (fires once to derive the policy
+  enum); declined on OpenAI-compat.
+* **`on_event=`** — synchronous observer receives `HookEvent`
+  instances (`session_start`, `pre_tool_use`, `post_tool_use`, etc.).
+  Per-adapter `EMITTABLE_HOOK_KINDS` ClassVar pins which subset of
+  the eight canonical kinds each adapter fires.
+* **`max_turns=`** / **`max_budget_usd=`** — cumulative caps
+  enforced at the turn boundary; trip `RuntimeBudgetExceededError`
+  with `cap` / `current` / `kind` attributes.
+* **`provider_options=`** — vendor-specific extension namespace
+  (`ClaudeOptions`, `CopilotOptions`, `CodexOptions`,
+  `OpenAICompatOptions`). Tagged union — passing the wrong namespace
+  raises at the adapter boundary.
 
 ## Escape hatch: `runtime.unwrap()`
 
@@ -344,21 +513,25 @@ adapter:
 pip install airframe-agents[testing]
 ```
 
-Then in the adapter's test suite:
+`airframe.testing.contracts` exposes ~25 structural tests covering
+Phase 0–5: lifecycle (`close()` idempotency), `unwrap()` escape
+hatch, `supports()` purity, session factory shape, and per-phase
+capability-vs-API agreement (`tools=` raises iff
+`TOOLS_FUNCTION=False`, `on_permission=` raises iff
+`PERMISSION_CALLBACK=False`, etc.).
 
 ```python
 # tests/test_my_adapter_conformance.py
 import pytest
 from airframe.testing.contracts import (
     test_close_is_idempotent,
-    test_close_on_fresh_runtime,
-    test_unwrap_returns_self,
-    test_unwrap_unrelated_type_raises_typeerror,
-    test_supports_returns_bool_for_every_feature,
-    test_supports_is_idempotent,
-    test_supports_structured_output_json_schema_is_true,
-    test_supports_accepts_model_kwarg,
-    test_validate_binding_returns_bool,
+    test_session_factory_returns_agent_session,
+    test_session_tools_kwarg_agrees_with_tools_function_capability,
+    test_session_mcp_servers_kwarg_agrees_with_transport_capabilities,
+    test_session_on_permission_agrees_with_permission_callback_capability,
+    test_session_on_event_agrees_with_lifecycle_hooks_capability,
+    test_session_rejects_wrong_provider_options_namespace,
+    # ...full list in airframe.testing.contracts.__all__
 )
 from airframe_adapters_together import TogetherRuntime
 
@@ -367,10 +540,17 @@ def adapter_runtime():
     return TogetherRuntime(api_key="test-key")
 ```
 
-Pytest collects the imported test functions and runs them against
-the local fixture. Modelled on SQLAlchemy's `testing.suite` pattern.
-See `tests/test_claude_code_conformance.py` for the canonical
-in-tree example.
+For behavioural coverage against live vendor endpoints,
+`airframe.testing.integration` provides the same import-into-suite
+pattern with `pytest.mark.integration` gating. Run with
+`pytest -m integration` after configuring the relevant adapter's
+credentials. Tests `pytest.skip` themselves when credentials are
+absent — the suite stays usable on partially-configured machines.
+
+Modelled on SQLAlchemy's `testing.suite` pattern. See
+`tests/test_claude_code_conformance.py` and
+`tests/test_claude_code_integration.py` for the canonical in-tree
+examples.
 
 ## Development
 

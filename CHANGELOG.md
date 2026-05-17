@@ -6,6 +6,106 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### v1.0-readiness pass (docs + TCK + ProviderOptions + integration suite)
+
+A documentation-honesty + test-breadth sweep before cutting v1.0.
+No protocol shape changes — every public surface touched here was
+either undocumented, mis-documented, or under-tested.
+
+#### Added
+
+- **`airframe.testing.integration`** — pytest-marker-gated
+  behavioural conformance suite that mirrors `airframe.testing.contracts`
+  but exercises live vendor endpoints. Nine tests cover schema
+  round-trip, plain-text execute, `list_models()`, streaming,
+  thinking, function-tool round-trip, permission callback firing,
+  hook observation, and budget-cap enforcement. Each test
+  `pytest.skip`s itself when credentials are absent so the suite
+  stays usable on partially-configured machines. Run with
+  `pytest -m integration`. Four in-tree wrapper modules
+  (`tests/test_<adapter>_integration.py`) provide the per-adapter
+  fixture; third-party authors follow the same import-into-suite
+  pattern as for the structural contracts.
+- **Twelve new structural contracts** in `airframe.testing.contracts`
+  covering Phase 2–5: thinking signature, polymorphic-prompt
+  decline path, `tools=` ↔ `TOOLS_FUNCTION`, `mcp_servers=` ↔
+  per-transport `TOOLS_MCP_*`, `on_permission=` ↔
+  `PERMISSION_CALLBACK`, `on_event=` ↔ `LIFECYCLE_HOOKS`,
+  `EMITTABLE_HOOK_KINDS` is a subset of the eight canonical
+  literals, `max_turns=` ↔ `BUDGET_TURN_CAP`,
+  `max_budget_usd=` ↔ `BUDGET_USD_CAP`, cross-namespace
+  `ProviderOptions` rejection. All four in-tree conformance test
+  modules import the new contracts; the suite count went from
+  ~16 to ~27 per adapter.
+- **`ClaudeOptions` populated with three fields** —
+  `append_system_prompt`, `fork_session`, `strict_mcp_config`
+  thread through into `ClaudeAgentOptions` at connect time with the
+  namespace fingerprint joining the cache key.
+- **`CopilotOptions` populated with four fields** —
+  `available_tools`, `excluded_tools`, `skill_directories`,
+  `working_directory` thread through into `CopilotClient.create_session`
+  at session-creation time.
+- **`CodexOptions` populated with four fields** —
+  `working_directory`, `additional_directories`,
+  `network_access_enabled`, `web_search_enabled` thread through into
+  `ThreadOptions` at `Codex.start_thread` / `resume_thread` time.
+- **`OpenAICompatOptions` populated with six fields** —
+  `prompt_cache_key`, `prompt_cache_retention`, `service_tier`,
+  `safety_identifier`, `verbosity`, `store` merge into every
+  `chat.completions.create()` call via a new
+  `_apply_provider_options()` helper.
+- **Shared `_check_provider_options` helper** in `airframe.sessions`
+  — every adapter calls it at the top of `session()` to enforce
+  the tagged-union contract (passing `CopilotOptions` to
+  `ClaudeCodeRuntime` raises `UnsupportedFeatureError`).
+- **22 new per-adapter unit tests** across the four
+  `test_*_session.py` files: each field lands on the corresponding
+  SDK kwarg, default omits the kwarg, value change forces cache
+  rebuild (Claude / Copilot / Codex — fields bake at session-build
+  time), wrong-namespace raises.
+
+#### Changed
+
+- **`AgentRuntime.session(provider_options=)`** retyped from
+  `Any | None` to `ProviderOptions | None` on the protocol and on
+  every adapter's signature. Static type checkers now catch
+  cross-vendor mistakes that previously slipped through.
+- **README rewritten for Phase 1–5 surface.** The "The protocol"
+  section now shows all eight methods (the original five plus
+  `session`, `supports`, `unwrap`) and the new `AgentSession`
+  protocol. Added: a new "Sessions, streaming, and the new kwargs"
+  section showing tools / mcp / permission / hooks / budget /
+  provider_options together; current capability matrix replacing
+  the v0.5-era "still False" placeholder text; correct
+  `examples/probe_*.py` paths (the old README pointed at
+  `tests/probe_*.py` which moved in Phase 1).
+- **`docs/architecture.md` capability matrix refreshed** —
+  Phase 2/3/4/5 column placeholders replaced with the actual
+  post-Phase-5 ✓/✗ matrix; the "Streaming" section's Phase 3 caveat
+  updated; the "Where to look next" probe inventory expanded to
+  include the Phase 2–5 probes that landed.
+- **Stale docstrings rewritten.** `claude_code.py` module header
+  no longer describes the pre-Iteration-G mental model (where the
+  runtime owned the SDK client); `sessions.py` module preamble no
+  longer claims every adapter uses `_ThinAgentSession`. Both files
+  now describe their post-Iteration-G role honestly.
+- **`tests/test_options.py::test_options_are_empty_in_phase_0`
+  replaced with `test_options_field_inventory`** — pins the
+  populated field set per namespace so future removals/renames are
+  caught at PR time.
+
+#### Notes
+
+- `airframe.testing.integration` was promised in the v0.3.0
+  CHANGELOG "for v0.4.0" — three releases later it lands. The
+  earlier deferral is now stale and is closed by this change.
+- `_ThinAgentSession` and `_open_thin_session` remain in
+  `airframe.sessions` as a reference implementation for third-party
+  adapter authors; the docstring now accurately states "none of the
+  built-in adapters use this any more".
+
+---
+
 **Phase 5 of the [implementation plan](docs/implementation-plan.md)
 is complete — permission, hooks, budget.** Iteration A landed the
 protocol-surface shape locks (:class:`PermissionRequest`,
@@ -1491,8 +1591,11 @@ will use, plus a v0 contract-gap fix that wires plain-text
   vendor credentials and naturally co-locate with Phase 1
   streaming/multi-turn integration test infrastructure. The
   existing `examples/probe_*.py` scripts already exercise these
-  end-to-end against real vendors. Will land as
-  `airframe.testing.integration` in v0.4.0.
+  end-to-end against real vendors.
+
+  > Resolved (post-Phase-5, v1.0-readiness pass):
+  > `airframe.testing.integration` now ships. See the
+  > `[Unreleased]` block at the top of this file.
 
 ## [0.2.0] — 2026-05-16
 
