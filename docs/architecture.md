@@ -33,7 +33,7 @@ Airframe is two collaborating protocols. **`AgentRuntime`** is the
 runtime-wide entry point — auth, model discovery, capability flags,
 one-shot execution, session factory. **`AgentSession`** is the
 multi-turn conversation handle that owns vendor session state for
-its lifetime. The runtime/session split shipped in v0.5.0.
+its lifetime.
 
 ```
 ┌────────────────────────────────────────────────────────────────────┐
@@ -126,7 +126,7 @@ types from `airframe.events`:
 | `ToolCallResult(tool_call_id, output, is_error)` | A tool invocation completed. Pairs with the matching `ToolCallStart`. |
 | `TurnComplete(result)` | Final event in every successful stream. Carries the same `RuntimeResult` `execute()` would have returned. |
 
-**Shape lock (ADR-003).** The variant set and field-by-field shapes
+**Shape lock.** The variant set and field-by-field shapes
 are public surface — once consumer code does `match event:`,
 renaming or removing is a major-version break. Adding a new variant
 later is safe (consumers branch with a wildcard / `isinstance`).
@@ -200,9 +200,8 @@ set.
   vendors leave it `None` because there's no vendor-side session to
   refer to. Consumer code branching on `session.id is None` can
   treat that as the "stateless adapter" signal.
-* **`reset()` is a no-op after Iteration G.** Per-call sessions own
-  their own state; the runtime has nothing scope-bound to drop.
-  Kept on the protocol for completeness and back-compat.
+* **`reset()` is a no-op on every adapter today.** Per-call sessions
+  own their own state; the runtime has nothing scope-bound to drop.
 * **`validate_binding()` is non-async and cheap.** "Would you serve
   this?" predicate the caller can evaluate before attempting the
   call. Adapters check `provider_id` + maybe a pattern on `model_id`;
@@ -230,7 +229,7 @@ type without needing per-adapter knowledge:
 | `RuntimeServerStartError` | Adapter couldn't bring its backend up at all. |
 | `RuntimeCancelledError` | Caller-initiated abort (`session.cancel()`). |
 | `UnsupportedBindingError` | Programming error — adapter doesn't serve this `(provider, model)` pair. |
-| `UnsupportedFeatureError` | Capability decline — adapter doesn't wire this feature. Companion to `UnsupportedBindingError` that honours the "no silent fallbacks" principle. |
+| `UnsupportedFeatureError` | Capability decline — adapter doesn't wire this feature. Raised at the boundary so the call fails fast rather than silently downgrading. |
 
 Adapters classify their vendor's failures into these buckets at the
 adapter boundary. What to *do* with each — retry, fall back to a
@@ -348,9 +347,7 @@ honour this.
 
 `reset()` is also idempotent — and a no-op on every adapter today.
 Per-call sessions own their state; the runtime has nothing
-scope-bound to drop. `reset()` is kept on the protocol for
-completeness and back-compat with consumers that called it before
-the runtime/session split.
+scope-bound to drop.
 
 `cancel()` on `AgentSession` is cheap and idempotent: no-op when no
 turn is in flight; adapters not declaring `Feature.CANCEL` raise

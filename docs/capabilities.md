@@ -8,8 +8,8 @@ declined capabilities never reach a `RuntimeAuthError` at the call
 site; they raise `UnsupportedFeatureError` with a `feature=`
 attribute at the gate.
 
-The string values of every `Feature` member are public surface —
-locked at v0.3.0. Renaming would be a major-version break.
+The string values of every `Feature` member are public surface.
+Renaming would be a major-version break.
 
 ## Capability matrix
 

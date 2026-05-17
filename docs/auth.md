@@ -79,7 +79,7 @@ Three sources, checked in order at `execute()` time:
   Copilot access raise `RuntimeAuthError` on first call.
 - `cli_path=` overrides the Copilot CLI binary path; honours
   `COPILOT_CLI_PATH` env var.
-- The Copilot CLI **rejects Claude models** — `validate_binding()`
+- The Copilot CLI does not serve Claude models — `validate_binding()`
   returns False for any `model_id` starting with `claude-`. Route
   Claude work through `ClaudeCodeRuntime` instead.
 
@@ -111,8 +111,8 @@ Four sources, checked in order:
 
 - The implicit `~/.codex/auth.json` path means `CodexRuntime()`
   with no env vars **may still work** if the user has run
-  `codex login` previously. That's by design — we let the CLI
-  handle its own credential file.
+  `codex login` — the codex CLI subprocess reads its own credential
+  file directly.
 - `codex_path=` overrides the Codex CLI binary path; honours
   `CODEX_CLI_PATH` env var.
 - `sandbox_mode=` controls the codex subprocess's filesystem

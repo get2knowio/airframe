@@ -64,7 +64,7 @@ class AgentRuntime(Protocol):
 - **`execute`** — single-turn convenience over `session().execute() + close()`.
 - **`session`** — multi-turn `AgentSession` factory (see below).
 - **`reset`** — no-op on every built-in adapter today (the runtime
-  is sessionless). Kept for protocol completeness.
+  is sessionless).
 - **`close`** — idempotent, never raises. Safe in `finally` blocks.
 - **`validate_binding`** — cheap predicate; doesn't make network calls.
 - **`list_models`** — hits the vendor's models endpoint; requires

@@ -96,9 +96,9 @@ account has access to, including embeddings). Common picks:
 - `gpt-5-codex-mini` — smaller / cheaper.
 - `o5-codex` — reasoning-optimised variant.
 
-**Claude models are rejected.** `validate_binding()` returns False
-for any `model_id` starting with `claude-`. Codex is OpenAI-only
-by design.
+**Claude models are not accepted.** `validate_binding()` returns
+False for any `model_id` starting with `claude-`. Codex serves
+OpenAI models only.
 
 ## Structured output
 

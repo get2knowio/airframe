@@ -75,16 +75,17 @@ Groq / Fireworks / OpenRouter as future siblings) shares the
 `OpenAICompatibleRuntime` base — subclasses are ~30 lines. See
 [`docs/adapters/third-party.md`](docs/adapters/third-party.md).
 
-Provider IDs are strict — one canonical ID per adapter, no aliases.
-`"anthropic"` is reserved for a future direct-API `AnthropicRuntime`;
-`"openai"` for a future `OpenAIRuntime`. Current adapters cover the
-*subscription* paths (Claude Max, Copilot, ChatGPT Plus, opencode-go).
+Each adapter has one canonical provider ID. `"anthropic"` is
+reserved for a future direct-API `AnthropicRuntime`; `"openai"`
+for a future `OpenAIRuntime`. Current adapters cover the
+*subscription* paths (Claude Max, Copilot, ChatGPT Plus,
+opencode-go).
 
 `ClaudeCodeRuntime` is the only adapter that accepts Claude
-bindings. `CopilotRuntime` *rejects* Claude bindings on purpose —
-Claude served via Copilot Chat Completions emits markdown-fenced
-JSON instead of honouring tool calls, so it can't satisfy the
-structured-output contract.
+bindings. `CopilotRuntime` declines them — Claude served via
+Copilot Chat Completions emits markdown-fenced JSON instead of
+honouring tool calls, so it can't satisfy the structured-output
+contract.
 
 ## Capability matrix
 
@@ -111,7 +112,7 @@ Current snapshot (run
 Capability flags are statically declared per adapter. Check
 `runtime.supports(Feature.X)` before invoking a feature; declined
 capabilities raise `UnsupportedFeatureError` with a `feature=`
-attribute, never a silent fallback.
+attribute so the call fails fast.
 
 Full per-feature semantics in [`docs/capabilities.md`](docs/capabilities.md);
 per-adapter quirks under [`docs/adapters/`](docs/adapters/).
