@@ -87,6 +87,31 @@ class _FakeAssistantMessage:
         self.session_id = session_id
 
 
+class _FakeToolUseBlock:
+    def __init__(self, id: str, name: str, input: dict[str, Any]) -> None:
+        self.id = id
+        self.name = name
+        self.input = input
+
+
+class _FakeToolResultBlock:
+    def __init__(
+        self,
+        tool_use_id: str,
+        content: Any = None,
+        is_error: bool | None = None,
+    ) -> None:
+        self.tool_use_id = tool_use_id
+        self.content = content
+        self.is_error = is_error
+
+
+class _FakeUserMessage:
+    def __init__(self, content: Any, session_id: str = "sess-123") -> None:
+        self.content = content
+        self.session_id = session_id
+
+
 # ---------------------------------------------------------------------------
 # Fixture: patch the SDK symbols the adapter imports lazily
 # ---------------------------------------------------------------------------
@@ -116,11 +141,39 @@ def mock_sdk(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     monkeypatch.setattr(sdk, "AssistantMessage", _FakeAssistantMessage)
     monkeypatch.setattr(sdk, "StreamEvent", _FakeStreamEvent)
     monkeypatch.setattr(sdk, "TextBlock", _FakeTextBlock)
+    monkeypatch.setattr(sdk, "ToolUseBlock", _FakeToolUseBlock)
+    monkeypatch.setattr(sdk, "ToolResultBlock", _FakeToolResultBlock)
+    monkeypatch.setattr(sdk, "UserMessage", _FakeUserMessage)
+
+    # create_sdk_mcp_server is invoked at connect time when tools= is
+    # passed; return a sentinel the adapter can pass through to
+    # ClaudeAgentOptions.mcp_servers. The @tool decorator is called
+    # once per FunctionTool — return a stable identifier so assertions
+    # can inspect which tools were registered.
+    server_calls: list[dict[str, Any]] = []
+    tool_calls: list[dict[str, Any]] = []
+
+    def fake_create_server(*, name: str, tools: list[Any]) -> Any:
+        server_calls.append({"name": name, "tools": tools})
+        return {"_server": name, "_tools": tools}
+
+    def fake_tool_decorator(name: str, description: str, input_schema: Any) -> Any:
+        def _wrap(func: Any) -> Any:
+            tool_calls.append({"name": name, "description": description, "schema": input_schema})
+            func._airframe_tool_name = name  # type: ignore[attr-defined]
+            return func
+
+        return _wrap
+
+    monkeypatch.setattr(sdk, "create_sdk_mcp_server", fake_create_server)
+    monkeypatch.setattr(sdk, "tool", fake_tool_decorator)
 
     return {
         "client": client,
         "factory": factory,
         "options_kwargs": captured_options,
+        "server_calls": server_calls,
+        "tool_calls": tool_calls,
     }
 
 
@@ -786,4 +839,320 @@ async def test_close_is_idempotent(mock_sdk: dict[str, Any]) -> None:
     sess = rt.session()
     await sess.close()
     await sess.close()
+
+
+# ---------------------------------------------------------------------------
+# Function tools (Phase 3 Iteration C)
+# ---------------------------------------------------------------------------
+
+
+class _AddParams(BaseModel):
+    a: float
+    b: float
+
+
+async def _add(params: _AddParams) -> float:
+    return params.a + params.b
+
+
+def _build_tool() -> Any:
+    from airframe import FunctionTool
+
+    return FunctionTool(
+        name="add",
+        description="Add two numbers.",
+        params=_AddParams,
+        handler=_add,
+    )
+
+
+async def test_tools_register_mcp_server_and_allowed_tools(
+    mock_sdk: dict[str, Any],
+) -> None:
+    """tools= triggers an in-process MCP server and the matching allowed-tools entry."""
+    final = _FakeResultMessage(result="ok")
+
+    async def fake_receive() -> Any:
+        yield final
+
+    mock_sdk["client"].receive_response = fake_receive
+
+    rt = ClaudeCodeRuntime()
+    sess = rt.session(tools=[_build_tool()])
+    try:
+        await sess.execute("what's 17 + 23?")
+    finally:
+        await sess.close()
+
+    # The MCP server was built once with our one tool.
+    assert len(mock_sdk["server_calls"]) == 1
+    server_call = mock_sdk["server_calls"][0]
+    assert server_call["name"] == "airframe_tools"
+    assert len(server_call["tools"]) == 1
+
+    # The @tool decorator captured the FunctionTool's metadata.
+    assert len(mock_sdk["tool_calls"]) == 1
+    tool_call = mock_sdk["tool_calls"][0]
+    assert tool_call["name"] == "add"
+    assert tool_call["description"] == "Add two numbers."
+    assert tool_call["schema"] is _AddParams
+
+    # ClaudeAgentOptions carries both mcp_servers and allowed_tools.
+    opts = mock_sdk["options_kwargs"][0]
+    assert "mcp_servers" in opts
+    assert "airframe_tools" in opts["mcp_servers"]
+    assert opts["allowed_tools"] == ["mcp__airframe_tools__add"]
+
+
+async def test_tools_handler_invocation_through_mcp_wrapper(
+    mock_sdk: dict[str, Any],
+) -> None:
+    """The @tool wrapper validates args, awaits the handler, returns the MCP envelope."""
+    final = _FakeResultMessage(result="done")
+
+    async def fake_receive() -> Any:
+        yield final
+
+    mock_sdk["client"].receive_response = fake_receive
+
+    rt = ClaudeCodeRuntime()
+    sess = rt.session(tools=[_build_tool()])
+    try:
+        await sess.execute("anything")
+    finally:
+        await sess.close()
+
+    # Pull the wrapped coroutine out of the server config and invoke it
+    # directly — same path the SDK would take when Claude calls the tool.
+    server_call = mock_sdk["server_calls"][0]
+    wrapped = server_call["tools"][0]
+    result = await wrapped({"a": 17, "b": 23})
+    assert result == {"content": [{"type": "text", "text": "40.0"}]}
+
+
+async def test_tools_handler_exception_returns_is_error_envelope(
+    mock_sdk: dict[str, Any],
+) -> None:
+    """A raising handler comes back as ``isError=True`` so the model can recover."""
+    from airframe import FunctionTool
+
+    async def boom(_: _AddParams) -> float:
+        raise ValueError("the maths fell apart")
+
+    tool = FunctionTool(name="add", description="Add.", params=_AddParams, handler=boom)
+
+    final = _FakeResultMessage(result="apologies")
+
+    async def fake_receive() -> Any:
+        yield final
+
+    mock_sdk["client"].receive_response = fake_receive
+
+    rt = ClaudeCodeRuntime()
+    sess = rt.session(tools=[tool])
+    try:
+        await sess.execute("call add(1,2)")
+    finally:
+        await sess.close()
+
+    wrapped = mock_sdk["server_calls"][0]["tools"][0]
+    result = await wrapped({"a": 1, "b": 2})
+    assert result["isError"] is True
+    assert "ValueError" in result["content"][0]["text"]
+    assert "the maths fell apart" in result["content"][0]["text"]
+
+
+async def test_tools_invalid_arguments_return_validation_error(
+    mock_sdk: dict[str, Any],
+) -> None:
+    """Args that don't validate against the params model surface as a tool error."""
+    final = _FakeResultMessage(result="ok")
+
+    async def fake_receive() -> Any:
+        yield final
+
+    mock_sdk["client"].receive_response = fake_receive
+
+    rt = ClaudeCodeRuntime()
+    sess = rt.session(tools=[_build_tool()])
+    try:
+        await sess.execute("anything")
+    finally:
+        await sess.close()
+
+    wrapped = mock_sdk["server_calls"][0]["tools"][0]
+    result = await wrapped({"a": "not-a-number", "b": 2})
+    assert result["isError"] is True
+    assert "_AddParams" in result["content"][0]["text"]
+
+
+async def test_stream_emits_tool_call_start_and_result_events(
+    mock_sdk: dict[str, Any],
+) -> None:
+    """stream() translates ToolUseBlock/ToolResultBlock into airframe events."""
+    from airframe.events import ToolCallResult, ToolCallStart
+
+    assistant = _FakeAssistantMessage(
+        content=[
+            _FakeTextBlock("Let me add those..."),
+            _FakeToolUseBlock(
+                id="toolu_01", name="mcp__airframe_tools__add", input={"a": 17, "b": 23}
+            ),
+        ]
+    )
+    user = _FakeUserMessage(
+        content=[
+            _FakeToolResultBlock(
+                tool_use_id="toolu_01",
+                content=[{"type": "text", "text": "40.0"}],
+            )
+        ]
+    )
+    final_assistant = _FakeAssistantMessage(content=[_FakeTextBlock("17 + 23 = 40.")])
+    final = _FakeResultMessage(result="17 + 23 = 40.")
+
+    async def fake_receive() -> Any:
+        yield assistant
+        yield user
+        yield final_assistant
+        yield final
+
+    mock_sdk["client"].receive_response = fake_receive
+
+    rt = ClaudeCodeRuntime()
+    sess = rt.session(tools=[_build_tool()])
+    events: list[Any] = []
+    try:
+        async for event in sess.stream("what's 17 + 23?"):
+            events.append(event)
+    finally:
+        await sess.close()
+
+    starts = [e for e in events if isinstance(e, ToolCallStart)]
+    results = [e for e in events if isinstance(e, ToolCallResult)]
+    turns = [e for e in events if isinstance(e, TurnComplete)]
+    assert len(starts) == 1
+    # The MCP prefix is stripped so consumers see the FunctionTool.name.
+    assert starts[0].tool_name == "add"
+    assert starts[0].tool_call_id == "toolu_01"
+    assert "17" in starts[0].arguments_preview and "23" in starts[0].arguments_preview
+    assert len(results) == 1
+    assert results[0].tool_call_id == "toolu_01"
+    assert results[0].output == "40.0"
+    assert results[0].is_error is False
+    assert len(turns) == 1
+    assert events[-1] is turns[0]
+
+
+async def test_stream_surfaces_is_error_on_tool_result_block(
+    mock_sdk: dict[str, Any],
+) -> None:
+    """ToolResultBlock(is_error=True) propagates to ToolCallResult.is_error."""
+    from airframe.events import ToolCallResult
+
+    assistant = _FakeAssistantMessage(
+        content=[
+            _FakeToolUseBlock(
+                id="toolu_42", name="mcp__airframe_tools__add", input={"a": 1, "b": 2}
+            )
+        ]
+    )
+    user = _FakeUserMessage(
+        content=[
+            _FakeToolResultBlock(
+                tool_use_id="toolu_42",
+                content="kaboom",
+                is_error=True,
+            )
+        ]
+    )
+    final = _FakeResultMessage(result="apologies")
+
+    async def fake_receive() -> Any:
+        yield assistant
+        yield user
+        yield final
+
+    mock_sdk["client"].receive_response = fake_receive
+
+    rt = ClaudeCodeRuntime()
+    sess = rt.session(tools=[_build_tool()])
+    results: list[ToolCallResult] = []
+    try:
+        async for event in sess.stream("call add"):
+            if isinstance(event, ToolCallResult):
+                results.append(event)
+    finally:
+        await sess.close()
+
+    assert len(results) == 1
+    assert results[0].is_error is True
+    assert results[0].output == "kaboom"
+
+
+async def test_tools_change_between_turns_reconnects(
+    mock_sdk: dict[str, Any],
+) -> None:
+    """Switching tools= invalidates the cached client (mcp_servers is connect-bound)."""
+    from airframe import FunctionTool
+
+    async def _other(_: _AddParams) -> float:
+        return 0.0
+
+    other_tool = FunctionTool(
+        name="other",
+        description="Different tool.",
+        params=_AddParams,
+        handler=_other,
+    )
+
+    final = _FakeResultMessage(result="r")
+
+    async def fake_receive() -> Any:
+        yield final
+
+    mock_sdk["client"].receive_response = fake_receive
+
+    rt = ClaudeCodeRuntime()
+    sess1 = rt.session(tools=[_build_tool()])
+    try:
+        await sess1.execute("turn 1")
+    finally:
+        await sess1.close()
+
+    factory_after_first = mock_sdk["factory"].call_count
+
+    sess2 = rt.session(tools=[other_tool])
+    try:
+        await sess2.execute("turn 2")
+    finally:
+        await sess2.close()
+
+    # A fresh session built a fresh client, regardless of caching.
+    assert mock_sdk["factory"].call_count > factory_after_first
+
+
+async def test_no_tools_omits_mcp_servers_and_allowed_tools(
+    mock_sdk: dict[str, Any],
+) -> None:
+    """When tools= is absent, ClaudeAgentOptions stays clean."""
+    final = _FakeResultMessage(result="ok")
+
+    async def fake_receive() -> Any:
+        yield final
+
+    mock_sdk["client"].receive_response = fake_receive
+
+    rt = ClaudeCodeRuntime()
+    sess = rt.session()
+    try:
+        await sess.execute("hi")
+    finally:
+        await sess.close()
+
+    opts = mock_sdk["options_kwargs"][0]
+    assert "mcp_servers" not in opts
+    assert "allowed_tools" not in opts
+    # And no MCP server was created.
+    assert mock_sdk["server_calls"] == []
     await sess.close()

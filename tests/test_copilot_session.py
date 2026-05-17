@@ -93,6 +93,55 @@ class _FakeEvent:
         self.data = data
 
 
+class _FakeToolStart:
+    def __init__(
+        self,
+        *,
+        tool_call_id: str,
+        tool_name: str,
+        arguments: Any = None,
+    ) -> None:
+        self.tool_call_id = tool_call_id
+        self.tool_name = tool_name
+        self.arguments = arguments
+        self.mcp_server_name = None
+        self.mcp_tool_name = None
+        self.parent_tool_call_id = None
+
+
+class _FakeToolResult:
+    def __init__(self, *, content: str = "") -> None:
+        self.content = content
+        self.contents = None
+        self.detailed_content = None
+
+
+class _FakeToolError:
+    def __init__(self, *, message: str, code: str | None = None) -> None:
+        self.message = message
+        self.code = code
+
+
+class _FakeToolComplete:
+    def __init__(
+        self,
+        *,
+        tool_call_id: str,
+        success: bool = True,
+        result: Any = None,
+        error: Any = None,
+    ) -> None:
+        self.tool_call_id = tool_call_id
+        self.success = success
+        self.result = result
+        self.error = error
+        self.interaction_id = None
+        self.is_user_requested = None
+        self.model = None
+        self.parent_tool_call_id = None
+        self.tool_telemetry = None
+
+
 # ---------------------------------------------------------------------------
 # Fixture
 # ---------------------------------------------------------------------------
@@ -172,6 +221,8 @@ def mock_sdk(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     monkeypatch.setattr(se_mod, "SessionErrorData", _FakeSessionError)
     monkeypatch.setattr(se_mod, "AssistantMessageDeltaData", _FakeMessageDelta)
     monkeypatch.setattr(se_mod, "AssistantReasoningDeltaData", _FakeReasoningDelta)
+    monkeypatch.setattr(se_mod, "ToolExecutionStartData", _FakeToolStart)
+    monkeypatch.setattr(se_mod, "ToolExecutionCompleteData", _FakeToolComplete)
 
     return {
         "client_factory": mock_client_factory,
@@ -795,3 +846,335 @@ async def test_close_does_not_stop_runtime_client(mock_sdk: dict[str, Any]) -> N
     await sess.execute("hi")
     await sess.close()
     mock_sdk["client"].stop.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Function tools (Phase 3 Iteration C)
+# ---------------------------------------------------------------------------
+
+
+class _AddParams(BaseModel):
+    a: float
+    b: float
+
+
+async def _add(params: _AddParams) -> float:
+    return params.a + params.b
+
+
+def _build_tool() -> Any:
+    from airframe import FunctionTool
+
+    return FunctionTool(
+        name="add",
+        description="Add two numbers.",
+        params=_AddParams,
+        handler=_add,
+    )
+
+
+async def test_tools_passed_to_create_session(mock_sdk: dict[str, Any]) -> None:
+    """tools= becomes the ``tools=`` kwarg on CopilotClient.create_session."""
+
+    async def fake_send(prompt: str, *, timeout: float, **_: Any) -> None:
+        _fire(mock_sdk["handlers"], _FakeEvent(_FakeUsage()))
+        _fire(mock_sdk["handlers"], _FakeEvent(_FakeAssistantMessage("done")))
+
+    mock_sdk["session"].send_and_wait = AsyncMock(side_effect=fake_send)
+
+    rt = CopilotRuntime()
+    sess = rt.session(tools=[_build_tool()])
+    try:
+        await sess.execute("call add")
+    finally:
+        await sess.close()
+
+    create_call = mock_sdk["client"].create_session.await_args_list[0]
+    assert "tools" in create_call.kwargs
+    # Exactly one tool (no submit_result; schema=None).
+    assert len(create_call.kwargs["tools"]) == 1
+    # define_tool was called with the FunctionTool's metadata.
+    captured = mock_sdk["captured_tools"]
+    assert any(
+        t["name"] == "add"
+        and t["description"] == "Add two numbers."
+        and t["params_type"] is _AddParams
+        and t["skip_permission"] is True
+        for t in captured
+    )
+
+
+async def test_tools_handler_signature_adapted_to_copilot(
+    mock_sdk: dict[str, Any],
+) -> None:
+    """Copilot hands the handler ``(params, invocation_context)`` — the wrapper
+    discards the second arg and awaits the airframe handler."""
+
+    async def fake_send(prompt: str, *, timeout: float, **_: Any) -> None:
+        _fire(mock_sdk["handlers"], _FakeEvent(_FakeUsage()))
+        _fire(mock_sdk["handlers"], _FakeEvent(_FakeAssistantMessage("done")))
+
+    mock_sdk["session"].send_and_wait = AsyncMock(side_effect=fake_send)
+
+    rt = CopilotRuntime()
+    sess = rt.session(tools=[_build_tool()])
+    try:
+        await sess.execute("anything")
+    finally:
+        await sess.close()
+
+    # Pull the captured handler and call it with the SDK's (params,
+    # invocation) shape; the wrapper should ignore the invocation.
+    captured = next(t for t in mock_sdk["captured_tools"] if t["name"] == "add")
+    params = _AddParams(a=17, b=23)
+    result = await captured["handler"](params, MagicMock())
+    assert result == 40.0
+
+
+async def test_submit_result_coexists_with_user_tools(mock_sdk: dict[str, Any]) -> None:
+    """schema= + tools= → submit_result first, then user tools."""
+
+    async def fake_send(prompt: str, *, timeout: float, **_: Any) -> None:
+        # Find the captured submit_result handler in mock_sdk and invoke it
+        # with a payload that matches the schema, so _build_result returns
+        # the structured payload (not a structured-output failure).
+        submit_entry = next(
+            t for t in mock_sdk["captured_tools"] if t["name"] == SUBMIT_RESULT_TOOL
+        )
+        await submit_entry["handler"](_Schema(summary="ok", count=1), MagicMock())
+        _fire(mock_sdk["handlers"], _FakeEvent(_FakeUsage()))
+        _fire(mock_sdk["handlers"], _FakeEvent(_FakeAssistantMessage("")))
+
+    mock_sdk["session"].send_and_wait = AsyncMock(side_effect=fake_send)
+
+    rt = CopilotRuntime()
+    sess = rt.session(tools=[_build_tool()])
+    try:
+        result = await sess.execute("brief me", schema=_Schema)
+    finally:
+        await sess.close()
+
+    create_call = mock_sdk["client"].create_session.await_args_list[0]
+    tools = create_call.kwargs["tools"]
+    assert len(tools) == 2
+    # submit_result is in slot 0 (the model sees the gate first).
+    captured_order = [t["name"] for t in mock_sdk["captured_tools"]]
+    assert captured_order.index(SUBMIT_RESULT_TOOL) < captured_order.index("add")
+    # The structured-output round-trip still produced its dict payload.
+    assert result.structured == {"summary": "ok", "count": 1}
+
+
+async def test_no_tools_omits_tools_kwarg(mock_sdk: dict[str, Any]) -> None:
+    """No tools= and no schema= → no ``tools=`` on create_session."""
+
+    async def fake_send(prompt: str, *, timeout: float, **_: Any) -> None:
+        _fire(mock_sdk["handlers"], _FakeEvent(_FakeUsage()))
+        _fire(mock_sdk["handlers"], _FakeEvent(_FakeAssistantMessage("ok")))
+
+    mock_sdk["session"].send_and_wait = AsyncMock(side_effect=fake_send)
+
+    rt = CopilotRuntime()
+    sess = rt.session()
+    try:
+        await sess.execute("hi")
+    finally:
+        await sess.close()
+
+    create_call = mock_sdk["client"].create_session.await_args_list[0]
+    assert "tools" not in create_call.kwargs
+
+
+async def test_stream_emits_tool_call_start_and_result(mock_sdk: dict[str, Any]) -> None:
+    """stream() translates ToolExecutionStart/Complete events into airframe events."""
+    from airframe.events import ToolCallResult, ToolCallStart
+
+    async def fake_send(prompt: str, *, timeout: float, **_: Any) -> None:
+        _fire(
+            mock_sdk["handlers"],
+            _FakeEvent(
+                _FakeToolStart(
+                    tool_call_id="tc-1",
+                    tool_name="add",
+                    arguments={"a": 17, "b": 23},
+                )
+            ),
+        )
+        _fire(
+            mock_sdk["handlers"],
+            _FakeEvent(
+                _FakeToolComplete(
+                    tool_call_id="tc-1",
+                    success=True,
+                    result=_FakeToolResult(content="40.0"),
+                )
+            ),
+        )
+        _fire(mock_sdk["handlers"], _FakeEvent(_FakeMessageDelta(delta_content="17+23=40")))
+        _fire(mock_sdk["handlers"], _FakeEvent(_FakeUsage()))
+        _fire(mock_sdk["handlers"], _FakeEvent(_FakeAssistantMessage("17+23=40")))
+
+    mock_sdk["session"].send_and_wait = AsyncMock(side_effect=fake_send)
+
+    rt = CopilotRuntime()
+    sess = rt.session(tools=[_build_tool()])
+    events: list[Any] = []
+    try:
+        async for event in sess.stream("what's 17 + 23?"):
+            events.append(event)
+    finally:
+        await sess.close()
+
+    starts = [e for e in events if isinstance(e, ToolCallStart)]
+    results = [e for e in events if isinstance(e, ToolCallResult)]
+    turns = [e for e in events if isinstance(e, TurnComplete)]
+    assert len(starts) == 1
+    assert starts[0].tool_name == "add"
+    assert starts[0].tool_call_id == "tc-1"
+    assert "17" in starts[0].arguments_preview and "23" in starts[0].arguments_preview
+    assert len(results) == 1
+    assert results[0].tool_call_id == "tc-1"
+    assert results[0].output == "40.0"
+    assert results[0].is_error is False
+    assert len(turns) == 1
+    assert events[-1] is turns[0]
+
+
+async def test_stream_submit_result_tool_call_is_filtered(
+    mock_sdk: dict[str, Any],
+) -> None:
+    """The forced submit_result tool is structured-output plumbing, not a
+    user-visible tool call — the streaming events suppress it."""
+    from airframe.events import ToolCallResult, ToolCallStart
+
+    async def fake_send(prompt: str, *, timeout: float, **_: Any) -> None:
+        # Drive the submit_result handler so _build_result yields a structured
+        # payload (and we can be sure suppression doesn't break that path).
+        submit_entry = next(
+            t for t in mock_sdk["captured_tools"] if t["name"] == SUBMIT_RESULT_TOOL
+        )
+        await submit_entry["handler"](_Schema(summary="ok", count=1), MagicMock())
+        _fire(
+            mock_sdk["handlers"],
+            _FakeEvent(
+                _FakeToolStart(
+                    tool_call_id="submit-1",
+                    tool_name=SUBMIT_RESULT_TOOL,
+                    arguments={"summary": "ok", "count": 1},
+                )
+            ),
+        )
+        _fire(
+            mock_sdk["handlers"],
+            _FakeEvent(
+                _FakeToolComplete(
+                    tool_call_id="submit-1",
+                    success=True,
+                    result=_FakeToolResult(content='{"ok": true}'),
+                )
+            ),
+        )
+        _fire(mock_sdk["handlers"], _FakeEvent(_FakeUsage()))
+        _fire(mock_sdk["handlers"], _FakeEvent(_FakeAssistantMessage("")))
+
+    mock_sdk["session"].send_and_wait = AsyncMock(side_effect=fake_send)
+
+    rt = CopilotRuntime()
+    sess = rt.session(tools=[_build_tool()])
+    events: list[Any] = []
+    try:
+        async for event in sess.stream("brief me", schema=_Schema):
+            events.append(event)
+    finally:
+        await sess.close()
+
+    # The submit_result tool call did not produce visible events.
+    starts = [e for e in events if isinstance(e, ToolCallStart)]
+    results = [e for e in events if isinstance(e, ToolCallResult)]
+    assert starts == []
+    assert results == []
+    # But the final TurnComplete still carries the structured payload.
+    turn = next(e for e in events if isinstance(e, TurnComplete))
+    assert turn.result.structured == {"summary": "ok", "count": 1}
+
+
+async def test_stream_tool_failure_surfaces_is_error(mock_sdk: dict[str, Any]) -> None:
+    """ToolExecutionCompleteData(success=False) maps to is_error=True."""
+    from airframe.events import ToolCallResult
+
+    async def fake_send(prompt: str, *, timeout: float, **_: Any) -> None:
+        _fire(
+            mock_sdk["handlers"],
+            _FakeEvent(
+                _FakeToolStart(
+                    tool_call_id="tc-x",
+                    tool_name="add",
+                    arguments={"a": 1, "b": 2},
+                )
+            ),
+        )
+        _fire(
+            mock_sdk["handlers"],
+            _FakeEvent(
+                _FakeToolComplete(
+                    tool_call_id="tc-x",
+                    success=False,
+                    error=_FakeToolError(message="kaboom", code="E_ARG"),
+                )
+            ),
+        )
+        _fire(mock_sdk["handlers"], _FakeEvent(_FakeUsage()))
+        _fire(mock_sdk["handlers"], _FakeEvent(_FakeAssistantMessage("apologies")))
+
+    mock_sdk["session"].send_and_wait = AsyncMock(side_effect=fake_send)
+
+    rt = CopilotRuntime()
+    sess = rt.session(tools=[_build_tool()])
+    results: list[ToolCallResult] = []
+    try:
+        async for event in sess.stream("call add"):
+            if isinstance(event, ToolCallResult):
+                results.append(event)
+    finally:
+        await sess.close()
+
+    assert len(results) == 1
+    assert results[0].is_error is True
+    assert "E_ARG" in str(results[0].output)
+    assert "kaboom" in str(results[0].output)
+
+
+async def test_tools_change_between_turns_rebuilds_session(
+    mock_sdk: dict[str, Any],
+) -> None:
+    """A tools-list change invalidates the cached CopilotSession."""
+
+    async def fake_send(prompt: str, *, timeout: float, **_: Any) -> None:
+        _fire(mock_sdk["handlers"], _FakeEvent(_FakeUsage()))
+        _fire(mock_sdk["handlers"], _FakeEvent(_FakeAssistantMessage("r")))
+
+    mock_sdk["session"].send_and_wait = AsyncMock(side_effect=fake_send)
+
+    from airframe import FunctionTool
+
+    async def _other(_: _AddParams) -> float:
+        return 0.0
+
+    other = FunctionTool(name="other", description="X", params=_AddParams, handler=_other)
+
+    rt = CopilotRuntime()
+    sess1 = rt.session(tools=[_build_tool()])
+    try:
+        await sess1.execute("turn 1")
+    finally:
+        await sess1.close()
+    first_create_count = mock_sdk["client"].create_session.await_count
+
+    sess2 = rt.session(tools=[other])
+    try:
+        await sess2.execute("turn 2")
+    finally:
+        await sess2.close()
+
+    # A fresh session always creates a fresh CopilotSession (sessions
+    # don't share state across the factory boundary).
+    assert mock_sdk["client"].create_session.await_count > first_create_count

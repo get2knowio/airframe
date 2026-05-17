@@ -67,7 +67,14 @@ from airframe.errors import (
     RuntimeTransientError,
     UnsupportedFeatureError,
 )
-from airframe.events import ReasoningDelta, RuntimeEvent, TextDelta, TurnComplete
+from airframe.events import (
+    ReasoningDelta,
+    RuntimeEvent,
+    TextDelta,
+    ToolCallResult,
+    ToolCallStart,
+    TurnComplete,
+)
 from airframe.features import Feature
 from airframe.inputs import Prompt
 from airframe.models import ModelInfo
@@ -78,8 +85,9 @@ from airframe.protocol import (
     RuntimeResult,
     UnsupportedBindingError,
 )
-from airframe.sessions import _split_prompt_parts
+from airframe.sessions import _check_tools_supported, _split_prompt_parts
 from airframe.thinking import ThinkingMode
+from airframe.tools import FunctionTool
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -160,6 +168,17 @@ class CopilotRuntime(AgentRuntime):
     #:
     #: ``REASONING_BUDGET_TOKENS`` stays False — Copilot uses the
     #: enum, not a token budget. Pass a literal effort string instead.
+    #:
+    #: * ``TOOLS_FUNCTION`` — wired via :func:`copilot.define_tool`
+    #:   registrations passed through :meth:`CopilotClient.create_session`
+    #:   ``tools=`` slot. The SDK dispatches; airframe surfaces
+    #:   :class:`~airframe.events.ToolCallStart` /
+    #:   :class:`~airframe.events.ToolCallResult` from
+    #:   :class:`ToolExecutionStartData` /
+    #:   :class:`ToolExecutionCompleteData` session events.
+    #:   When ``schema=`` is also set, the adapter prepends the existing
+    #:   forced ``submit_result`` tool so structured-output coexists
+    #:   (Phase 3, Iteration C).
     SUPPORTED_FEATURES: ClassVar[frozenset[Feature]] = frozenset(
         {
             Feature.STRUCTURED_OUTPUT_JSON_SCHEMA,
@@ -169,6 +188,7 @@ class CopilotRuntime(AgentRuntime):
             Feature.REASONING_EFFORT,
             Feature.VISION_INPUT,
             Feature.FILE_INPUT,
+            Feature.TOOLS_FUNCTION,
         }
     )
 
@@ -283,6 +303,7 @@ class CopilotRuntime(AgentRuntime):
         resume: str | None = None,
         system: str | None = None,
         model: ProviderModel | None = None,
+        tools: list[FunctionTool] | None = None,
         provider_options: Any | None = None,
     ) -> AgentSession:
         """Open a bespoke :class:`CopilotAgentSession`.
@@ -308,8 +329,20 @@ class CopilotRuntime(AgentRuntime):
                 Claude bindings are rejected here too — same reason as
                 ``execute()``: Copilot routes Claude as markdown JSON,
                 not via tool calls.
+            tools: List of :class:`~airframe.tools.FunctionTool` the
+                model may invoke. Translated to
+                :func:`copilot.define_tool` registrations and passed
+                via :meth:`CopilotClient.create_session(tools=...)`.
+                When ``schema=`` is also set, the forced
+                ``submit_result`` tool is prepended to the user's
+                list so structured-output coexists with custom tools.
             provider_options: Reserved for Phase 2+ (currently unused).
         """
+        _check_tools_supported(
+            tools,
+            adapter_label=self.label,
+            feature_supported=self.supports(Feature.TOOLS_FUNCTION),
+        )
         # provider_options accepted but unused — Phase 2+ fills each
         # ProviderOptions dataclass as the corresponding feature lands.
         del provider_options
@@ -319,6 +352,7 @@ class CopilotRuntime(AgentRuntime):
             resume=resume,
             system=system,
             model_id=model_id,
+            tools=tools,
         )
 
     async def list_models(self) -> list[ModelInfo]:
@@ -518,6 +552,7 @@ class CopilotAgentSession:
         resume: str | None,
         system: str | None,
         model_id: str,
+        tools: list[FunctionTool] | None = None,
     ) -> None:
         self._runtime = runtime
         self._resume = resume
@@ -540,6 +575,12 @@ class CopilotAgentSession:
         # Seeded from resume= so consumer code that branches on
         # session.id before the first turn sees the right value.
         self.id: str | None = resume
+        # Phase 3 Iteration C: tools are session-fixed and baked at
+        # create_session() time. The fingerprint joins the cache key
+        # so a tools-change forces a session rebuild (same pattern
+        # schema and reasoning-effort follow).
+        self._tools: list[FunctionTool] = list(tools or [])
+        self._tools_fingerprint = _copilot_tools_fingerprint(self._tools)
 
     async def execute(
         self,
@@ -608,7 +649,14 @@ class CopilotAgentSession:
         from copilot.generated.session_events import (
             AssistantMessageDeltaData,
             AssistantReasoningDeltaData,
+            ToolExecutionCompleteData,
+            ToolExecutionStartData,
         )
+
+        # The forced ``submit_result`` tool is structured-output
+        # plumbing, not a user-visible tool call. Filter it out of the
+        # streaming events so consumers don't have to special-case it.
+        suppress_tool_call_ids: set[str] = set()
 
         def _on_delta(event: Any) -> None:
             # Runs synchronously off the SDK dispatch thread — keep it
@@ -623,6 +671,31 @@ class CopilotAgentSession:
                 text = data.delta_content or ""
                 if text:
                     loop.call_soon_threadsafe(queue.put_nowait, ReasoningDelta(text=text))
+            elif isinstance(data, ToolExecutionStartData):
+                if data.tool_name == SUBMIT_RESULT_TOOL:
+                    suppress_tool_call_ids.add(data.tool_call_id)
+                    return
+                loop.call_soon_threadsafe(
+                    queue.put_nowait,
+                    ToolCallStart(
+                        tool_name=data.tool_name,
+                        tool_call_id=data.tool_call_id,
+                        arguments_preview=_serialize_copilot_tool_arguments(data.arguments),
+                    ),
+                )
+            elif isinstance(data, ToolExecutionCompleteData):
+                if data.tool_call_id in suppress_tool_call_ids:
+                    suppress_tool_call_ids.discard(data.tool_call_id)
+                    return
+                output = _copilot_tool_result_output(data)
+                loop.call_soon_threadsafe(
+                    queue.put_nowait,
+                    ToolCallResult(
+                        tool_call_id=data.tool_call_id,
+                        output=output,
+                        is_error=not data.success,
+                    ),
+                )
 
         unsubscribe = session.on(_on_delta)
         self._in_flight = True
@@ -740,14 +813,15 @@ class CopilotAgentSession:
             else "__plain_text__"
         )
         reasoning_effort = _translate_thinking_for_copilot(thinking)
-        cache_key = f"{schema_fragment}|effort={reasoning_effort}"
+        tools_fragment = f"tools={self._tools_fingerprint}"
+        cache_key = f"{schema_fragment}|effort={reasoning_effort}|{tools_fragment}"
         if self._session is not None and self._session_key == cache_key:
             return self._session
 
-        # Schema OR thinking fingerprint changed (or first turn) —
-        # tear down any stale session before rebuilding so we don't
-        # leak it. ``reasoning_effort`` is baked at create_session
-        # time, so it joins schema in the cache key.
+        # Schema OR thinking OR tools fingerprint changed (or first
+        # turn) — tear down any stale session before rebuilding so we
+        # don't leak it. ``reasoning_effort`` and ``tools=`` are baked
+        # at create_session time, so both join schema in the cache key.
         await self._tear_down_session()
 
         client = await self._runtime._ensure_client()
@@ -761,6 +835,12 @@ class CopilotAgentSession:
         if reasoning_effort is not None:
             create_kwargs["reasoning_effort"] = reasoning_effort
 
+        # Assemble the tools list: forced ``submit_result`` first (when
+        # schema= is set) so the model sees the structured-output gate
+        # in slot zero, then any user-supplied :class:`FunctionTool`
+        # registrations. Either bucket can be empty; ``tools=[]`` /
+        # missing kwarg are both fine.
+        session_tools: list[Any] = []
         if schema is not None:
             from copilot import define_tool
 
@@ -780,7 +860,7 @@ class CopilotAgentSession:
                 params_type=captured_schema,
                 skip_permission=True,
             )
-            create_kwargs["tools"] = [submit_tool]
+            session_tools.append(submit_tool)
 
             forced_prefix = (
                 "When you are ready to answer, call the "
@@ -793,6 +873,12 @@ class CopilotAgentSession:
             }
         elif self._system is not None:
             create_kwargs["system_message"] = {"mode": "append", "content": self._system}
+
+        for ft in self._tools:
+            session_tools.append(_translate_one_copilot_tool(ft))
+
+        if session_tools:
+            create_kwargs["tools"] = session_tools
 
         try:
             if self._resume is not None:
@@ -991,6 +1077,109 @@ def _translate_thinking_for_copilot(thinking: ThinkingMode) -> str | None:
         f"copilot: unrecognised thinking mode {thinking!r}",
         feature="reasoning_effort",
     )
+
+
+def _copilot_tools_fingerprint(tools: list[FunctionTool]) -> str:
+    """Deterministic fingerprint for the session's ``tools=`` list.
+
+    The fingerprint goes into the :meth:`_ensure_session` cache key so
+    a tools-change forces a session rebuild (Copilot bakes the tool
+    list at ``create_session()`` time — there's no after-the-fact
+    registration). Includes each tool's ``name``, ``description``, and
+    Pydantic schema so a doc tweak invalidates the cache.
+    """
+    if not tools:
+        return "__no_tools__"
+    parts: list[str] = []
+    for t in tools:
+        parts.append(f"{t.name}|{t.description}|{t.params.model_json_schema()}")
+    return "||".join(parts)
+
+
+def _translate_one_copilot_tool(ft: FunctionTool) -> Any:
+    """Wrap one :class:`FunctionTool` as a Copilot SDK ``Tool``.
+
+    The SDK's :func:`copilot.define_tool` takes the handler in its
+    ``(params, invocation_context) -> Any`` shape and the params
+    Pydantic model as ``params_type=``. We adapt the airframe handler
+    signature (``(BaseModel) -> Awaitable[Any]``) by ignoring the
+    ``invocation_context`` and awaiting the user's coroutine. Handler
+    exceptions propagate to the SDK, which surfaces them via the
+    matching :class:`ToolExecutionCompleteData(success=False)` — the
+    airframe stream emits :class:`ToolCallResult(is_error=True)` in
+    response so the model can recover.
+
+    ``skip_permission=True`` because :meth:`CopilotAgentSession._ensure_session`
+    already installs :meth:`PermissionHandler.approve_all` at session
+    construction — keeping every airframe-registered tool consistent
+    with that policy avoids accidental per-tool prompts that would
+    block automation.
+    """
+    from copilot import define_tool
+
+    captured = ft  # bind for closure stability
+
+    async def _handler(params: Any, _invocation: Any) -> Any:
+        return await captured.handler(params)
+
+    return define_tool(
+        captured.name,
+        description=captured.description,
+        handler=_handler,
+        params_type=captured.params,
+        skip_permission=True,
+    )
+
+
+def _serialize_copilot_tool_arguments(arguments: Any) -> str:
+    """Serialise a :attr:`ToolExecutionStartData.arguments` value for
+    the airframe ``arguments_preview`` event field."""
+    import json
+
+    if arguments is None:
+        return ""
+    if isinstance(arguments, str):
+        return arguments
+    try:
+        return json.dumps(arguments, default=str, sort_keys=True)
+    except (TypeError, ValueError):
+        return repr(arguments)
+
+
+def _copilot_tool_result_output(data: Any) -> Any:
+    """Extract :attr:`ToolCallResult.output` from a
+    :class:`ToolExecutionCompleteData` payload.
+
+    Success path: the SDK's ``ToolExecutionCompleteResult.content``
+    field is the canonical user-visible string. Falls back through
+    ``detailed_content`` then ``contents`` (a typed multi-part list)
+    when ``content`` is empty.
+
+    Failure path (``success=False``): surface
+    :attr:`ToolExecutionCompleteError.message` so the consumer sees
+    the same string the model would.
+    """
+    if not data.success:
+        err = data.error
+        if err is None:
+            return "tool execution failed"
+        message = getattr(err, "message", None) or "tool execution failed"
+        code = getattr(err, "code", None)
+        return f"{code}: {message}" if code else message
+    result = data.result
+    if result is None:
+        return ""
+    if result.content:
+        return result.content
+    if result.detailed_content:
+        return result.detailed_content
+    contents = result.contents or []
+    text_parts: list[str] = []
+    for part in contents:
+        text = getattr(part, "data", None) or getattr(part, "description", None)
+        if text:
+            text_parts.append(str(text))
+    return "".join(text_parts)
 
 
 __all__ = [

@@ -805,3 +805,65 @@ async def test_close_is_idempotent(mock_sdk: dict[str, Any]) -> None:
     await sess.close()
     await sess.close()
     await sess.close()
+
+
+# ---------------------------------------------------------------------------
+# Function tools (Phase 3 Iteration D — Codex declines)
+# ---------------------------------------------------------------------------
+
+
+async def test_session_tools_kwarg_declines_with_cli_config_pointer(
+    mock_sdk: dict[str, Any],
+) -> None:
+    """tools= raises UnsupportedFeatureError with the CLI-config workaround.
+
+    Iteration D replaces the generic ``_check_tools_supported`` decline
+    with a Codex-specific message that points consumers at the
+    ``codex`` CLI's config file. The decline is permanent, not the
+    "wait for the next iteration" pattern the other three adapters
+    used during Iterations B/C.
+    """
+    from airframe import FunctionTool
+    from airframe.errors import UnsupportedFeatureError
+
+    class _NoArgs(BaseModel):
+        pass
+
+    async def _noop(_: _NoArgs) -> None:
+        return None
+
+    tool = FunctionTool(
+        name="noop",
+        description="never invoked",
+        params=_NoArgs,
+        handler=_noop,
+    )
+    rt = CodexRuntime()
+    with pytest.raises(UnsupportedFeatureError) as exc_info:
+        rt.session(tools=[tool])
+    assert exc_info.value.feature == Feature.TOOLS_FUNCTION
+    message = str(exc_info.value)
+    # Pin the actionable text — message rot would defeat the whole
+    # point of swapping in a Codex-specific message.
+    assert "config" in message.lower()
+    assert "codex" in message.lower()
+
+
+async def test_session_tools_none_or_empty_still_opens_cleanly(
+    mock_sdk: dict[str, Any],
+) -> None:
+    """tools=None / tools=[] are both no-ops — neither path triggers the decline."""
+    rt = CodexRuntime()
+    sess_none = rt.session(tools=None)
+    sess_empty = rt.session(tools=[])
+    assert sess_none is not None
+    assert sess_empty is not None
+    await sess_none.close()
+    await sess_empty.close()
+
+
+def test_codex_runtime_does_not_declare_tools_function() -> None:
+    """Codex stays on TOOLS_FUNCTION=False — its Python SDK has no
+    tool-registration channel."""
+    rt = CodexRuntime()
+    assert rt.supports(Feature.TOOLS_FUNCTION) is False

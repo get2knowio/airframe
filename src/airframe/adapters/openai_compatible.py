@@ -60,7 +60,7 @@ from airframe.errors import (
     RuntimeTransientError,
     UnsupportedFeatureError,
 )
-from airframe.events import RuntimeEvent, TextDelta, TurnComplete
+from airframe.events import RuntimeEvent, TextDelta, ToolCallResult, ToolCallStart, TurnComplete
 from airframe.features import Feature
 from airframe.inputs import Prompt
 from airframe.models import ModelInfo
@@ -71,12 +71,22 @@ from airframe.protocol import (
     RuntimeResult,
     UnsupportedBindingError,
 )
-from airframe.sessions import _split_prompt_parts
+from airframe.sessions import _check_tools_supported, _split_prompt_parts
 from airframe.thinking import ThinkingMode
+from airframe.tools import FunctionTool
 
 logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
+
+#: Hard cap on tool-loop iterations within one user turn. A model that
+#: keeps requesting tool calls indefinitely is a real failure mode;
+#: capping it surfaces the runaway via :class:`RuntimeProtocolError`
+#: instead of hanging the call. Twenty round-trips is roughly an order
+#: of magnitude above any sane agent loop and well below most vendor
+#: timeouts; consumers who genuinely need more can override later via
+#: a future :class:`OpenAICompatOptions` field.
+MAX_TOOL_ITERATIONS = 20
 
 
 @dataclass(frozen=True, slots=True)
@@ -149,6 +159,12 @@ class OpenAICompatibleRuntime(AgentRuntime):
     #:   (``[{"type":"image_url","image_url":{"url":"data:image/..;base64,.."}}]``)
     #:   (Phase 2, Iteration C). Path-only in v0; ``ImageInput.bytes_``
     #:   / ``url`` raise — Iteration D adds those.
+    #: * ``TOOLS_FUNCTION`` — wired via the
+    #:   ``tools=[{"type":"function","function":{...}}]`` shape on
+    #:   ``chat.completions.create()`` plus a client-side tool-loop in
+    #:   :class:`OpenAICompatibleSession`. Capped at
+    #:   :data:`MAX_TOOL_ITERATIONS` round-trips per user turn
+    #:   (Phase 3, Iteration B).
     #:
     #: ``FILE_INPUT`` stays False: file routing varies wildly across
     #: OpenAI-compatible vendors (``client.files.create`` semantics
@@ -179,6 +195,7 @@ class OpenAICompatibleRuntime(AgentRuntime):
             Feature.CANCEL,
             Feature.REASONING_EFFORT,
             Feature.VISION_INPUT,
+            Feature.TOOLS_FUNCTION,
         }
     )
 
@@ -283,6 +300,7 @@ class OpenAICompatibleRuntime(AgentRuntime):
         resume: str | None = None,
         system: str | None = None,
         model: ProviderModel | None = None,
+        tools: list[FunctionTool] | None = None,
         provider_options: Any | None = None,
     ) -> AgentSession:
         """Open a bespoke :class:`OpenAICompatibleSession`.
@@ -293,6 +311,21 @@ class OpenAICompatibleRuntime(AgentRuntime):
         :meth:`AgentSession.stream`, and
         :func:`asyncio.Task.cancel`-driven
         :meth:`AgentSession.cancel`.
+
+        Args:
+            tools: List of :class:`~airframe.tools.FunctionTool` to
+                expose to the model for the session's lifetime.
+                Translated to ``tools=[{"type":"function",...}]`` on
+                every ``chat.completions.create()`` call. The session
+                drives the client-side tool-loop: parse
+                ``response.choices[0].message.tool_calls``, dispatch
+                each handler, append ``role="tool"`` messages with the
+                JSON-serialised result, and re-call until the model
+                stops requesting tools (or
+                :data:`MAX_TOOL_ITERATIONS` is hit, at which point the
+                runaway is surfaced as
+                :class:`~airframe.errors.RuntimeProtocolError`).
+                Phase 3 Iteration B.
 
         Raises:
             UnsupportedFeatureError: when ``resume`` is non-None.
@@ -306,10 +339,15 @@ class OpenAICompatibleRuntime(AgentRuntime):
                 "Check runtime.supports(Feature.SESSION_RESUME) first.",
                 feature="session_resume",
             )
+        _check_tools_supported(
+            tools,
+            adapter_label=self.label,
+            feature_supported=self.supports(Feature.TOOLS_FUNCTION),
+        )
         # provider_options accepted but unused — Phase 2+ fills each
         # ProviderOptions dataclass as the corresponding feature lands.
         del provider_options
-        return OpenAICompatibleSession(self, system=system, model=model)
+        return OpenAICompatibleSession(self, system=system, model=model, tools=tools)
 
     async def list_models(self) -> list[ModelInfo]:
         """Return the live model menu from the vendor.
@@ -529,6 +567,7 @@ class OpenAICompatibleSession:
         *,
         system: str | None = None,
         model: ProviderModel | None = None,
+        tools: list[FunctionTool] | None = None,
     ) -> None:
         self._runtime = runtime
         self._model = model
@@ -539,6 +578,14 @@ class OpenAICompatibleSession:
         self._in_flight_task: asyncio.Task[Any] | None = None
         self._active_stream: Any | None = None
         self._stream_cancelled = False
+        # Tools are fixed for the session's lifetime — translated once
+        # and reused on every chat.completions.create() call. ``None``
+        # / ``[]`` both mean "don't send the kwarg" so the wire shape
+        # for tool-free sessions is unchanged.
+        self._tools_by_name: dict[str, FunctionTool] = {t.name: t for t in (tools or [])}
+        self._tools_wire: list[dict[str, Any]] | None = (
+            _translate_tools_for_openai(tools) if tools else None
+        )
 
     async def execute(
         self,
@@ -557,6 +604,7 @@ class OpenAICompatibleSession:
             supports_file=False,
         )
         reasoning_effort = _translate_thinking_for_openai(thinking, label=self._runtime.label)
+        pre_len = len(self._messages)
         self._messages.append({"role": "user", "content": _build_user_content(text, images)})
         task = asyncio.create_task(
             self._do_execute(schema=schema, reasoning_effort=reasoning_effort, timeout=timeout)
@@ -565,14 +613,13 @@ class OpenAICompatibleSession:
         try:
             result = await task
         except asyncio.CancelledError as exc:
-            self._messages.pop()
+            del self._messages[pre_len:]
             raise RuntimeCancelledError(f"{self._runtime.label}: cancelled") from exc
         except BaseException:
-            self._messages.pop()
+            del self._messages[pre_len:]
             raise
         finally:
             self._in_flight_task = None
-        self._messages.append({"role": "assistant", "content": result.text})
         return result
 
     async def _do_execute(
@@ -582,22 +629,102 @@ class OpenAICompatibleSession:
         reasoning_effort: str | None,
         timeout: float,
     ) -> RuntimeResult:
+        """Drive the client-side tool-loop for one user turn.
+
+        Sends the current ``messages`` buffer to
+        :meth:`chat.completions.create`; if the response carries
+        ``tool_calls``, dispatch each handler, append the assistant
+        message (with ``tool_calls``) and one ``role="tool"`` reply per
+        call, then re-call. Loops until the model emits a final text
+        response or :data:`MAX_TOOL_ITERATIONS` round-trips elapse.
+        Appends both intermediate tool round-trips and the final
+        assistant message to ``self._messages`` so a follow-up turn
+        sees the full history.
+        """
         client = self._runtime._ensure_client()
         model_id = self._runtime._resolve_model(self._model)
         response_format = _build_response_format(schema)
-        create_kwargs: dict[str, Any] = {
-            "model": model_id,
-            "messages": list(self._messages),
-            "response_format": response_format,
-            "timeout": timeout,
-        }
-        if reasoning_effort is not None:
-            create_kwargs["reasoning_effort"] = reasoning_effort
+        for _ in range(MAX_TOOL_ITERATIONS):
+            create_kwargs: dict[str, Any] = {
+                "model": model_id,
+                "messages": list(self._messages),
+                "response_format": response_format,
+                "timeout": timeout,
+            }
+            if reasoning_effort is not None:
+                create_kwargs["reasoning_effort"] = reasoning_effort
+            if self._tools_wire is not None:
+                create_kwargs["tools"] = self._tools_wire
+            try:
+                response = await client.chat.completions.create(**create_kwargs)
+            except Exception as exc:
+                raise self._runtime._classify_exception(exc) from exc
+
+            if not response.choices:
+                raise RuntimeProtocolError(
+                    f"{self._runtime.label}: response had no choices",
+                    body=str(response)[:500],
+                )
+            message = response.choices[0].message
+            tool_calls = getattr(message, "tool_calls", None) or []
+            if not tool_calls:
+                result = self._runtime._build_result(response, model_id=model_id, schema=schema)
+                self._messages.append({"role": "assistant", "content": result.text})
+                return result
+
+            # Intermediate tool round-trip — append the assistant
+            # message carrying the tool_calls (the API requires this
+            # before the matching role="tool" messages), then dispatch.
+            self._messages.append(_assistant_tool_call_message(message, tool_calls))
+            for tc in tool_calls:
+                output, is_error = await self._invoke_tool(
+                    tool_name=tc.function.name,
+                    arguments_json=tc.function.arguments or "",
+                )
+                self._messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tc.id,
+                        "content": _serialize_tool_output(output),
+                    }
+                )
+                del is_error  # encoded into the message via the content; loop continues
+
+        raise RuntimeProtocolError(
+            f"{self._runtime.label}: tool loop exceeded "
+            f"{MAX_TOOL_ITERATIONS} iterations — the model kept requesting "
+            f"tools without producing a final response. This usually points "
+            f"to a tool handler returning an output the model can't act on, "
+            f"or a system prompt that doesn't tell the model how to stop."
+        )
+
+    async def _invoke_tool(self, *, tool_name: str, arguments_json: str) -> tuple[Any, bool]:
+        """Run one tool handler. Returns ``(output, is_error)``.
+
+        Both unknown-tool and parse/validation/handler failures come
+        back as ``is_error=True`` with a human-readable string
+        ``output`` so the model can see what happened and recover on
+        its next turn. The model deciding "I should have called X
+        differently" is one of the failure modes tool-loops are
+        designed to survive — silently failing the whole turn would
+        be hostile to that recovery path.
+        """
+        tool = self._tools_by_name.get(tool_name)
+        if tool is None:
+            return f"Tool {tool_name!r} is not registered on this session.", True
         try:
-            response = await client.chat.completions.create(**create_kwargs)
-        except Exception as exc:
-            raise self._runtime._classify_exception(exc) from exc
-        return self._runtime._build_result(response, model_id=model_id, schema=schema)
+            args = json.loads(arguments_json) if arguments_json else {}
+        except json.JSONDecodeError as exc:
+            return f"Failed to parse tool arguments as JSON: {exc}", True
+        try:
+            params = tool.params.model_validate(args)
+        except Exception as exc:  # noqa: BLE001 — surface Pydantic errors to the model
+            return (f"Tool arguments did not match the {tool.params.__name__} schema: {exc}"), True
+        try:
+            output = await tool.handler(params)
+        except Exception as exc:  # noqa: BLE001 — handler errors flow back to the model
+            return f"{type(exc).__name__}: {exc}", True
+        return output, False
 
     async def stream(
         self,
@@ -616,99 +743,139 @@ class OpenAICompatibleSession:
             supports_file=False,
         )
         reasoning_effort = _translate_thinking_for_openai(thinking, label=self._runtime.label)
+        pre_len = len(self._messages)
         self._messages.append({"role": "user", "content": _build_user_content(text, images)})
         self._stream_cancelled = False
-        text_chunks: list[str] = []
-        finish: str | None = None
+        # Accumulators that span the whole user turn (multiple model
+        # turns under the tool loop). Assistant text is appended across
+        # iterations because the final visible response may be split
+        # by a mid-turn tool call ("First I'll look this up... [tool
+        # call] ... The answer is 42").
+        text_chunks_user_turn: list[str] = []
         usage: Any = None
+        committed = False
         try:
             client = self._runtime._ensure_client()
             model_id = self._runtime._resolve_model(self._model)
             response_format = _build_response_format(schema)
-            stream_kwargs: dict[str, Any] = {
-                "model": model_id,
-                "messages": list(self._messages),
-                "response_format": response_format,
-                "timeout": timeout,
-                "stream": True,
-                "stream_options": {"include_usage": True},
-            }
-            if reasoning_effort is not None:
-                stream_kwargs["reasoning_effort"] = reasoning_effort
-            try:
-                stream = await client.chat.completions.create(**stream_kwargs)
-            except Exception as exc:
-                raise self._runtime._classify_exception(exc) from exc
 
-            self._active_stream = stream
-            try:
-                async for chunk in stream:
-                    if self._stream_cancelled:
-                        raise RuntimeCancelledError(f"{self._runtime.label}: stream cancelled")
-                    choices = getattr(chunk, "choices", None) or []
-                    if choices:
-                        choice = choices[0]
-                        delta = getattr(choice, "delta", None)
-                        content = getattr(delta, "content", None) if delta else None
-                        if content:
-                            text_chunks.append(content)
-                            yield TextDelta(text=content)
-                        chunk_finish = getattr(choice, "finish_reason", None)
-                        if chunk_finish:
-                            finish = chunk_finish
-                    chunk_usage = getattr(chunk, "usage", None)
-                    if chunk_usage is not None:
-                        usage = chunk_usage
-            finally:
-                self._active_stream = None
+            for _ in range(MAX_TOOL_ITERATIONS):
+                stream_kwargs: dict[str, Any] = {
+                    "model": model_id,
+                    "messages": list(self._messages),
+                    "response_format": response_format,
+                    "timeout": timeout,
+                    "stream": True,
+                    "stream_options": {"include_usage": True},
+                }
+                if reasoning_effort is not None:
+                    stream_kwargs["reasoning_effort"] = reasoning_effort
+                if self._tools_wire is not None:
+                    stream_kwargs["tools"] = self._tools_wire
+                try:
+                    stream = await client.chat.completions.create(**stream_kwargs)
+                except Exception as exc:
+                    raise self._runtime._classify_exception(exc) from exc
 
-            full_text = "".join(text_chunks)
-            structured: Any = None
-            if schema is not None:
-                structured = self._runtime._parse_structured(full_text, schema=schema)
+                # Per-model-turn accumulators
+                model_turn_text: list[str] = []
+                tool_calls_by_index: dict[int, dict[str, Any]] = {}
+                this_finish: str | None = None
+                self._active_stream = stream
+                try:
+                    async for chunk in stream:
+                        if self._stream_cancelled:
+                            raise RuntimeCancelledError(f"{self._runtime.label}: stream cancelled")
+                        choices = getattr(chunk, "choices", None) or []
+                        if choices:
+                            choice = choices[0]
+                            delta = getattr(choice, "delta", None)
+                            if delta is not None:
+                                content = getattr(delta, "content", None)
+                                if content:
+                                    model_turn_text.append(content)
+                                    text_chunks_user_turn.append(content)
+                                    yield TextDelta(text=content)
+                                delta_tool_calls = getattr(delta, "tool_calls", None) or []
+                                for dtc in delta_tool_calls:
+                                    _accumulate_tool_call_delta(tool_calls_by_index, dtc)
+                            chunk_finish = getattr(choice, "finish_reason", None)
+                            if chunk_finish:
+                                this_finish = chunk_finish
+                        chunk_usage = getattr(chunk, "usage", None)
+                        if chunk_usage is not None:
+                            usage = chunk_usage
+                finally:
+                    self._active_stream = None
 
-            input_tokens = int(getattr(usage, "prompt_tokens", 0) or 0) if usage else 0
-            output_tokens = int(getattr(usage, "completion_tokens", 0) or 0) if usage else 0
-            details = getattr(usage, "prompt_tokens_details", None) if usage else None
-            cache_read = int(getattr(details, "cached_tokens", 0) or 0) if details else 0
-            completion_details = (
-                getattr(usage, "completion_tokens_details", None) if usage else None
+                if not tool_calls_by_index:
+                    # Final model turn — build result, commit, yield.
+                    full_text = "".join(text_chunks_user_turn)
+                    structured: Any = None
+                    if schema is not None:
+                        structured = self._runtime._parse_structured(full_text, schema=schema)
+                    cost = _build_cost_from_stream_usage(
+                        usage,
+                        runtime=self._runtime,
+                        model_id=model_id,
+                        finish=this_finish,
+                    )
+                    result = RuntimeResult(
+                        text=full_text,
+                        structured=structured,
+                        cost=cost,
+                        finish=this_finish,
+                        raw=None,
+                    )
+                    self._messages.append({"role": "assistant", "content": full_text})
+                    committed = True
+                    yield TurnComplete(result=result)
+                    return
+
+                # Intermediate tool round-trip. Append the assistant
+                # message carrying the tool_calls payload, then for each
+                # tool call: emit ToolCallStart with the accumulated
+                # arguments, invoke the handler, emit ToolCallResult,
+                # and append the matching role="tool" message.
+                ordered = sorted(tool_calls_by_index.items())
+                synthetic_message = _synthesize_assistant_tool_message(
+                    "".join(model_turn_text), ordered
+                )
+                self._messages.append(synthetic_message)
+                for _idx, entry in ordered:
+                    tc_id: str = entry["id"]
+                    name: str = entry["name"]
+                    args_str: str = entry["arguments"]
+                    yield ToolCallStart(
+                        tool_name=name,
+                        tool_call_id=tc_id,
+                        arguments_preview=args_str,
+                    )
+                    output, is_error = await self._invoke_tool(
+                        tool_name=name, arguments_json=args_str
+                    )
+                    yield ToolCallResult(tool_call_id=tc_id, output=output, is_error=is_error)
+                    self._messages.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": tc_id,
+                            "content": _serialize_tool_output(output),
+                        }
+                    )
+                # next iteration re-calls with the tool results in scope
+
+            raise RuntimeProtocolError(
+                f"{self._runtime.label}: tool loop exceeded "
+                f"{MAX_TOOL_ITERATIONS} iterations — the model kept requesting "
+                f"tools without producing a final response."
             )
-            reasoning_tokens = (
-                int(getattr(completion_details, "reasoning_tokens", 0) or 0)
-                if completion_details
-                else 0
-            )
-            cost = CostRecord(
-                provider_id=self._runtime.PROVIDER_ID,
-                model_id=model_id,
-                cost_usd=self._runtime._compute_cost_usd(
-                    model_id, input_tokens=input_tokens, output_tokens=output_tokens
-                ),
-                input_tokens=input_tokens,
-                output_tokens=output_tokens,
-                cache_read_tokens=cache_read,
-                cache_write_tokens=0,
-                finish=finish,
-                reasoning_tokens=reasoning_tokens,
-            )
-            result = RuntimeResult(
-                text=full_text,
-                structured=structured,
-                cost=cost,
-                finish=finish,
-                raw=None,
-            )
-            self._messages.append({"role": "assistant", "content": full_text})
-            yield TurnComplete(result=result)
         except BaseException:
-            # Roll back the user message we appended at the top so the
-            # next attempt sends a clean history. The TurnComplete
-            # branch above has already extended the buffer with the
-            # assistant message before yielding — failures past that
-            # point leave the buffer in its committed state.
-            if self._messages and self._messages[-1].get("role") == "user":
-                self._messages.pop()
+            # Roll back any uncommitted turn state so the next attempt
+            # sends a clean history. After the trailing TurnComplete
+            # has yielded, ``committed`` is True and the buffer keeps
+            # the new user/assistant/tool entries.
+            if not committed:
+                del self._messages[pre_len:]
             raise
 
     async def cancel(self) -> None:
@@ -849,6 +1016,173 @@ def _translate_thinking_for_openai(thinking: ThinkingMode, *, label: str) -> str
     )
 
 
+def _accumulate_tool_call_delta(by_index: dict[int, dict[str, Any]], delta: Any) -> None:
+    """Fold one streamed ``delta.tool_calls`` entry into the per-turn buffer.
+
+    The Chat Completions stream surfaces tool calls as fragments
+    indexed by position in the eventual ``tool_calls`` array. The
+    ``id`` and ``function.name`` typically arrive in the first delta
+    for an index; ``function.arguments`` arrives across many chunks
+    as a partial-JSON string that we concatenate. The result is
+    keyed by ``index`` because that's the only identifier guaranteed
+    to be present on every chunk.
+    """
+    idx = getattr(delta, "index", None)
+    if idx is None:
+        return
+    entry = by_index.setdefault(idx, {"id": "", "name": "", "arguments": ""})
+    tc_id = getattr(delta, "id", None)
+    if tc_id:
+        entry["id"] = tc_id
+    fn = getattr(delta, "function", None)
+    if fn is not None:
+        name = getattr(fn, "name", None)
+        if name:
+            entry["name"] = name
+        args_chunk = getattr(fn, "arguments", None)
+        if args_chunk:
+            entry["arguments"] += args_chunk
+
+
+def _synthesize_assistant_tool_message(
+    content: str, ordered_tool_calls: list[tuple[int, dict[str, Any]]]
+) -> dict[str, Any]:
+    """Build the assistant-with-tool_calls buffer entry from streamed deltas.
+
+    Mirrors :func:`_assistant_tool_call_message` but constructed from
+    the per-index dicts we accumulate while reading the stream. Empty
+    ``content`` becomes ``None`` to match the wire shape OpenAI
+    returns when the assistant only requested tools without saying
+    anything. ``id`` falls back to a synthetic ``call_<index>`` when
+    the vendor didn't supply one — every vendor we've tested does,
+    but the fallback keeps the buffer well-formed regardless.
+    """
+    return {
+        "role": "assistant",
+        "content": content or None,
+        "tool_calls": [
+            {
+                "id": entry["id"] or f"call_{idx}",
+                "type": "function",
+                "function": {
+                    "name": entry["name"],
+                    "arguments": entry["arguments"],
+                },
+            }
+            for idx, entry in ordered_tool_calls
+        ],
+    }
+
+
+def _build_cost_from_stream_usage(
+    usage: Any,
+    *,
+    runtime: OpenAICompatibleRuntime,
+    model_id: str,
+    finish: str | None,
+) -> CostRecord:
+    """Compute a :class:`CostRecord` from the streaming usage frame.
+
+    Mirrors the non-streaming path in :meth:`OpenAICompatibleRuntime._build_result`
+    but works off the standalone ``usage`` frame the streaming API emits
+    when ``stream_options.include_usage=True`` is set.
+    """
+    input_tokens = int(getattr(usage, "prompt_tokens", 0) or 0) if usage else 0
+    output_tokens = int(getattr(usage, "completion_tokens", 0) or 0) if usage else 0
+    details = getattr(usage, "prompt_tokens_details", None) if usage else None
+    cache_read = int(getattr(details, "cached_tokens", 0) or 0) if details else 0
+    completion_details = getattr(usage, "completion_tokens_details", None) if usage else None
+    reasoning_tokens = (
+        int(getattr(completion_details, "reasoning_tokens", 0) or 0) if completion_details else 0
+    )
+    return CostRecord(
+        provider_id=runtime.PROVIDER_ID,
+        model_id=model_id,
+        cost_usd=runtime._compute_cost_usd(
+            model_id, input_tokens=input_tokens, output_tokens=output_tokens
+        ),
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        cache_read_tokens=cache_read,
+        cache_write_tokens=0,
+        finish=finish,
+        reasoning_tokens=reasoning_tokens,
+    )
+
+
+def _assistant_tool_call_message(message: Any, tool_calls: list[Any]) -> dict[str, Any]:
+    """Build the ``role="assistant"`` buffer entry for a tool-call turn.
+
+    The OpenAI API expects intermediate assistant turns that requested
+    tools to carry both their ``content`` (often empty / ``None``) and
+    the original ``tool_calls`` payload, so subsequent
+    ``role="tool"`` messages can reference each ``tool_call_id``. The
+    shape is symmetric to what the API returned.
+    """
+    return {
+        "role": "assistant",
+        "content": getattr(message, "content", None),
+        "tool_calls": [
+            {
+                "id": tc.id,
+                "type": "function",
+                "function": {
+                    "name": tc.function.name,
+                    "arguments": tc.function.arguments or "",
+                },
+            }
+            for tc in tool_calls
+        ],
+    }
+
+
+def _translate_tools_for_openai(tools: list[FunctionTool]) -> list[dict[str, Any]]:
+    """Translate :class:`FunctionTool` instances to the OpenAI wire shape.
+
+    Each tool becomes one ``{"type": "function", "function": {...}}``
+    entry suitable for the ``tools=`` kwarg on
+    :meth:`AsyncOpenAI.chat.completions.create`. The parameter schema
+    comes from the tool's :attr:`FunctionTool.params` Pydantic model via
+    :meth:`BaseModel.model_json_schema`.
+
+    The result is computed once at session construction and reused on
+    every API call — :class:`FunctionTool` is frozen and the schema
+    payload is large enough that re-serialising every turn would be
+    visible at scale.
+    """
+    return [
+        {
+            "type": "function",
+            "function": {
+                "name": tool.name,
+                "description": tool.description,
+                "parameters": tool.params.model_json_schema(),
+            },
+        }
+        for tool in tools
+    ]
+
+
+def _serialize_tool_output(output: Any) -> str:
+    """JSON-encode a tool handler's return value for the wire.
+
+    The OpenAI tool-result message carries a string ``content`` field.
+    Strings pass through verbatim (keeps already-formatted text legible
+    in transcripts); everything else round-trips through
+    :func:`json.dumps` with ``default=str`` so non-JSON types
+    (datetimes, decimals, dataclasses) don't crash the loop. If
+    serialisation fails outright the fallback is ``repr(output)`` —
+    not perfect, but the model sees *something* and the consumer's
+    handler bug surfaces in the trace.
+    """
+    if isinstance(output, str):
+        return output
+    try:
+        return json.dumps(output, default=str)
+    except (TypeError, ValueError):
+        return repr(output)
+
+
 _ENVELOPE_KEYS = frozenset(
     {
         "input",
@@ -887,4 +1221,9 @@ def _unwrap_envelope(payload: Any) -> Any:
     return payload
 
 
-__all__ = ["ModelMeta", "OpenAICompatibleRuntime", "OpenAICompatibleSession"]
+__all__ = [
+    "MAX_TOOL_ITERATIONS",
+    "ModelMeta",
+    "OpenAICompatibleRuntime",
+    "OpenAICompatibleSession",
+]

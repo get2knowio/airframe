@@ -63,6 +63,7 @@ def _make_response(
     """Build a stand-in for ``openai`` ChatCompletion."""
     msg = MagicMock()
     msg.content = content
+    msg.tool_calls = None
     choice = MagicMock()
     choice.message = msg
     choice.finish_reason = finish_reason

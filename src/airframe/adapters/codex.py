@@ -86,6 +86,7 @@ from airframe.protocol import (
 )
 from airframe.sessions import _split_prompt_parts
 from airframe.thinking import ThinkingMode
+from airframe.tools import FunctionTool
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -423,6 +424,7 @@ class CodexRuntime(AgentRuntime):
         resume: str | None = None,
         system: str | None = None,
         model: ProviderModel | None = None,
+        tools: list[FunctionTool] | None = None,
         provider_options: Any | None = None,
     ) -> AgentSession:
         """Open a bespoke :class:`CodexAgentSession`.
@@ -446,8 +448,30 @@ class CodexRuntime(AgentRuntime):
                 exactly as the runtime's :meth:`execute` does today.
             model: Default :class:`ProviderModel` for every turn in
                 the session.
+            tools: Accepted for protocol parity but the Codex Python
+                SDK has no tool-registration channel; any non-None
+                value raises
+                :class:`~airframe.errors.UnsupportedFeatureError`.
+                Wire tools through the ``codex`` CLI's config file
+                instead. Unlike the other adapters whose
+                ``TOOLS_FUNCTION=False`` was a "not yet" gate during
+                Iterations B/C, Codex's decline is permanent — its
+                Python SDK simply does not surface a tool-registration
+                API and consumers branching on
+                ``runtime.supports(Feature.TOOLS_FUNCTION)`` should
+                treat Codex as a tools-incapable runtime.
             provider_options: Reserved for Phase 2+ (currently unused).
         """
+        if tools:
+            raise UnsupportedFeatureError(
+                f"{self.label}: function tools cannot be wired through the "
+                f"Codex Python SDK — its surface has no tool-registration "
+                f"channel. Configure tools through the codex CLI's config "
+                f"file (`~/.codex/config.toml`) instead. "
+                f"Check runtime.supports(Feature.TOOLS_FUNCTION) before "
+                f"passing tools=.",
+                feature=Feature.TOOLS_FUNCTION,
+            )
         # provider_options accepted but unused — Phase 2+ fills each
         # ProviderOptions dataclass as the corresponding feature lands.
         del provider_options

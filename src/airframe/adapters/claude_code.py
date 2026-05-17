@@ -59,7 +59,14 @@ from airframe.errors import (
     RuntimeTransientError,
     UnsupportedFeatureError,
 )
-from airframe.events import ReasoningDelta, RuntimeEvent, TextDelta, TurnComplete
+from airframe.events import (
+    ReasoningDelta,
+    RuntimeEvent,
+    TextDelta,
+    ToolCallResult,
+    ToolCallStart,
+    TurnComplete,
+)
 from airframe.features import Feature
 from airframe.inputs import Prompt
 from airframe.models import ModelInfo
@@ -70,8 +77,9 @@ from airframe.protocol import (
     RuntimeResult,
     UnsupportedBindingError,
 )
-from airframe.sessions import _split_prompt_parts
+from airframe.sessions import _check_tools_supported, _split_prompt_parts
 from airframe.thinking import ThinkingMode
+from airframe.tools import FunctionTool
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -175,6 +183,15 @@ class ClaudeCodeRuntime(AgentRuntime):
     #:   whether attachments are present so a no-attachment → with-
     #:   attachment switch reconnects with the right tools list.
     #:   Path-only in v0; bytes/URL raise (Phase 2, Iteration C).
+    #: * ``TOOLS_FUNCTION`` — wired via an in-process MCP server built
+    #:   with :func:`claude_agent_sdk.create_sdk_mcp_server` + the
+    #:   :func:`claude_agent_sdk.tool` decorator. The SDK dispatches
+    #:   tool calls inside the CLI subprocess and we surface
+    #:   :class:`~airframe.events.ToolCallStart` /
+    #:   :class:`~airframe.events.ToolCallResult` from
+    #:   :class:`ToolUseBlock` / :class:`ToolResultBlock` on the
+    #:   message stream. Tools join the existing ``_ensure_client``
+    #:   cache key (Phase 3, Iteration C).
     SUPPORTED_FEATURES: ClassVar[frozenset[Feature]] = frozenset(
         {
             Feature.STRUCTURED_OUTPUT_JSON_SCHEMA,
@@ -185,6 +202,7 @@ class ClaudeCodeRuntime(AgentRuntime):
             Feature.REASONING_BUDGET_TOKENS,
             Feature.VISION_INPUT,
             Feature.FILE_INPUT,
+            Feature.TOOLS_FUNCTION,
         }
     )
 
@@ -282,6 +300,7 @@ class ClaudeCodeRuntime(AgentRuntime):
         resume: str | None = None,
         system: str | None = None,
         model: ProviderModel | None = None,
+        tools: list[FunctionTool] | None = None,
         provider_options: Any | None = None,
     ) -> AgentSession:
         """Open a bespoke :class:`ClaudeCodeSession`.
@@ -302,8 +321,20 @@ class ClaudeCodeRuntime(AgentRuntime):
                 :attr:`ClaudeAgentOptions.system_prompt` at connect.
             model: Default :class:`ProviderModel` for every turn in
                 the session.
+            tools: List of :class:`~airframe.tools.FunctionTool` the
+                model may invoke. Translated to an in-process MCP server
+                via :func:`claude_agent_sdk.create_sdk_mcp_server` and
+                attached via :attr:`ClaudeAgentOptions.mcp_servers`. The
+                SDK dispatches; the session surfaces tool events from
+                :class:`ToolUseBlock` / :class:`ToolResultBlock` on the
+                message stream.
             provider_options: Reserved for Phase 2+ (currently unused).
         """
+        _check_tools_supported(
+            tools,
+            adapter_label=self.label,
+            feature_supported=self.supports(Feature.TOOLS_FUNCTION),
+        )
         # provider_options accepted but unused — Phase 2+ fills each
         # ProviderOptions dataclass as the corresponding feature lands.
         del provider_options
@@ -313,6 +344,7 @@ class ClaudeCodeRuntime(AgentRuntime):
             resume=resume,
             system=system,
             model_id=model_id,
+            tools=tools,
         )
 
     async def list_models(self) -> list[ModelInfo]:
@@ -480,6 +512,7 @@ class ClaudeCodeSession:
         resume: str | None,
         system: str | None,
         model_id: str,
+        tools: list[FunctionTool] | None = None,
     ) -> None:
         self._runtime = runtime
         self._resume = resume
@@ -502,6 +535,14 @@ class ClaudeCodeSession:
         # before the first turn; absent that, ``None`` until a turn
         # completes.
         self.id: str | None = resume
+        # Phase 3 Iteration C: tools are fixed for the session's
+        # lifetime — the in-process MCP server is built at connect
+        # time and baked into ClaudeAgentOptions.mcp_servers. The
+        # fingerprint joins the cache key so consumers that
+        # accidentally pass different tools per call get a clear
+        # reconnect rather than silent staleness.
+        self._tools: list[FunctionTool] = list(tools or [])
+        self._tools_fingerprint = _tools_fingerprint(self._tools)
 
     async def execute(
         self,
@@ -597,7 +638,15 @@ class ClaudeCodeSession:
         except Exception as exc:
             raise self._runtime._classify_exception(exc) from exc
 
-        from claude_agent_sdk import AssistantMessage, ResultMessage, StreamEvent, TextBlock
+        from claude_agent_sdk import (
+            AssistantMessage,
+            ResultMessage,
+            StreamEvent,
+            TextBlock,
+            ToolResultBlock,
+            ToolUseBlock,
+            UserMessage,
+        )
 
         result_msg: Any = None
         self._in_flight = True
@@ -618,6 +667,25 @@ class ClaudeCodeSession:
                     for block in msg.content:
                         if isinstance(block, TextBlock) and block.text:
                             yield TextDelta(text=block.text)
+                        elif isinstance(block, ToolUseBlock):
+                            yield ToolCallStart(
+                                tool_name=_strip_mcp_prefix(block.name),
+                                tool_call_id=block.id,
+                                arguments_preview=_serialize_tool_arguments(block.input),
+                            )
+                    continue
+                if isinstance(msg, UserMessage) and isinstance(msg.content, list):
+                    # The SDK turns MCP tool results into UserMessage
+                    # turns carrying ToolResultBlock content (Anthropic's
+                    # protocol: tool results are user-side). Translate
+                    # each into the matching ToolCallResult event.
+                    for block in msg.content:
+                        if isinstance(block, ToolResultBlock):
+                            yield ToolCallResult(
+                                tool_call_id=block.tool_use_id,
+                                output=_tool_result_output(block),
+                                is_error=bool(block.is_error),
+                            )
                     continue
                 if isinstance(msg, ResultMessage):
                     result_msg = msg
@@ -686,11 +754,12 @@ class ClaudeCodeSession:
         thinking: ThinkingMode = None,
         has_attachments: bool = False,
     ) -> Any:
-        # Reconnect when the schema OR thinking OR attachments
+        # Reconnect when the schema OR thinking OR attachments OR tools
         # fingerprint changes — ``output_format``, ``effort`` /
-        # ``thinking``, and ``allowed_tools`` are all baked into
-        # ClaudeAgentOptions at connect time. (model, system, resume)
-        # are fixed for the session and don't contribute to the key.
+        # ``thinking``, ``allowed_tools``, and ``mcp_servers`` are all
+        # baked into ClaudeAgentOptions at connect time. (model, system,
+        # resume) are fixed for the session and don't contribute to the
+        # key.
         schema_fragment = (
             f"{schema.__name__}|{schema.model_json_schema()}"
             if schema is not None
@@ -699,7 +768,10 @@ class ClaudeCodeSession:
         effort, thinking_config = _translate_thinking_for_claude(thinking)
         thinking_fragment = f"effort={effort}|thinking={thinking_config}"
         attachments_fragment = f"attachments={has_attachments}"
-        cache_key = f"{schema_fragment}|{thinking_fragment}|{attachments_fragment}"
+        tools_fragment = f"tools={self._tools_fingerprint}"
+        cache_key = (
+            f"{schema_fragment}|{thinking_fragment}|{attachments_fragment}|{tools_fragment}"
+        )
         if self._client is not None and self._client_key == cache_key:
             return self._client
 
@@ -746,12 +818,22 @@ class ClaudeCodeSession:
             options_kwargs["effort"] = effort
         if thinking_config is not None:
             options_kwargs["thinking"] = thinking_config
+
+        # Bring in the auto-allowed Read tool for attachments and any
+        # MCP-routed FunctionTools. The CLI uses ``mcp__<server>__<tool>``
+        # naming for MCP tools, so the allowed_tools entries must match
+        # that pattern; we let _translate_tools_for_claude build both
+        # the server config and the allowed-tools names so the two
+        # stay in sync.
+        allowed_tools: list[str] = []
         if has_attachments:
-            # The Read tool is what lets the model actually look at the
-            # image / file paths we appended to the prompt. Without
-            # this, the model sees the path strings but has no way to
-            # open them.
-            options_kwargs["allowed_tools"] = ["Read"]
+            allowed_tools.append("Read")
+        if self._tools:
+            server_config, allowed_tool_names = _translate_tools_for_claude(self._tools)
+            options_kwargs["mcp_servers"] = {AIRFRAME_MCP_SERVER_NAME: server_config}
+            allowed_tools.extend(allowed_tool_names)
+        if allowed_tools:
+            options_kwargs["allowed_tools"] = allowed_tools
 
         options = ClaudeAgentOptions(**options_kwargs)
         try:
@@ -959,7 +1041,175 @@ def _translate_thinking_for_claude(
     )
 
 
+#: Name of the in-process MCP server airframe registers when
+#: ``tools=`` is set on :meth:`ClaudeCodeRuntime.session`. The CLI
+#: addresses tools served by this server as ``mcp__{name}__{tool}``
+#: in ``allowed_tools``; keeping the server name stable per session
+#: lets the cache key fingerprint stay tied to the user-facing tool
+#: list rather than a random server-instance ID.
+AIRFRAME_MCP_SERVER_NAME = "airframe_tools"
+
+
+def _tools_fingerprint(tools: list[FunctionTool]) -> str:
+    """Build a deterministic fingerprint for a ``tools=`` list.
+
+    Used in the :meth:`_ensure_client` cache key so a tools-change
+    between turns rebuilds the underlying CLI subprocess (since
+    ``mcp_servers`` is baked at connect time). Includes each tool's
+    ``name``, ``description``, and its Pydantic schema so a change to
+    the input shape — even a documentation tweak — invalidates the
+    cached client.
+    """
+    if not tools:
+        return "__no_tools__"
+    parts: list[str] = []
+    for t in tools:
+        parts.append(f"{t.name}|{t.description}|{t.params.model_json_schema()}")
+    return "||".join(parts)
+
+
+def _translate_tools_for_claude(
+    tools: list[FunctionTool],
+) -> tuple[Any, list[str]]:
+    """Build an in-process MCP server + the matching allowed-tools names.
+
+    Each :class:`FunctionTool` becomes one SDK ``@tool``-decorated
+    coroutine that:
+
+    1. Validates the incoming ``args`` dict against the tool's
+       :attr:`FunctionTool.params` Pydantic schema (the SDK passes raw
+       dicts even when ``input_schema`` is a :class:`BaseModel`).
+    2. Awaits the user-supplied handler with the typed instance.
+    3. Wraps the return value in the SDK's
+       ``{"content": [{"type": "text", "text": <output>}]}`` envelope.
+       Handler exceptions are caught and surfaced as ``is_error=True``
+       so the model can recover on its next turn.
+
+    Returns ``(server_config, allowed_tool_names)``. The allowed-tools
+    names use the ``mcp__<server>__<tool>`` shape the CLI expects when
+    permission-gating MCP-routed tools.
+    """
+    from claude_agent_sdk import create_sdk_mcp_server, tool
+
+    sdk_tools = []
+    allowed_tool_names: list[str] = []
+    for ft in tools:
+        # Capture each tool in the closure explicitly — ``ft`` is the
+        # iterator variable, so the inner function must bind the
+        # specific FunctionTool, not the loop's last value.
+        sdk_tools.append(_build_sdk_tool(ft, tool_decorator=tool))
+        allowed_tool_names.append(f"mcp__{AIRFRAME_MCP_SERVER_NAME}__{ft.name}")
+    server_config = create_sdk_mcp_server(
+        name=AIRFRAME_MCP_SERVER_NAME,
+        tools=sdk_tools,
+    )
+    return server_config, allowed_tool_names
+
+
+def _build_sdk_tool(ft: FunctionTool, *, tool_decorator: Any) -> Any:
+    """Wrap one :class:`FunctionTool` as a Claude SDK ``@tool`` coroutine.
+
+    Split out so the closure binds ``ft`` (and the user's handler)
+    explicitly, free of the surrounding loop variable.
+    """
+
+    @tool_decorator(ft.name, ft.description, ft.params)
+    async def _wrapper(args: dict[str, Any]) -> dict[str, Any]:
+        try:
+            params = ft.params.model_validate(args)
+        except Exception as exc:  # noqa: BLE001 — surface to model
+            return {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": (
+                            f"Tool arguments did not match the {ft.params.__name__} schema: {exc}"
+                        ),
+                    }
+                ],
+                "isError": True,
+            }
+        try:
+            output = await ft.handler(params)
+        except Exception as exc:  # noqa: BLE001 — surface to model
+            return {
+                "content": [{"type": "text", "text": f"{type(exc).__name__}: {exc}"}],
+                "isError": True,
+            }
+        return {"content": [{"type": "text", "text": _stringify_tool_output(output)}]}
+
+    return _wrapper
+
+
+def _stringify_tool_output(output: Any) -> str:
+    """JSON-encode a tool handler's return value for MCP transport.
+
+    Strings pass through verbatim (so already-formatted markdown stays
+    legible in the model's view); everything else round-trips through
+    :func:`json.dumps` with ``default=str``; unserialisable types fall
+    back to :func:`repr` so the model still sees *something*.
+    """
+    import json
+
+    if isinstance(output, str):
+        return output
+    try:
+        return json.dumps(output, default=str)
+    except (TypeError, ValueError):
+        return repr(output)
+
+
+def _serialize_tool_arguments(input_dict: dict[str, Any]) -> str:
+    """Serialise a :attr:`ToolUseBlock.input` dict for the
+    ``arguments_preview`` event field."""
+    import json
+
+    try:
+        return json.dumps(input_dict, default=str, sort_keys=True)
+    except (TypeError, ValueError):
+        return repr(input_dict)
+
+
+def _strip_mcp_prefix(tool_name: str) -> str:
+    """Trim the ``mcp__<server>__`` prefix the SDK adds to MCP tool
+    names so consumer code sees the same :attr:`FunctionTool.name` it
+    registered."""
+    prefix = f"mcp__{AIRFRAME_MCP_SERVER_NAME}__"
+    if tool_name.startswith(prefix):
+        return tool_name[len(prefix) :]
+    return tool_name
+
+
+def _tool_result_output(block: Any) -> Any:
+    """Extract a user-friendly :attr:`ToolCallResult.output` from a
+    :class:`ToolResultBlock`.
+
+    The SDK delivers tool results as either a bare string or a list of
+    content blocks (mirroring Anthropic's wire shape). We collapse
+    the list of ``{"type":"text","text":"…"}`` parts into a single
+    string when that's all the model sent; otherwise pass the raw
+    structure through so consumers don't lose typed metadata.
+    """
+    content = block.content
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        text_parts: list[str] = []
+        for part in content:
+            if isinstance(part, dict) and part.get("type") == "text":
+                text_parts.append(str(part.get("text", "")))
+            else:
+                # Mixed structure — return the raw list so consumers
+                # can inspect non-text parts (rare).
+                return content
+        return "".join(text_parts)
+    return content
+
+
 __all__ = [
+    "AIRFRAME_MCP_SERVER_NAME",
     "DEFAULT_CLAUDE_MODEL",
     "DEFAULT_MAX_TURNS",
     "ClaudeCodeRuntime",

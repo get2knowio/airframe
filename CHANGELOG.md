@@ -6,7 +6,234 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-(no changes yet — Phase 3 work in progress)
+Phase 3 of the [implementation plan](docs/implementation-plan.md) is
+complete — function tools (Tier 1). Iteration A landed the
+protocol-surface shape locks; Iteration B wired the OpenAI-compatible
+family; Iteration C wired Claude + Copilot through their respective
+SDK tool-registration channels; Iteration D codifies Codex's permanent
+decline and ships the multi-provider probe. Ready for release as
+``v0.6.0`` or to roll straight into Phase 4 (MCP server refs).
+
+### Added (Phase 3, Iteration D — Codex decline + probe + docs)
+
+- `CodexRuntime.session(tools=<non-empty>)` raises
+  :class:`~airframe.errors.UnsupportedFeatureError` with a
+  Codex-specific message pointing consumers at the ``codex`` CLI's
+  config file (``~/.codex/config.toml``). Replaces the generic
+  shared-helper decline used during Iterations A–C — Codex's
+  ``TOOLS_FUNCTION=False`` is **permanent**, not a "wait for the next
+  iteration" gate, and the error text now says so explicitly.
+  ``tools=None`` / ``tools=[]`` are no-op and don't trigger the
+  decline (consistent with the other three adapters' "empty list is
+  the same as omitted" handling).
+- `examples/probe_tools.py` — multi-provider live probe. Registers a
+  tiny ``add(a, b: float) -> float`` :class:`FunctionTool`, prompts
+  "what is 17 times 23?", and prints the resulting
+  :class:`~airframe.events.ToolCallStart` /
+  :class:`~airframe.events.ToolCallResult` /
+  :class:`~airframe.events.TextDelta` /
+  :class:`~airframe.events.TurnComplete` sequence from
+  :meth:`AgentSession.stream`. Defaults to ``opencode`` (simplest
+  auth; deterministic client-side tool-loop); accepts
+  ``--provider claude|github-copilot|opencode|codex``. The Codex
+  branch surfaces the decline message verbatim so the probe doubles
+  as documentation for the workaround.
+- 3 new unit tests in `tests/test_codex_session.py` covering the
+  CLI-config decline message, the ``tools=None`` / ``tools=[]``
+  no-op paths, and the capability flag staying False.
+
+### Changed (Phase 3, Iteration D)
+
+- `tests/test_features.py`:
+  `test_three_adapters_declare_tools_function` renamed to
+  `test_tools_function_universal_except_codex` to pin the final
+  Phase 3 matrix: Claude + Copilot + OpenAI-compat all declare
+  ``TOOLS_FUNCTION=True``; Codex alone stays False. The matching
+  `…_kwarg_raises_…` test now also asserts the decline message
+  carries both ``codex`` and ``config`` so message rot doesn't
+  silently regress the workaround pointer.
+- `CodexRuntime` no longer imports
+  :func:`airframe.sessions._check_tools_supported`. The
+  Codex-specific decline lives inline in
+  :meth:`CodexRuntime.session`; the shared helper still services
+  Claude / Copilot / OpenAI-compat (their ``TOOLS_FUNCTION`` flips
+  to ``True`` mean the helper short-circuits cleanly).
+
+### Added (Phase 3, Iteration C — Claude + Copilot tool dispatch)
+
+- **Claude:** `_translate_tools_for_claude(tools)` builds an in-process
+  MCP server via `claude_agent_sdk.create_sdk_mcp_server(...)`. Each
+  `FunctionTool` becomes one `@tool`-decorated coroutine that
+  validates incoming args against the user's Pydantic schema, awaits
+  the handler, and wraps the return in the SDK's
+  `{"content": [{"type":"text","text":...}]}` envelope. Handler
+  exceptions / argument-validation failures come back as
+  `isError=True` so the model can recover.
+- `ClaudeCodeSession(tools=...)` — accepted on the session factory.
+  Tools are baked into `ClaudeAgentOptions.mcp_servers` at connect
+  time, with matching `mcp__airframe_tools__<name>` entries appended
+  to `allowed_tools`. The `_ensure_client` cache key gains a
+  `tools=<fingerprint>` fragment so a tools-change between calls
+  forces a reconnect.
+- `ClaudeCodeSession.stream()` translates `ToolUseBlock` on
+  `AssistantMessage` content into `ToolCallStart` and the matching
+  `ToolResultBlock` on `UserMessage` content into `ToolCallResult`.
+  The `mcp__airframe_tools__` prefix is stripped from `tool_name`
+  so consumers see the same `FunctionTool.name` they registered.
+- Helpers exported from `airframe.adapters.claude_code`:
+  `AIRFRAME_MCP_SERVER_NAME = "airframe_tools"`.
+- `Feature.TOOLS_FUNCTION` flipped **True** on
+  `ClaudeCodeRuntime.SUPPORTED_FEATURES`.
+- **Copilot:** `_translate_one_copilot_tool(ft)` wraps each
+  `FunctionTool` as a `copilot.define_tool(...)` registration. The
+  `(params, invocation_context) -> result` SDK handler signature is
+  adapted to the airframe `(BaseModel) -> Awaitable[Any]` shape by
+  ignoring the invocation context. `skip_permission=True` matches the
+  existing session-wide `PermissionHandler.approve_all` policy.
+- `CopilotAgentSession(tools=...)` — accepted on the session factory.
+  Tools are passed via `CopilotClient.create_session(tools=...)` at
+  session-creation time. The session cache key (already keyed on
+  schema + reasoning-effort) gains a `tools=<fingerprint>` fragment
+  so a tools-change forces a rebuild.
+- **`submit_result` + custom tools coexistence:** when both `schema=`
+  and `tools=` are passed to `CopilotRuntime.session(...)`, the
+  adapter prepends the forced `submit_result` tool to the user's
+  list. The model sees the structured-output gate in slot 0, then
+  the user's tools. Streaming events for `submit_result` are
+  filtered out (it's structured-output plumbing, not a user-visible
+  tool call).
+- `CopilotAgentSession.stream()` translates
+  `ToolExecutionStartData` → `ToolCallStart` and
+  `ToolExecutionCompleteData` → `ToolCallResult`. Failure responses
+  (`success=False`) come back with `is_error=True` and the
+  `<code>: <message>` text from `ToolExecutionCompleteError`.
+- `Feature.TOOLS_FUNCTION` flipped **True** on
+  `CopilotRuntime.SUPPORTED_FEATURES`.
+- 8 new unit tests in `tests/test_claude_code_session.py` covering:
+  mcp_servers + allowed_tools wiring, the @tool wrapper's validation
+  + envelope behaviour, handler-exception → `isError=True`,
+  invalid-args → validation error, streaming `ToolCallStart` /
+  `ToolCallResult` shape, `ToolResultBlock(is_error=True)`
+  propagation, tools-change reconnects, no-tools omits the kwargs.
+- 8 new unit tests in `tests/test_copilot_session.py` covering:
+  `tools=` reaches `create_session`, the `(params, invocation)`
+  adapter signature, `submit_result` + custom-tools coexistence,
+  no-tools omits the kwarg, streaming `ToolCallStart` /
+  `ToolCallResult` shape, `submit_result` filtered from stream,
+  `success=False` → `is_error=True`, tools-change rebuilds.
+
+### Changed (Phase 3, Iteration C)
+
+- `tests/test_features.py` updated for the new asymmetry:
+  `test_openai_compatible_declares_tools_function` replaced with
+  `test_three_adapters_declare_tools_function` pinning that Claude,
+  Copilot, and OpenAI-compat all declare TOOLS_FUNCTION while Codex
+  alone stays False; the matching `…_kwarg_raises_…` test now only
+  asserts the rejection contract on Codex.
+
+### Added (Phase 3, Iteration B — OpenAI-compat tool round-trip)
+
+- `_translate_tools_for_openai(tools) → list[dict]` — translates
+  each `FunctionTool` to the OpenAI wire shape
+  (`{"type":"function","function":{"name":…,"description":…,
+  "parameters":<json_schema>}}`). Schemas come from
+  `FunctionTool.params.model_json_schema()`; the result is computed
+  once at session construction and reused on every
+  `chat.completions.create()` call.
+- `OpenAICompatibleSession(tools=…)` — accepts and caches a
+  `list[FunctionTool]` for the session's lifetime. The wire payload
+  is precomputed; the per-name lookup table drives dispatch.
+- Client-side tool-loop in `_do_execute`: when the response carries
+  `tool_calls`, dispatch each handler, append the assistant message
+  (with the original `tool_calls` payload) and one `role="tool"`
+  reply per call, then re-call. Loops until the model produces a
+  final text response or `MAX_TOOL_ITERATIONS=20` round-trips
+  elapse — runaway loops surface as
+  `RuntimeProtocolError` with a "model kept requesting tools without
+  producing a final response" message. Handler exceptions, unknown
+  tool names, and Pydantic validation failures all flow back to the
+  model as `role="tool"` replies (with `is_error=True` on the
+  matching streaming event), so the model can recover on its next
+  turn.
+- Tool-loop in `stream()`: accumulates `delta.tool_calls` fragments
+  by `index` across chunks, then for each call emits `ToolCallStart`
+  (with the accumulated `arguments` as `arguments_preview`), invokes
+  the handler, emits `ToolCallResult`, and appends the `role="tool"`
+  message before the next iteration. Exactly one `TurnComplete` at
+  the very end of the user turn — intermediate model turns produce
+  tool events but no `TurnComplete` (consistent with the docstring
+  clarified in Iteration A).
+- `_serialize_tool_output(output)` — JSON-encodes a handler return
+  value for the `role="tool"` content field. Strings pass through;
+  everything else round-trips via `json.dumps(default=str)`;
+  unserialisable types fall back to `repr()`.
+- `MAX_TOOL_ITERATIONS = 20` exported from
+  `airframe.adapters.openai_compatible`.
+- `Feature.TOOLS_FUNCTION` flipped **True** on
+  `OpenAICompatibleRuntime.SUPPORTED_FEATURES`. The other three
+  adapters keep their Iteration A capability — non-None `tools=`
+  still raises `UnsupportedFeatureError` until Iterations C and D
+  land.
+- 13 new unit tests in `tests/test_openai_compatible_session.py`
+  covering: single-tool round-trip, parallel tool calls (multiple
+  per assistant message), handler-exception → `is_error` recovery,
+  unknown-tool-name → `is_error` message, iteration cap raising
+  `RuntimeProtocolError`, buffer rollback on mid-loop failure,
+  no-tools sessions omit the `tools=` kwarg, streaming
+  `ToolCallStart` / `ToolCallResult` event shape, streaming handler
+  exception → `is_error=True`, and streaming iteration cap.
+
+### Changed (Phase 3, Iteration B)
+
+- `tests/test_features.py::test_unwired_features_stay_false` now
+  permits `TOOLS_FUNCTION` to vary per adapter (the OpenAI-compat
+  family flipped it True; the other three are still False).
+- `test_no_adapter_declares_tools_function_yet` replaced with
+  `test_openai_compatible_declares_tools_function` pinning the new
+  asymmetry; `test_session_tools_kwarg_raises_unsupported_feature`
+  replaced with `…_on_unwired_adapters` which exempts OpenAI-compat
+  from the rejection contract.
+- `OpenAICompatibleSession.execute()` and `.stream()` now snapshot
+  the message buffer length up front and roll back to that length
+  on any failure, replacing the older "pop one user message if it
+  was the last entry" logic. The tool-loop may append multiple
+  intermediate messages, so the single-pop rollback would have left
+  intermediate state behind.
+
+### Added (Phase 3, Iteration A — protocol scaffolding)
+
+- `airframe.tools.FunctionTool` — frozen+slots dataclass with
+  ``name``, ``description``, ``params: type[BaseModel]``, and
+  ``handler: Callable[[BaseModel], Awaitable[Any]]``. The
+  ``handler`` signature is the **shape lock** for Phase 3: parsed
+  Pydantic in, JSON-serialisable Any out. Matches Copilot's
+  ``define_tool`` and LangChain's ``@tool`` decorator.
+- `tools: list[FunctionTool] | None = None` kwarg on
+  :meth:`AgentRuntime.session` Protocol and every adapter's
+  ``session()`` (Claude / Copilot / Codex / OpenAI-compat).
+- `airframe.sessions._check_tools_supported(tools, *, adapter_label,
+  feature_supported)` — shared helper every adapter calls at the
+  top of ``session()``. Raises
+  :class:`~airframe.errors.UnsupportedFeatureError` with
+  ``feature=Feature.TOOLS_FUNCTION`` on a non-None list while the
+  adapter's capability flag is False — the same "no silent
+  fallback" pattern the prompt-parts helper uses.
+- Top-level export: `FunctionTool`.
+- 6 new tests in `tests/test_tools.py` pinning the dataclass shape
+  (frozen+slots, field order, handler signature, public export
+  path).
+- 2 new feature-matrix tests: ``TOOLS_FUNCTION`` stays False on every
+  adapter; ``session(tools=...)`` raises ``UnsupportedFeatureError``
+  on every adapter.
+
+### Changed (Phase 3, Iteration A)
+
+- `TurnComplete` docstring clarified: one ``TurnComplete`` per
+  *user turn*, not per *model turn*. Tool round-trips (Phase 3)
+  produce intermediate ``ToolCallStart`` / ``ToolCallResult`` pairs
+  but only one trailing ``TurnComplete`` with the final model
+  turn's result.
+
 
 ---
 

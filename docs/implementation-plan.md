@@ -659,6 +659,145 @@ list — same forcing pattern as today, just sharing the slot.
    is JSON-serialisable. Matches Copilot's `define_tool` shape and
    LangChain's `tool` decorator.
 
+### Iteration breakdown
+
+Phase 3 lands in four iterations, each ending with a `make ci`-green
+stopping point. Same shape as Phase 2 Iterations A–D. Status: **Phase
+3 complete** on the `phase-3-function-tools` branch — Iterations A
+through D all green.
+
+#### Iteration A — Protocol scaffolding (no behaviour) ✅
+
+Lock the public surface; defer the wiring.
+
+- New module `airframe/tools.py` with `FunctionTool` dataclass
+  (frozen+slots: `name`, `description`, `params: type[BaseModel]`,
+  `handler: Callable[[BaseModel], Awaitable[Any]]`).
+- Extend `AgentRuntime.session(...)` Protocol and every adapter's
+  `session()` method with `tools: list[FunctionTool] | None = None`.
+- Shared helper `airframe.sessions._check_tools_supported(tools, *,
+  adapter_label, feature_supported)` raises
+  `UnsupportedFeatureError(feature=Feature.TOOLS_FUNCTION)` on a
+  non-None list while the adapter's capability flag is False.
+- Every adapter's `session()` calls the helper at the top.
+- Top-level export: `FunctionTool`.
+- `TurnComplete` docstring clarified: one per *user turn*, not per
+  *model turn* (tool round-trips produce intermediate
+  `ToolCallStart`/`ToolCallResult` pairs but only one trailing
+  `TurnComplete`).
+- Tests: `tests/test_tools.py` pinning the dataclass shape;
+  cross-adapter feature-matrix tests confirming `TOOLS_FUNCTION` is
+  False everywhere and `session(tools=...)` raises everywhere.
+
+**Stopping point.** `tools=` accepted by every adapter's `session()`
+signature; non-None raises immediately. No per-adapter behaviour yet.
+
+#### Iteration B — Wire OpenAI-compat (the hard one first) ✅
+
+Sets the canonical event-emission pattern; client-side tool-loop is
+the most complex piece in Phase 3.
+
+- `_translate_tools_for_openai(tools) → list[dict]` helper —
+  `FunctionTool` → `{"type":"function","function":{"name":..,
+  "description":..,"parameters":<json_schema>}}`.
+- `OpenAICompatibleSession`: cache tools at construction; pass
+  `tools=` to every `chat.completions.create()`.
+- Tool-loop in `_do_execute`: when response has `tool_calls`,
+  invoke each handler with parsed `params`, append `role="tool"`
+  messages with JSON-serialised returns, re-call. Cap at
+  `MAX_TOOL_ITERATIONS=20` (raise `RuntimeProtocolError` on cap —
+  runaway agents are a real failure mode worth surfacing).
+- Tool-loop in `stream()`: detect `delta.tool_calls`, accumulate
+  the `arguments` JSON across chunks, emit `ToolCallStart` with
+  `arguments_preview`, run handler, emit `ToolCallResult`, append
+  the message, continue. One `TurnComplete` at the very end.
+- Handler errors → `ToolCallResult(is_error=True, output=<repr>)`
+  and a `role="tool"` message so the model can recover.
+- Flip `Feature.TOOLS_FUNCTION` True on `OpenAICompatibleRuntime`.
+- Tests: round-trip with one tool, parallel tool calls (multiple
+  in one assistant message), handler raises → propagates, iteration
+  cap.
+
+**Stopping point.** OpenAI-compat fully wired. Claude / Copilot
+still raise on `tools=`.
+
+#### Iteration C — Wire Claude + Copilot (SDK does the dispatch) ✅
+
+Both vendors handle tool dispatch *inside the SDK*. No client-side
+loop — register the tools at session-creation, let the SDK invoke
+handlers, translate the SDK's tool events into airframe events.
+
+- **Claude:** `_translate_tools_for_claude(tools) → mcp_server_config`.
+  Build an in-process MCP server via
+  `claude_agent_sdk.create_sdk_mcp_server(...)`; wrap each
+  `FunctionTool` with the SDK's `@tool` decorator. Pass via
+  `ClaudeAgentOptions.mcp_servers={...}`. Detect `ToolUseBlock` in
+  `receive_response()` → emit `ToolCallStart`; matching
+  `ToolResultBlock` → emit `ToolCallResult`. Tools enter the
+  existing `_ensure_client` cache key (a tools-fingerprint
+  fragment) so a tools-change forces reconnect — symmetric with how
+  `thinking` and `has_attachments` work.
+- **Copilot:** `_translate_tools_for_copilot(tools) → list[copilot.Tool]`.
+  Each `FunctionTool` becomes a `define_tool(name, description,
+  handler, params_type)` registration. Pass via
+  `create_session(tools=...)`. Coexistence rule: when both `tools=`
+  and `schema=` are present, the adapter prepends the existing
+  `submit_result` tool to the user's list. Translate `TOOL_USE_*`
+  session events into `ToolCallStart`/`ToolCallResult`. Tools join
+  the existing cache key.
+- Flip `Feature.TOOLS_FUNCTION` True on both adapters.
+- Tests: round-trip with one tool on each; Copilot `submit_result`
+  + `tools=` coexistence (forced structured output still works);
+  Claude tools event-emission shape.
+
+**Stopping point.** Three of four adapters wired. Codex still
+accepts `tools=` and ignores them — fixed in D.
+
+#### Iteration D — Codex rejection, probe, wrap-up ✅
+
+- **Codex:** `CodexRuntime.session(tools=<non-None>)` raises
+  `UnsupportedFeatureError(feature=Feature.TOOLS_FUNCTION)` with a
+  "wire tools through the Codex CLI config file; airframe can't
+  expose them programmatically" message. `Feature.TOOLS_FUNCTION`
+  stays False on Codex.
+- `examples/probe_tools.py` — multi-provider probe registering a
+  tiny `calculator` tool (`add(a, b: float) -> float`), prompts
+  "what is 17 × 23?", reports the `ToolCallStart`/`ToolCallResult`
+  sequence from `stream()`.
+- Tests: Codex tools= rejection; `test_features.py` asserts
+  `TOOLS_FUNCTION` is universal-except-Codex; update
+  `test_unwired_features_stay_false` (TOOLS_FUNCTION joins
+  `any_adapter_may_support`).
+- CHANGELOG Iteration D entry; trim the "Deferred (Phase 3)" block.
+
+**Stopping point.** Phase 3 complete. Ready for release (`v0.6.0`)
+or to roll straight into Phase 4 (MCP server refs).
+
+### Risks and decisions to flag during execution
+
+1. **`FunctionTool.handler` signature.** Plan-recommended: parsed
+   `BaseModel` in, `Any` out (JSON-serialisable by convention).
+   Locked in Iteration A. Matches Copilot's `define_tool` and
+   LangChain's `@tool`. Alternative (pass an invocation-context
+   object too) rejected — v0 keeps the shape minimal; can be added
+   later via a kwarg-only optional parameter.
+2. **OpenAI-compat tool-loop iteration cap.** A model that keeps
+   requesting tool calls indefinitely is a real failure mode.
+   Hard-fail at 20 iterations with `RuntimeProtocolError`;
+   consumers wanting more can override via a future
+   `provider_options` field. Not exposing as a kwarg yet — wait
+   for a concrete user.
+3. **Tools change between turns.** On Claude / Copilot the tools
+   list is baked at session-creation; changing it mid-session means
+   a new session. The plan attaches `tools=` to `session(...)`
+   rather than `execute()` precisely for this reason. Worth
+   re-confirming when wiring B and C.
+4. **`stream()` contract clarification.** One `TurnComplete` per
+   *user turn*, not per *model turn*. Tool round-trips produce
+   intermediate `ToolCallStart`/`ToolCallResult` pairs but only one
+   trailing `TurnComplete`. `TurnComplete` docstring updated in
+   Iteration A.
+
 ---
 
 ## Phase 4 — MCP server refs (Tier 2)

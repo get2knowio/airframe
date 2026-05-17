@@ -57,10 +57,17 @@ def _make_response(
     finish_reason: str = "stop",
     prompt_tokens: int = 100,
     completion_tokens: int = 50,
+    tool_calls: list[Any] | None = None,
 ) -> Any:
-    """Stand-in for an ``openai`` ChatCompletion (non-streaming)."""
+    """Stand-in for an ``openai`` ChatCompletion (non-streaming).
+
+    ``tool_calls`` defaults to ``None`` so the tool-loop sees a normal
+    text turn; tests that exercise the tool path build their own
+    ``_FakeToolCall`` instances and pass them in.
+    """
     msg = MagicMock()
     msg.content = content
+    msg.tool_calls = tool_calls
     choice = MagicMock()
     choice.message = msg
     choice.finish_reason = finish_reason
@@ -74,10 +81,21 @@ def _make_response(
     return response
 
 
-def _make_chunk(*, content: str | None = None, finish_reason: str | None = None) -> Any:
-    """Stand-in for one ``ChatCompletionChunk`` from the streaming API."""
+def _make_chunk(
+    *,
+    content: str | None = None,
+    finish_reason: str | None = None,
+    tool_call_deltas: list[Any] | None = None,
+) -> Any:
+    """Stand-in for one ``ChatCompletionChunk`` from the streaming API.
+
+    ``tool_call_deltas`` defaults to ``None`` so the consumer accumulator
+    sees a plain text chunk; tests exercising the tool-loop streaming
+    path supply per-index :class:`_FakeToolCallDelta` instances.
+    """
     delta = MagicMock()
     delta.content = content
+    delta.tool_calls = tool_call_deltas
     choice = MagicMock()
     choice.delta = delta
     choice.finish_reason = finish_reason
@@ -657,3 +675,452 @@ async def test_close_does_not_close_runtime_client(mock_openai: MagicMock) -> No
     await sess.execute("warm the client")
     await sess.close()
     mock_openai.close.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Function tools (Phase 3 Iteration B)
+# ---------------------------------------------------------------------------
+
+
+class _AddParams(BaseModel):
+    a: float
+    b: float
+
+
+def _make_tool_call(*, call_id: str, name: str, arguments: str) -> Any:
+    """Stand-in for one ``ChatCompletionMessageToolCall``."""
+    fn = MagicMock()
+    fn.name = name
+    fn.arguments = arguments
+    tc = MagicMock()
+    tc.id = call_id
+    tc.function = fn
+    return tc
+
+
+def _make_tool_call_delta(
+    *,
+    index: int,
+    call_id: str | None = None,
+    name: str | None = None,
+    arguments: str | None = None,
+) -> Any:
+    """Stand-in for one ``delta.tool_calls[i]`` fragment in a stream chunk."""
+    fn: Any = None
+    if name is not None or arguments is not None:
+        fn = MagicMock()
+        fn.name = name
+        fn.arguments = arguments
+    dtc = MagicMock()
+    dtc.index = index
+    dtc.id = call_id
+    dtc.function = fn
+    return dtc
+
+
+def _make_tool_call_response(*, tool_calls: list[Any]) -> Any:
+    """Non-streaming response carrying tool_calls (no final text)."""
+    return _make_response(content=None, finish_reason="tool_calls", tool_calls=tool_calls)
+
+
+async def test_execute_round_trips_one_tool(mock_openai: MagicMock) -> None:
+    """Single-tool round-trip: model calls add(17, 23), handler returns 40,
+    re-call produces final text."""
+    from airframe import FunctionTool
+
+    async def add(params: _AddParams) -> float:
+        return params.a + params.b
+
+    tool = FunctionTool(name="add", description="Add two numbers.", params=_AddParams, handler=add)
+
+    mock_openai.chat.completions.create = AsyncMock(
+        side_effect=[
+            _make_tool_call_response(
+                tool_calls=[
+                    _make_tool_call(call_id="call_1", name="add", arguments='{"a": 17, "b": 23}')
+                ]
+            ),
+            _make_response(content="The answer is 40."),
+        ]
+    )
+    runtime = _make_runtime()
+    sess = runtime.session(tools=[tool])
+    try:
+        result = await sess.execute("what's 17 + 23?")
+    finally:
+        await sess.close()
+
+    assert result.text == "The answer is 40."
+    assert mock_openai.chat.completions.create.await_count == 2
+    # First call carries the tools= payload.
+    first_call = mock_openai.chat.completions.create.await_args_list[0]
+    assert first_call.kwargs["tools"][0] == {
+        "type": "function",
+        "function": {
+            "name": "add",
+            "description": "Add two numbers.",
+            "parameters": _AddParams.model_json_schema(),
+        },
+    }
+    # Second call's messages should include the intermediate
+    # assistant+tool_calls turn plus the role="tool" reply.
+    second_messages = mock_openai.chat.completions.create.await_args_list[1].kwargs["messages"]
+    assert second_messages[-2]["role"] == "assistant"
+    assert second_messages[-2]["tool_calls"][0]["id"] == "call_1"
+    assert second_messages[-1] == {
+        "role": "tool",
+        "tool_call_id": "call_1",
+        "content": "40.0",
+    }
+
+
+async def test_execute_handles_parallel_tool_calls(mock_openai: MagicMock) -> None:
+    """One assistant message can carry multiple tool calls; each must dispatch."""
+    from airframe import FunctionTool
+
+    handler_calls: list[tuple[float, float]] = []
+
+    async def add(params: _AddParams) -> float:
+        handler_calls.append((params.a, params.b))
+        return params.a + params.b
+
+    tool = FunctionTool(name="add", description="Add.", params=_AddParams, handler=add)
+
+    mock_openai.chat.completions.create = AsyncMock(
+        side_effect=[
+            _make_tool_call_response(
+                tool_calls=[
+                    _make_tool_call(call_id="c1", name="add", arguments='{"a": 1, "b": 2}'),
+                    _make_tool_call(call_id="c2", name="add", arguments='{"a": 3, "b": 4}'),
+                    _make_tool_call(call_id="c3", name="add", arguments='{"a": 5, "b": 6}'),
+                ]
+            ),
+            _make_response(content="All done."),
+        ]
+    )
+    runtime = _make_runtime()
+    sess = runtime.session(tools=[tool])
+    try:
+        result = await sess.execute("do three sums")
+    finally:
+        await sess.close()
+
+    assert result.text == "All done."
+    # All three handlers ran in registration order.
+    assert handler_calls == [(1.0, 2.0), (3.0, 4.0), (5.0, 6.0)]
+    # The follow-up call has three role="tool" replies, in order.
+    second_messages = mock_openai.chat.completions.create.await_args_list[1].kwargs["messages"]
+    tool_messages = [m for m in second_messages if m.get("role") == "tool"]
+    assert [m["tool_call_id"] for m in tool_messages] == ["c1", "c2", "c3"]
+    assert [m["content"] for m in tool_messages] == ["3.0", "7.0", "11.0"]
+
+
+async def test_handler_exception_becomes_is_error_tool_message(
+    mock_openai: MagicMock,
+) -> None:
+    """A raising handler doesn't propagate — the model sees the error and recovers."""
+    from airframe import FunctionTool
+
+    async def boom(_: _AddParams) -> float:
+        raise ValueError("the maths fell apart")
+
+    tool = FunctionTool(name="add", description="Add.", params=_AddParams, handler=boom)
+
+    mock_openai.chat.completions.create = AsyncMock(
+        side_effect=[
+            _make_tool_call_response(
+                tool_calls=[
+                    _make_tool_call(call_id="c1", name="add", arguments='{"a": 1, "b": 2}')
+                ]
+            ),
+            _make_response(content="apologies, the tool failed."),
+        ]
+    )
+    runtime = _make_runtime()
+    sess = runtime.session(tools=[tool])
+    try:
+        result = await sess.execute("add stuff")
+    finally:
+        await sess.close()
+
+    # Loop continued; consumer-facing call did not raise.
+    assert result.text == "apologies, the tool failed."
+    # The role="tool" content carries the error string.
+    second_messages = mock_openai.chat.completions.create.await_args_list[1].kwargs["messages"]
+    tool_msg = next(m for m in second_messages if m.get("role") == "tool")
+    assert "ValueError" in tool_msg["content"]
+    assert "the maths fell apart" in tool_msg["content"]
+
+
+async def test_unknown_tool_name_becomes_is_error_message(
+    mock_openai: MagicMock,
+) -> None:
+    """If the model invents a tool name we don't know, surface that to it."""
+    from airframe import FunctionTool
+
+    async def add(params: _AddParams) -> float:
+        return params.a + params.b
+
+    tool = FunctionTool(name="add", description="Add.", params=_AddParams, handler=add)
+    mock_openai.chat.completions.create = AsyncMock(
+        side_effect=[
+            _make_tool_call_response(
+                tool_calls=[_make_tool_call(call_id="x", name="multiply", arguments="{}")]
+            ),
+            _make_response(content="never mind."),
+        ]
+    )
+    runtime = _make_runtime()
+    sess = runtime.session(tools=[tool])
+    try:
+        await sess.execute("multiply something")
+    finally:
+        await sess.close()
+
+    second_messages = mock_openai.chat.completions.create.await_args_list[1].kwargs["messages"]
+    tool_msg = next(m for m in second_messages if m.get("role") == "tool")
+    assert "'multiply'" in tool_msg["content"]
+    assert "not registered" in tool_msg["content"]
+
+
+async def test_tool_loop_iteration_cap_raises_runtime_protocol_error(
+    mock_openai: MagicMock,
+) -> None:
+    """A model that keeps requesting tools must be surfaced as a protocol error."""
+    from airframe import FunctionTool
+    from airframe.adapters.openai_compatible import MAX_TOOL_ITERATIONS
+    from airframe.errors import RuntimeProtocolError
+
+    async def add(params: _AddParams) -> float:
+        return params.a + params.b
+
+    tool = FunctionTool(name="add", description="Add.", params=_AddParams, handler=add)
+    # Every iteration returns another tool call — never terminates.
+    looping_response = _make_tool_call_response(
+        tool_calls=[_make_tool_call(call_id="c", name="add", arguments='{"a": 1, "b": 2}')]
+    )
+
+    async def _always_tool(**_: Any) -> Any:
+        return looping_response
+
+    mock_openai.chat.completions.create = AsyncMock(side_effect=_always_tool)
+    runtime = _make_runtime()
+    sess = runtime.session(tools=[tool])
+    try:
+        with pytest.raises(RuntimeProtocolError) as exc_info:
+            await sess.execute("loop forever")
+    finally:
+        await sess.close()
+
+    assert str(MAX_TOOL_ITERATIONS) in str(exc_info.value)
+    # The cap is hit (and not exceeded) by the time we raise.
+    assert mock_openai.chat.completions.create.await_count == MAX_TOOL_ITERATIONS
+
+
+async def test_tool_loop_failure_rolls_back_buffer(mock_openai: MagicMock) -> None:
+    """A failed tool turn must not pollute the buffer for the next attempt."""
+    from airframe import FunctionTool
+
+    async def add(params: _AddParams) -> float:
+        return params.a + params.b
+
+    tool = FunctionTool(name="add", description="Add.", params=_AddParams, handler=add)
+
+    # First execute: API blows up mid-loop. Second execute: clean call.
+    mock_openai.chat.completions.create = AsyncMock(
+        side_effect=[
+            _make_tool_call_response(
+                tool_calls=[
+                    _make_tool_call(call_id="c1", name="add", arguments='{"a": 1, "b": 2}')
+                ]
+            ),
+            RuntimeError("vendor hiccup"),
+            _make_response(content="hello"),
+        ]
+    )
+    runtime = _make_runtime()
+    sess = runtime.session(tools=[tool])
+    try:
+        with pytest.raises(Exception):  # noqa: B017
+            await sess.execute("first attempt")
+        # Buffer should be empty (no system prompt either).
+        assert sess._messages == []  # noqa: SLF001
+        result = await sess.execute("retry")
+    finally:
+        await sess.close()
+
+    assert result.text == "hello"
+    # The retry call should send only the new user message.
+    last_messages = mock_openai.chat.completions.create.await_args_list[-1].kwargs["messages"]
+    assert last_messages == [{"role": "user", "content": "retry"}]
+
+
+async def test_session_without_tools_omits_tools_kwarg(mock_openai: MagicMock) -> None:
+    """No-tools sessions keep the pre-Iteration-B wire shape (no ``tools=`` key)."""
+    runtime = _make_runtime()
+    sess = runtime.session()
+    try:
+        await sess.execute("hi")
+    finally:
+        await sess.close()
+
+    call = mock_openai.chat.completions.create.await_args_list[0]
+    assert "tools" not in call.kwargs
+
+
+async def test_stream_emits_tool_call_events_around_handler(
+    mock_openai: MagicMock,
+) -> None:
+    """stream() emits ToolCallStart, ToolCallResult, then final TextDelta + TurnComplete."""
+    from airframe import FunctionTool
+    from airframe.events import ToolCallResult, ToolCallStart
+
+    async def add(params: _AddParams) -> float:
+        return params.a + params.b
+
+    tool = FunctionTool(name="add", description="Add.", params=_AddParams, handler=add)
+
+    # First iteration: stream announces a tool call across two delta chunks.
+    tool_chunks = [
+        _make_chunk(
+            tool_call_deltas=[
+                _make_tool_call_delta(
+                    index=0,
+                    call_id="c1",
+                    name="add",
+                    arguments='{"a": 1, ',
+                )
+            ]
+        ),
+        _make_chunk(
+            tool_call_deltas=[_make_tool_call_delta(index=0, arguments='"b": 2}')],
+            finish_reason="tool_calls",
+        ),
+        _make_usage_chunk(prompt_tokens=10, completion_tokens=3),
+    ]
+    # Second iteration: streams the final text answer.
+    text_chunks = [
+        _make_chunk(content="The "),
+        _make_chunk(content="answer is 3.", finish_reason="stop"),
+        _make_usage_chunk(prompt_tokens=20, completion_tokens=4),
+    ]
+    mock_openai.chat.completions.create = AsyncMock(
+        side_effect=[_AsyncIter(tool_chunks), _AsyncIter(text_chunks)]
+    )
+    runtime = _make_runtime()
+    sess = runtime.session(tools=[tool])
+    events: list[Any] = []
+    try:
+        async for event in sess.stream("what's 1+2?"):
+            events.append(event)
+    finally:
+        await sess.close()
+
+    starts = [e for e in events if isinstance(e, ToolCallStart)]
+    results = [e for e in events if isinstance(e, ToolCallResult)]
+    text_events = [e for e in events if isinstance(e, TextDelta)]
+    turns = [e for e in events if isinstance(e, TurnComplete)]
+
+    assert len(starts) == 1
+    assert starts[0].tool_name == "add"
+    assert starts[0].tool_call_id == "c1"
+    assert starts[0].arguments_preview == '{"a": 1, "b": 2}'
+    assert len(results) == 1
+    assert results[0].tool_call_id == "c1"
+    assert results[0].output == 3.0
+    assert results[0].is_error is False
+    # Final text comes from the second iteration only.
+    assert "".join(e.text for e in text_events) == "The answer is 3."
+    # Exactly one TurnComplete at the very end.
+    assert len(turns) == 1
+    assert events[-1] is turns[0]
+    assert turns[0].result.text == "The answer is 3."
+
+
+async def test_stream_handler_exception_propagates_as_is_error_event(
+    mock_openai: MagicMock,
+) -> None:
+    """Handler raising during stream() still produces a ToolCallResult(is_error=True)."""
+    from airframe import FunctionTool
+    from airframe.events import ToolCallResult
+
+    async def boom(_: _AddParams) -> float:
+        raise RuntimeError("kaboom")
+
+    tool = FunctionTool(name="add", description="Add.", params=_AddParams, handler=boom)
+    tool_chunks = [
+        _make_chunk(
+            tool_call_deltas=[
+                _make_tool_call_delta(
+                    index=0, call_id="c1", name="add", arguments='{"a": 1, "b": 2}'
+                )
+            ],
+            finish_reason="tool_calls",
+        ),
+        _make_usage_chunk(prompt_tokens=10, completion_tokens=3),
+    ]
+    text_chunks = [
+        _make_chunk(content="apologies.", finish_reason="stop"),
+        _make_usage_chunk(prompt_tokens=20, completion_tokens=2),
+    ]
+    mock_openai.chat.completions.create = AsyncMock(
+        side_effect=[_AsyncIter(tool_chunks), _AsyncIter(text_chunks)]
+    )
+    runtime = _make_runtime()
+    sess = runtime.session(tools=[tool])
+    events: list[Any] = []
+    try:
+        async for event in sess.stream("loop"):
+            events.append(event)
+    finally:
+        await sess.close()
+
+    results = [e for e in events if isinstance(e, ToolCallResult)]
+    assert len(results) == 1
+    assert results[0].is_error is True
+    assert "RuntimeError" in str(results[0].output)
+
+
+async def test_stream_iteration_cap_raises_runtime_protocol_error(
+    mock_openai: MagicMock,
+) -> None:
+    """Streaming runaways surface as RuntimeProtocolError just like execute()."""
+    from airframe import FunctionTool
+    from airframe.adapters.openai_compatible import MAX_TOOL_ITERATIONS
+    from airframe.errors import RuntimeProtocolError
+
+    async def add(params: _AddParams) -> float:
+        return params.a + params.b
+
+    tool = FunctionTool(name="add", description="Add.", params=_AddParams, handler=add)
+
+    def _loop_chunks() -> list[Any]:
+        return [
+            _make_chunk(
+                tool_call_deltas=[
+                    _make_tool_call_delta(
+                        index=0,
+                        call_id="c",
+                        name="add",
+                        arguments='{"a": 1, "b": 2}',
+                    )
+                ],
+                finish_reason="tool_calls",
+            ),
+            _make_usage_chunk(prompt_tokens=1, completion_tokens=1),
+        ]
+
+    async def _always_loop(**_: Any) -> Any:
+        return _AsyncIter(_loop_chunks())
+
+    mock_openai.chat.completions.create = AsyncMock(side_effect=_always_loop)
+
+    runtime = _make_runtime()
+    sess = runtime.session(tools=[tool])
+    try:
+        with pytest.raises(RuntimeProtocolError):
+            async for _ in sess.stream("infinite"):
+                pass
+    finally:
+        await sess.close()
+    assert mock_openai.chat.completions.create.await_count == MAX_TOOL_ITERATIONS

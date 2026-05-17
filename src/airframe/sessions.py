@@ -40,6 +40,7 @@ if TYPE_CHECKING:
     from airframe.inputs import Prompt
     from airframe.protocol import AgentRuntime, ProviderModel, RuntimeResult
     from airframe.thinking import ThinkingMode
+    from airframe.tools import FunctionTool
 
 
 def _coerce_prompt_or_raise(prompt: Prompt, *, adapter_label: str) -> str:
@@ -137,6 +138,48 @@ def _split_prompt_parts(
                 f"expected str | ImageInput | FileInput"
             )
     return "\n\n".join(text_parts), images, files
+
+
+def _check_tools_supported(
+    tools: list[FunctionTool] | None,
+    *,
+    adapter_label: str,
+    feature_supported: bool,
+) -> None:
+    """Gate ``session(tools=...)`` against the adapter's capability flag.
+
+    Phase 3 Iteration A scaffolds the ``tools=`` kwarg on every
+    :meth:`AgentRuntime.session` signature but defers the per-adapter
+    wiring to Iterations B (OpenAI-compat), C (Claude + Copilot), and
+    D (Codex declination). Until each adapter flips
+    :data:`~airframe.features.Feature.TOOLS_FUNCTION` True, a non-None
+    ``tools=`` raises here so consumer code gets a clear capability
+    decline rather than a silently-ignored kwarg.
+
+    A ``None`` (or empty) list is always permitted — it's the no-op
+    default and doesn't exercise any unwired surface.
+
+    Args:
+        tools: The list passed to ``session(tools=...)``.
+        adapter_label: Adapter name for the error message.
+        feature_supported: ``runtime.supports(Feature.TOOLS_FUNCTION)``
+            — passed in by the caller so this helper doesn't need a
+            runtime reference.
+
+    Raises:
+        UnsupportedFeatureError: ``tools`` is non-None / non-empty
+            *and* the adapter hasn't flipped ``TOOLS_FUNCTION``.
+    """
+    if not tools:
+        return
+    if feature_supported:
+        return
+    raise UnsupportedFeatureError(
+        f"{adapter_label}: tools= is not wired on this adapter yet. "
+        f"Check runtime.supports(Feature.TOOLS_FUNCTION) before "
+        f"passing tools=[FunctionTool(...)].",
+        feature=Feature.TOOLS_FUNCTION,
+    )
 
 
 class _ThinAgentSession:
@@ -275,6 +318,7 @@ def _open_thin_session(
 
 __all__ = [
     "_ThinAgentSession",
+    "_check_tools_supported",
     "_coerce_prompt_or_raise",
     "_open_thin_session",
     "_split_prompt_parts",
