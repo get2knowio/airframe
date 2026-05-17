@@ -16,7 +16,7 @@ Verifies:
   ``assistant.usage`` event (tokens at minimum; ``cost_usd``
   when the model returns it).
 * :meth:`validate_binding` rejects ``claude-*`` model IDs even
-  when the provider is ``copilot`` (the Phase 0 finding).
+  when the provider is ``github-copilot``.
 """
 
 from __future__ import annotations
@@ -48,13 +48,13 @@ async def main() -> int:
     print(f"CopilotRuntime probe — model={model_id}")
 
     # --- Static check: binding rejection -----------------------------------
-    rejected = runtime.validate_binding(ProviderModel("copilot", "claude-sonnet-4.6"))
+    rejected = runtime.validate_binding(ProviderModel("github-copilot", "claude-sonnet-4.6"))
     print(f"  validate_binding(claude-on-copilot)={rejected} (expected False)")
     if rejected:
-        print("FAIL: validate_binding accepted claude on copilot — Phase 0 guard is broken")
+        print("FAIL: validate_binding accepted claude on copilot — guard is broken")
         return 1
 
-    accepted = runtime.validate_binding(ProviderModel("copilot", model_id))
+    accepted = runtime.validate_binding(ProviderModel("github-copilot", model_id))
     print(f"  validate_binding(gpt-5-mini-on-copilot)={accepted} (expected True)")
     if not accepted:
         print("FAIL: validate_binding rejected a valid binding")
@@ -68,7 +68,7 @@ async def main() -> int:
         result = await runtime.execute(
             "What is 17 + 25? Reply with answer and a short rationale.",
             schema=Result,
-            model=ProviderModel("copilot", model_id),
+            model=ProviderModel("github-copilot", model_id),
         )
         structured = result.structured
         print(f"  structured: PASS ({time.monotonic() - t0:.1f}s)")

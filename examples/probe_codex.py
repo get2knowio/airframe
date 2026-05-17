@@ -15,7 +15,7 @@ Verifies:
 * :class:`CostRecord` fields are populated from ``Turn.usage``
   (tokens at minimum; ``cost_usd`` from the local pricing map).
 * :meth:`validate_binding` rejects ``claude-*`` model IDs even
-  when the provider is ``openai`` or ``codex``.
+  when the provider is ``codex``.
 """
 
 from __future__ import annotations
@@ -63,14 +63,14 @@ async def main() -> int:
     print(f"CodexRuntime probe — model={model_id}")
 
     # --- Static check: binding rejection -----------------------------------
-    rejected = runtime.validate_binding(ProviderModel("openai", "claude-sonnet-4.6"))
-    print(f"  validate_binding(claude-on-openai)={rejected} (expected False)")
+    rejected = runtime.validate_binding(ProviderModel("codex", "claude-sonnet-4.6"))
+    print(f"  validate_binding(claude-on-codex)={rejected} (expected False)")
     if rejected:
         print("FAIL: validate_binding accepted Claude on Codex")
         return 1
 
-    accepted = runtime.validate_binding(ProviderModel("openai", model_id))
-    print(f"  validate_binding(gpt-5-codex-on-openai)={accepted} (expected True)")
+    accepted = runtime.validate_binding(ProviderModel("codex", model_id))
+    print(f"  validate_binding(gpt-5-codex-on-codex)={accepted} (expected True)")
     if not accepted:
         print("FAIL: validate_binding rejected a valid binding")
         return 1
@@ -94,7 +94,7 @@ async def main() -> int:
         result = await runtime.execute(
             "What is 17 + 25? Reply with answer and a short rationale.",
             schema=Result,
-            model=ProviderModel("openai", model_id),
+            model=ProviderModel("codex", model_id),
         )
         structured = result.structured
         print(f"  structured: PASS ({time.monotonic() - t0:.1f}s)")

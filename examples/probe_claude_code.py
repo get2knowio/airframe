@@ -49,7 +49,7 @@ async def main() -> int:
         result = await runtime.execute(
             "What is 17 + 25? Reply with answer and a short rationale.",
             schema=Result,
-            model=ProviderModel("anthropic", model_id),
+            model=ProviderModel("claude", model_id),
         )
         structured = result.structured
         print(f"  structured: PASS ({time.monotonic() - t0:.1f}s)")
