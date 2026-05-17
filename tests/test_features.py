@@ -91,19 +91,253 @@ def test_all_adapters_support_structured_output_json_schema(adapters: list) -> N
         )
 
 
-def test_phase_0_only_structured_output_is_true(adapters: list) -> None:
-    """Every other Phase 1+ feature returns False on every adapter today.
+def test_unwired_features_stay_false(adapters: list) -> None:
+    """Features without a wired API still return False on every adapter.
 
-    This is what gives ``supports()`` a trivial-but-honest contract in
-    Phase 0: the only True bit is the feature whose API exists.
-    Phase 1+ flips additional bits as it ships the corresponding APIs.
+    Phase 0 shipped every :class:`Feature` enum value and adapters
+    declared only :data:`Feature.STRUCTURED_OUTPUT_JSON_SCHEMA`. Phase
+    1 iteration C flips :data:`Feature.STREAMING` and
+    :data:`Feature.CANCEL` on for the OpenAI-compatible family (real
+    chunk streaming + ``asyncio.Task.cancel()``). Future iterations
+    flip more bits per adapter as their APIs land.
+
+    This contract guards the opposite invariant: features whose API
+    hasn't shipped yet must not be declared by *any* adapter. Without
+    it, an adapter could silently overdeclare and consumers branching
+    on ``supports()`` would hit :class:`UnsupportedFeatureError` at
+    the API call site — exactly the surprise the capability gate
+    exists to prevent.
     """
-    phase_1_plus = [f for f in Feature if f is not Feature.STRUCTURED_OUTPUT_JSON_SCHEMA]
+    # Anything in ANY_ADAPTER_MAY_SUPPORT can vary per adapter; the
+    # remainder must be False everywhere until its corresponding API
+    # phase lands.
+    any_adapter_may_support = {
+        Feature.STRUCTURED_OUTPUT_JSON_SCHEMA,
+        Feature.STREAMING,
+        Feature.CANCEL,
+        Feature.SESSION_RESUME,
+        # Phase 2 Iteration B flipped REASONING_EFFORT on all four
+        # adapters and REASONING_BUDGET_TOKENS on Claude Code only.
+        Feature.REASONING_EFFORT,
+        Feature.REASONING_BUDGET_TOKENS,
+        # Phase 2 Iteration C flipped VISION_INPUT on all four
+        # adapters and FILE_INPUT on three (OpenAI-compat stays False).
+        Feature.VISION_INPUT,
+        Feature.FILE_INPUT,
+    }
+    must_be_false = [f for f in Feature if f not in any_adapter_may_support]
     for adapter in adapters:
-        for feature in phase_1_plus:
+        for feature in must_be_false:
             assert not adapter.supports(feature), (
-                f"{type(adapter).__name__} should not yet declare {feature.name} "
-                f"(Phase 0 ships the flag, later phases wire the API)"
+                f"{type(adapter).__name__} declares {feature.name} but its API "
+                f"hasn't shipped yet — see docs/implementation-plan.md for the "
+                f"phase that wires it"
+            )
+
+
+def test_openai_compatible_declares_streaming_and_cancel(adapters: list) -> None:
+    """OpenAI-compatible adapters flip STREAMING + CANCEL in Phase 1 / Iteration C.
+
+    Chat-completions has no server-side session, so ``SESSION_RESUME``
+    stays False per the plan.
+    """
+    from airframe import OpenCodeZenRuntime
+
+    for adapter in adapters:
+        if not isinstance(adapter, OpenCodeZenRuntime):
+            continue
+        assert adapter.supports(Feature.STREAMING), (
+            "OpenCodeZenRuntime (OpenAICompatibleRuntime base) should declare "
+            "Feature.STREAMING after Iteration C"
+        )
+        assert adapter.supports(Feature.CANCEL), (
+            "OpenCodeZenRuntime (OpenAICompatibleRuntime base) should declare "
+            "Feature.CANCEL after Iteration C"
+        )
+        assert not adapter.supports(Feature.SESSION_RESUME), (
+            "OpenCodeZenRuntime can't resume — chat-completions has no server-side session"
+        )
+
+
+def test_claude_code_declares_streaming_resume_and_cancel(adapters: list) -> None:
+    """ClaudeCodeRuntime flips STREAMING + SESSION_RESUME + CANCEL in Iteration D.
+
+    Wired via ``include_partial_messages=True`` for streaming,
+    :attr:`ClaudeAgentOptions.resume` for resume, and
+    :meth:`ClaudeSDKClient.interrupt` for cancellation.
+    """
+    from airframe import ClaudeCodeRuntime
+
+    for adapter in adapters:
+        if not isinstance(adapter, ClaudeCodeRuntime):
+            continue
+        assert adapter.supports(Feature.STREAMING), (
+            "ClaudeCodeRuntime should declare Feature.STREAMING after Iteration D"
+        )
+        assert adapter.supports(Feature.SESSION_RESUME), (
+            "ClaudeCodeRuntime should declare Feature.SESSION_RESUME after "
+            "Iteration D — wired via ClaudeAgentOptions.resume"
+        )
+        assert adapter.supports(Feature.CANCEL), (
+            "ClaudeCodeRuntime should declare Feature.CANCEL after Iteration D — "
+            "wired via ClaudeSDKClient.interrupt()"
+        )
+
+
+def test_copilot_declares_streaming_resume_and_cancel(adapters: list) -> None:
+    """CopilotRuntime flips STREAMING + SESSION_RESUME + CANCEL in Iteration E.
+
+    Wired via ``session.on(handler)`` filtering on
+    ``ASSISTANT_MESSAGE_DELTA`` / ``ASSISTANT_REASONING_DELTA`` for
+    streaming, :meth:`CopilotClient.resume_session` for resume, and
+    :meth:`CopilotSession.abort` for cancellation.
+    """
+    from airframe import CopilotRuntime
+
+    for adapter in adapters:
+        if not isinstance(adapter, CopilotRuntime):
+            continue
+        assert adapter.supports(Feature.STREAMING), (
+            "CopilotRuntime should declare Feature.STREAMING after Iteration E"
+        )
+        assert adapter.supports(Feature.SESSION_RESUME), (
+            "CopilotRuntime should declare Feature.SESSION_RESUME after "
+            "Iteration E — wired via CopilotClient.resume_session"
+        )
+        assert adapter.supports(Feature.CANCEL), (
+            "CopilotRuntime should declare Feature.CANCEL after Iteration E — "
+            "wired via CopilotSession.abort"
+        )
+
+
+def test_codex_declares_streaming_resume_and_cancel(adapters: list) -> None:
+    """CodexRuntime flips STREAMING + SESSION_RESUME + CANCEL in Iteration F.
+
+    Wired via :meth:`Thread.run_streamed` for streaming,
+    :meth:`Codex.resume_thread` for resume, and :class:`AbortController`
+    / :attr:`TurnOptions.signal` for cancellation. With this iteration
+    landing, every in-tree adapter exposes the same Phase 1 capability
+    set (OpenAI-compat is the only one without `SESSION_RESUME` since
+    chat-completions has no server-side session).
+    """
+    from airframe import CodexRuntime
+
+    for adapter in adapters:
+        if not isinstance(adapter, CodexRuntime):
+            continue
+        assert adapter.supports(Feature.STREAMING), (
+            "CodexRuntime should declare Feature.STREAMING after Iteration F"
+        )
+        assert adapter.supports(Feature.SESSION_RESUME), (
+            "CodexRuntime should declare Feature.SESSION_RESUME after Iteration F — "
+            "wired via Codex.resume_thread"
+        )
+        assert adapter.supports(Feature.CANCEL), (
+            "CodexRuntime should declare Feature.CANCEL after Iteration F — "
+            "wired via AbortController + TurnOptions.signal"
+        )
+
+
+def test_three_sdk_adapters_declare_session_resume(adapters: list) -> None:
+    """Phase 1 endgame: every SDK-based adapter declares SESSION_RESUME.
+
+    Three of four in-tree adapters (Claude Code, Copilot, Codex) all
+    have server-side session resume via their respective SDKs.
+    OpenAI-compat (chat-completions) is the outlier — no server-side
+    session. This test pins the matrix at the end of Phase 1's
+    per-adapter rollout so a future regression on any of the three
+    SDK adapters is caught.
+    """
+    from airframe import ClaudeCodeRuntime, CodexRuntime, CopilotRuntime, OpenCodeZenRuntime
+
+    for adapter in adapters:
+        if isinstance(adapter, ClaudeCodeRuntime | CopilotRuntime | CodexRuntime):
+            assert adapter.supports(Feature.SESSION_RESUME), (
+                f"{type(adapter).__name__} should declare SESSION_RESUME at end of Phase 1"
+            )
+        elif isinstance(adapter, OpenCodeZenRuntime):
+            assert not adapter.supports(Feature.SESSION_RESUME), (
+                "OpenCodeZenRuntime / OpenAICompatibleRuntime can't resume "
+                "(chat-completions has no server-side session)"
+            )
+
+
+def test_all_adapters_declare_reasoning_effort(adapters: list) -> None:
+    """Phase 2 Iteration B flips REASONING_EFFORT on every adapter.
+
+    All four vendor SDKs have a native "reasoning effort" channel
+    (``minimal/low/medium/high`` — Claude/Copilot coerce ``"minimal"``
+    to ``"low"`` at debug-log level since their SDKs only expose three
+    rungs). With this iteration landing, ``thinking="<effort>"`` is a
+    universal capability and consumer code can pass it without
+    branching per adapter.
+    """
+    for adapter in adapters:
+        assert adapter.supports(Feature.REASONING_EFFORT), (
+            f"{type(adapter).__name__} should declare REASONING_EFFORT after Phase 2 Iteration B"
+        )
+
+
+def test_only_claude_code_declares_reasoning_budget_tokens(adapters: list) -> None:
+    """``thinking={"budget_tokens": N}`` is Anthropic-only.
+
+    Claude's SDK exposes a token budget via :class:`ThinkingConfig`;
+    the other three vendors expose only the literal effort enum, so
+    they decline the dict shape at translation time with
+    :class:`UnsupportedFeatureError`.
+    """
+    from airframe import ClaudeCodeRuntime
+
+    for adapter in adapters:
+        if isinstance(adapter, ClaudeCodeRuntime):
+            assert adapter.supports(Feature.REASONING_BUDGET_TOKENS), (
+                "ClaudeCodeRuntime should declare REASONING_BUDGET_TOKENS after "
+                "Phase 2 Iteration B — wired via ClaudeAgentOptions.thinking"
+            )
+        else:
+            assert not adapter.supports(Feature.REASONING_BUDGET_TOKENS), (
+                f"{type(adapter).__name__} should NOT declare REASONING_BUDGET_TOKENS — "
+                f"only Anthropic exposes a per-call thinking-token budget"
+            )
+
+
+def test_all_adapters_declare_vision_input(adapters: list) -> None:
+    """Phase 2 Iteration C flips VISION_INPUT on every adapter.
+
+    All four vendor surfaces have *some* image-input path:
+
+    * Anthropic / Claude Code — prompt-text hint + Read tool.
+    * GitHub Copilot — :class:`FileAttachment` on ``send_and_wait``.
+    * OpenAI Codex — :class:`LocalImageInput` on ``Thread.run``.
+    * OpenAI-compatible HTTP — content-parts ``image_url`` shape.
+
+    Path-only in v0 across the board; bytes / URL is deferred.
+    """
+    for adapter in adapters:
+        assert adapter.supports(Feature.VISION_INPUT), (
+            f"{type(adapter).__name__} should declare VISION_INPUT after Phase 2 Iteration C"
+        )
+
+
+def test_three_sdk_adapters_declare_file_input(adapters: list) -> None:
+    """FILE_INPUT lands on Claude / Copilot / Codex; OpenAI-compat stays False.
+
+    The roadmap notes file routing "varies wildly across compat
+    vendors" — ``client.files.create`` semantics differ from vendor to
+    vendor, and some don't support it at all. A future per-vendor
+    subclass can opt in; the base stays conservative.
+    """
+    from airframe import ClaudeCodeRuntime, CodexRuntime, CopilotRuntime, OpenCodeZenRuntime
+
+    for adapter in adapters:
+        if isinstance(adapter, ClaudeCodeRuntime | CopilotRuntime | CodexRuntime):
+            assert adapter.supports(Feature.FILE_INPUT), (
+                f"{type(adapter).__name__} should declare FILE_INPUT after Phase 2 Iteration C"
+            )
+        elif isinstance(adapter, OpenCodeZenRuntime):
+            assert not adapter.supports(Feature.FILE_INPUT), (
+                "OpenAI-compatible adapters keep FILE_INPUT False — file routing "
+                "varies wildly across compat vendors"
             )
 
 

@@ -244,9 +244,9 @@ if credentials were misconfigured.
 ## Capability negotiation
 
 Each adapter declares which protocol features it implements via
-`runtime.supports(Feature.X)`. The `Feature` enum ships the whole
-forward-looking set as of v0.3.0; later releases flip more bits on as
-each phase lands its corresponding API:
+`runtime.supports(Feature.X)`. The `Feature` enum was fixed at v0.3.0;
+each release flips more bits to `True` as the corresponding API
+lands:
 
 ```python
 from airframe import ClaudeCodeRuntime, Feature
@@ -256,12 +256,16 @@ if runtime.supports(Feature.STRUCTURED_OUTPUT_JSON_SCHEMA):
     result = await runtime.execute(prompt, schema=MySchema)
 ```
 
-Today only `Feature.STRUCTURED_OUTPUT_JSON_SCHEMA` returns `True` —
-every other capability (`STREAMING`, `SESSION_RESUME`,
-`REASONING_EFFORT`, `TOOLS_FUNCTION`, `TOOLS_MCP_*`, …) returns
-`False` and will flip on in its respective phase. See
+As of v0.5.0 these flip True on every in-tree adapter:
+`STRUCTURED_OUTPUT_JSON_SCHEMA`, `STREAMING`, `CANCEL`,
+`REASONING_EFFORT`, `VISION_INPUT`. `SESSION_RESUME` and
+`FILE_INPUT` flip on the three SDK adapters (Claude / Copilot /
+Codex) but not OpenAI-compat. `REASONING_BUDGET_TOKENS` is
+Claude-only. `TOOLS_FUNCTION`, `TOOLS_MCP_*`, `PERMISSION_CALLBACK`,
+`SUBAGENTS` etc. remain `False` until later phases ship — see
 [docs/implementation-plan.md](docs/implementation-plan.md) for the
-phasing.
+phasing. Run `uv run python examples/probe_supports.py` for the
+live matrix.
 
 Run `uv run python examples/probe_supports.py` for the live
 Feature × adapter matrix.

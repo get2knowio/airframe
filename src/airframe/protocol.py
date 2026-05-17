@@ -30,6 +30,7 @@ Design principles:
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol, TypeVar, runtime_checkable
 
@@ -38,8 +39,11 @@ from pydantic import BaseModel
 from airframe.cost import CostRecord
 
 if TYPE_CHECKING:
+    from airframe.events import RuntimeEvent
     from airframe.features import Feature
+    from airframe.inputs import Prompt
     from airframe.models import ModelInfo
+    from airframe.thinking import ThinkingMode
 
 T = TypeVar("T")
 
@@ -126,18 +130,32 @@ class AgentRuntime(Protocol):
 
     async def execute(
         self,
-        prompt: str,
+        prompt: Prompt,
         *,
         schema: type[BaseModel] | None = None,
         system: str | None = None,
         persona: str | None = None,
         model: ProviderModel | None = None,
+        thinking: ThinkingMode = None,
         timeout: float = 600.0,
     ) -> RuntimeResult:
         """Send one prompt, return a canonical typed result.
 
+        Phase 1 Iteration G refactored this into documented sugar for
+        ``runtime.session(system=..., model=...).execute(prompt,
+        schema=..., thinking=..., timeout=...)`` + ``close()``.
+        Single-turn, ephemeral. Consumers wanting context warmth across
+        calls open a session explicitly.
+
         Args:
-            prompt: The user message.
+            prompt: The user message. Either a plain ``str`` (the
+                v0-through-Phase-1 shape) or a list of
+                :class:`~airframe.inputs.PromptPart` for interleaved
+                text + images + files (Phase 2). Adapters that don't
+                declare :data:`~airframe.features.Feature.VISION_INPUT`
+                / :data:`~airframe.features.Feature.FILE_INPUT` raise
+                :class:`~airframe.errors.UnsupportedFeatureError` on
+                list-shaped prompts.
             schema: When non-None, the runtime coerces the model's
                 response into a schema-conforming dict on
                 :attr:`RuntimeResult.structured`. Implementations use
@@ -147,10 +165,9 @@ class AgentRuntime(Protocol):
                 ``response_format=json_schema`` for OpenCode Zen).
                 ``None`` means plain text — text answer on
                 :attr:`RuntimeResult.text`, ``structured=None``.
-            system: Optional system-prompt override. Adapters that
-                bake the system prompt at scope-construction time
-                (Claude Code SDK, etc.) may rebuild internal state
-                when this changes between calls.
+            system: Optional system-prompt override. Baked into the
+                bespoke session's vendor config at session-construction
+                time.
             persona: Optional runtime-specific agent persona label.
                 Some adapters honour it (e.g. selecting a bundled
                 agent profile); others ignore it.
@@ -158,6 +175,15 @@ class AgentRuntime(Protocol):
                 Implementations that can't serve the binding raise
                 :class:`UnsupportedBindingError`. Callers can check
                 :meth:`validate_binding` first to avoid this.
+            thinking: Reasoning-effort control (Phase 2). See
+                :data:`~airframe.thinking.ThinkingMode`. Adapters that
+                don't declare
+                :data:`~airframe.features.Feature.REASONING_EFFORT`
+                ignore literal-effort values; adapters that don't
+                declare
+                :data:`~airframe.features.Feature.REASONING_BUDGET_TOKENS`
+                raise on dict-shaped values. ``None`` (default) sends
+                no reasoning configuration; the model decides.
             timeout: Hard wall-clock budget for the call.
 
         Returns:
@@ -168,9 +194,9 @@ class AgentRuntime(Protocol):
             RuntimeAuthError, RuntimeModelNotFoundError,
             RuntimeStructuredOutputError, RuntimeContextOverflowError,
             RuntimeTransientError, RuntimeProtocolError,
-            RuntimeServerStartError: classified failures from
-            :mod:`airframe.errors`. The caller decides what to do
-            with each.
+            RuntimeServerStartError, UnsupportedFeatureError:
+            classified failures from :mod:`airframe.errors`. The
+            caller decides what to do with each.
         """
         ...
 
@@ -308,6 +334,249 @@ class AgentRuntime(Protocol):
         """
         ...
 
+    def session(
+        self,
+        *,
+        resume: str | None = None,
+        system: str | None = None,
+        model: ProviderModel | None = None,
+        provider_options: Any | None = None,
+    ) -> AgentSession:
+        """Open a multi-turn session against this runtime.
+
+        Phase 1 of the [implementation
+        plan](../../docs/implementation-plan.md) introduces sessions
+        as the "hinge" abstraction — every later kwarg
+        (``thinking=``, ``tools=``, ``mcp_servers=``,
+        ``on_permission=``) attaches to the session, not the runtime.
+
+        ADR-004 picks single-active-session per runtime: opening a
+        second session before the first is ``close()``'d invalidates
+        the first. Adapters whose vendor session is process-bound
+        (Claude Code, Copilot) cannot multiplex; OpenAI-compatible
+        HTTP could but doesn't, for consistency.
+
+        Args:
+            resume: Vendor-assigned session ID to resume a prior
+                conversation. ``None`` opens a fresh session.
+                Adapters declaring
+                :data:`~airframe.features.Feature.SESSION_RESUME`
+                honour the kwarg; adapters that don't raise
+                :class:`NotImplementedError` on any non-None value.
+            system: System-prompt override for the session's lifetime.
+                Equivalent to passing ``system=`` on every
+                :meth:`AgentSession.execute` call; baked in at
+                session-construction time so adapters that materialise
+                vendor state lazily (Claude Code's
+                :class:`ClaudeSDKClient`) can pre-allocate.
+            model: Default :class:`ProviderModel` for every turn in
+                this session. Per-turn overrides are not exposed in
+                Phase 1 — switch sessions to switch models.
+            provider_options: Vendor-specific extension namespace
+                (see :mod:`airframe.options`). Accepted in Phase 1
+                but unused — each :class:`ProviderOptions` dataclass
+                is empty scaffolding; later phases (2+) fill them.
+
+        Returns:
+            A fresh :class:`AgentSession`.
+        """
+        ...
+
+
+@runtime_checkable
+class AgentSession(Protocol):
+    """A multi-turn conversation handle scoped to one runtime.
+
+    Phase 1 of the implementation plan introduces sessions as the
+    "hinge" abstraction: every later kwarg
+    (``thinking=``, ``tools=``, ``mcp_servers=``, ``on_permission=``)
+    attaches to :class:`AgentSession`, not :class:`AgentRuntime`. A
+    runtime's :meth:`AgentRuntime.session` factory builds one.
+
+    The shape mirrors the per-vendor session abstractions airframe
+    wraps — Claude's :class:`ClaudeSDKClient` lifecycle, Copilot's
+    :class:`CopilotSession`, Codex's :class:`Thread`, and the
+    client-side ``messages=[]`` buffer used for OpenAI-compatible
+    HTTP — collapsed onto one neutral interface.
+
+    **Concurrency model (ADR-004).** A runtime owns at most one
+    *active* session at a time. ``runtime.session()`` returning a
+    second handle before the first is ``close()``'d is permitted but
+    the second handle invalidates the first — adapters whose vendor
+    session is process-bound (Claude Code, Copilot) cannot multiplex.
+    Going concurrent later is additive (a new ``session()`` returning
+    a fresh handle); going from concurrent to single is breaking, so
+    Phase 1 picks single.
+
+    Attributes:
+        id: Vendor-assigned session identifier when one exists, or
+            ``None`` for adapters with no server-side session
+            (OpenAI-compatible HTTP). Treat as a hint, not a key —
+            consumer code branching on ``session.id is None`` will
+            need a fallback path for the HTTP-only adapters.
+    """
+
+    id: str | None
+    """Vendor-assigned session ID, or ``None`` for stateless adapters."""
+
+    async def execute(
+        self,
+        prompt: Prompt,
+        *,
+        schema: type[BaseModel] | None = None,
+        thinking: ThinkingMode = None,
+        timeout: float = 600.0,
+    ) -> RuntimeResult:
+        """Run one turn, return the canonical :class:`RuntimeResult`.
+
+        Semantically identical to :meth:`AgentRuntime.execute` —
+        same kwargs, same return type, same error classification —
+        except the session retains context for the next turn.
+        Repeated calls accrue prompt-cache warmth where the vendor
+        supports it.
+
+        Args:
+            prompt: User message for this turn. Either a plain ``str``
+                or a list of :class:`~airframe.inputs.PromptPart` for
+                interleaved text + images + files. Adapters that don't
+                declare :data:`~airframe.features.Feature.VISION_INPUT`
+                / :data:`~airframe.features.Feature.FILE_INPUT` raise
+                :class:`~airframe.errors.UnsupportedFeatureError` on
+                list-shaped prompts.
+            schema: When non-None, coerce the response into the
+                schema. ``None`` means plain text — text on
+                :attr:`RuntimeResult.text`, ``structured=None``.
+                Same contract as :meth:`AgentRuntime.execute`.
+            thinking: Reasoning-effort control. See
+                :data:`~airframe.thinking.ThinkingMode`. Phase 2
+                addition; adapters declaring
+                :data:`~airframe.features.Feature.REASONING_EFFORT`
+                forward to the vendor's native field.
+            timeout: Hard wall-clock budget for the turn.
+        """
+        ...
+
+    def stream(
+        self,
+        prompt: Prompt,
+        *,
+        schema: type[BaseModel] | None = None,
+        thinking: ThinkingMode = None,
+        timeout: float = 600.0,
+    ) -> AsyncIterator[RuntimeEvent]:
+        """Run one turn, yielding :class:`RuntimeEvent` deltas live.
+
+        The stream always ends with exactly one
+        :class:`~airframe.events.TurnComplete` carrying the same
+        :class:`RuntimeResult` :meth:`execute` would have returned.
+        Cancelled streams (via :meth:`cancel` or task cancellation)
+        may end without a :class:`TurnComplete`.
+
+        Adapters declaring :data:`~airframe.features.Feature.STREAMING`
+        emit fine-grained deltas as the vendor produces them; adapters
+        that don't may emit a single
+        :class:`~airframe.events.TextDelta` carrying the full response
+        immediately before :class:`TurnComplete`.
+
+        Args:
+            prompt: User message for this turn. Same shape as
+                :meth:`execute` — bare ``str`` or list of
+                :class:`~airframe.inputs.PromptPart`.
+            schema: Same as :meth:`execute`. Structured output still
+                lands on the trailing :class:`TurnComplete.result`.
+            thinking: Same as :meth:`execute`. Adapters surface
+                reasoning deltas via
+                :class:`~airframe.events.ReasoningDelta` when the
+                model emits them.
+            timeout: Hard wall-clock budget for the turn.
+
+        Yields:
+            :class:`~airframe.events.RuntimeEvent` instances; see
+            :mod:`airframe.events` for the variant set.
+        """
+        ...
+
+    async def cancel(self) -> None:
+        """Abort the in-flight turn, if any.
+
+        Cooperative cancellation: the adapter signals its vendor (an
+        ``AbortController.abort()`` on Codex, ``client.interrupt()``
+        on Claude, ``session.abort()`` on Copilot, ``Task.cancel()``
+        on the OpenAI-compatible HTTP request). The cancelled
+        :meth:`execute` / :meth:`stream` raises
+        :class:`~airframe.errors.RuntimeCancelledError`; a stream may
+        end without :class:`~airframe.events.TurnComplete`.
+
+        Cheap and idempotent. The exact behaviour depends on adapter
+        capability:
+
+        * Adapters declaring
+          :data:`~airframe.features.Feature.CANCEL` abort the in-flight
+          turn (no-op when no turn is running).
+        * Adapters that don't declare ``CANCEL`` raise
+          :class:`~airframe.errors.UnsupportedFeatureError` when a turn
+          is in flight; a no-op when nothing is running. Callers
+          checking ``runtime.supports(Feature.CANCEL)`` before invoking
+          ``cancel()`` never see this error.
+        """
+        ...
+
+    async def close(self) -> None:
+        """Release the session's vendor-side resources.
+
+        Disconnects the vendor session (Claude subprocess link,
+        Copilot session handle, Codex thread, client-side message
+        buffer) but leaves the parent :class:`AgentRuntime`'s
+        runtime-wide resources (subprocess pool, HTTP client, auth
+        tokens) intact. Idempotent and must not raise — same
+        discipline as :meth:`AgentRuntime.close`.
+        """
+        ...
+
+    def unwrap(self, cls: type[T]) -> T:
+        """Return the underlying vendor session object cast to ``cls``.
+
+        JDBC-:class:`Wrapper`-style escape hatch for session-level
+        vendor types — the per-conversation handle each adapter wraps.
+        Phase 1 Iteration G moved per-conversation state out of the
+        runtime and onto the session, so the vendor objects that used
+        to be reachable via :meth:`AgentRuntime.unwrap` now live here.
+
+        Per-adapter mappings:
+
+        * :class:`ClaudeCodeSession` accepts
+          ``unwrap(ClaudeSDKClient)`` — returns the live SDK client
+          once the session has connected (after the first
+          :meth:`execute` or :meth:`stream`); raises
+          :class:`TypeError` if requested before then.
+        * :class:`CopilotAgentSession` accepts
+          ``unwrap(CopilotSession)`` — returns the underlying vendor
+          session once :meth:`_ensure_session` has run.
+        * :class:`CodexAgentSession` accepts ``unwrap(Thread)`` —
+          returns the underlying :class:`Thread` once it has been
+          constructed.
+        * :class:`OpenAICompatibleSession` accepts no native types
+          today — the OpenAI HTTP client lives on the runtime
+          (reach it via ``runtime.unwrap(AsyncOpenAI)``); the
+          session itself holds only the ``messages=[]`` buffer.
+
+        Every adapter additionally accepts ``unwrap(type(self))`` and
+        returns ``self`` — same convention as
+        :meth:`AgentRuntime.unwrap`.
+
+        Args:
+            cls: The native type the caller wants to reach.
+
+        Returns:
+            The underlying vendor object.
+
+        Raises:
+            TypeError: when this session can't satisfy ``cls`` (type
+                isn't one of the session's native objects, or the
+                lazily-constructed object hasn't been built yet).
+        """
+        ...
+
 
 class UnsupportedBindingError(Exception):
     """Raised when a runtime is asked to serve a binding it can't serve.
@@ -321,6 +590,7 @@ class UnsupportedBindingError(Exception):
 
 __all__ = [
     "AgentRuntime",
+    "AgentSession",
     "ProviderModel",
     "RuntimeResult",
     "UnsupportedBindingError",

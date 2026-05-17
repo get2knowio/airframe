@@ -136,6 +136,43 @@ class RuntimeProtocolError(AgentRuntimeError):
     """
 
 
+class UnsupportedFeatureError(AgentRuntimeError):
+    """Raised when a caller asks an adapter to honour a capability it lacks.
+
+    Phase 1+ companion to :class:`~airframe.protocol.UnsupportedBindingError`.
+    A binding mismatch is "this adapter doesn't serve this
+    ``(provider, model)``"; an unsupported feature is "this adapter
+    serves the binding, but the specific capability you asked for
+    (streaming, cancellation, session-resume, MCP, …) is not wired."
+
+    Adapters surface the capability truth via
+    :meth:`~airframe.protocol.AgentRuntime.supports` — callers branching
+    on ``supports(Feature.X)`` before invoking the feature's API
+    never see this error. It's the safety net for callers that skip
+    the predicate.
+
+    Modelled on the implementation plan's cross-cutting principle:
+    *"No silent fallbacks. A capability declined ⇒ a clear
+    UnsupportedFeatureError, never 'best effort succeed.'"*
+
+    Attributes:
+        feature: The :class:`~airframe.features.Feature` enum value
+            (or its string) the caller asked for. ``None`` when the
+            asking site didn't pin a specific enum member.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        feature: str | None = None,
+        status: int | None = None,
+        body: Any = None,
+    ) -> None:
+        super().__init__(message, status=status, body=body)
+        self.feature = feature
+
+
 __all__ = [
     "AgentRuntimeError",
     "RuntimeAuthError",
@@ -146,4 +183,5 @@ __all__ = [
     "RuntimeServerStartError",
     "RuntimeStructuredOutputError",
     "RuntimeTransientError",
+    "UnsupportedFeatureError",
 ]

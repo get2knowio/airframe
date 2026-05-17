@@ -1,18 +1,23 @@
-"""Unit tests for :class:`CopilotRuntime`.
+"""Unit tests for :class:`CopilotRuntime` — Phase 1 Iteration G surface.
 
-Mocks :mod:`copilot` at the boundary — no real ``copilot`` CLI
-subprocess, no real GitHub Copilot calls. Validates:
+After Iteration G, ``CopilotRuntime.execute()`` is pure delegation to
+``runtime.session().execute() + close()``. The conversational
+behaviour (plain-text vs structured, session error classification,
+cost computation, capture slots) is exercised by
+``tests/test_copilot_session.py`` against the bespoke
+:class:`CopilotAgentSession`.
 
-* Binding validation (Copilot bindings pass; non-Copilot bindings
-  rejected; ``claude-*`` model IDs rejected even with a Copilot
-  provider, per Phase 0 spike finding).
-* Structured-output happy path captures the tool args.
-* Missing tool call → :class:`RuntimeStructuredOutputError`.
-* Session error events → classified into the runtime hierarchy
-  (auth / model-not-found / transient / protocol).
-* CLI-not-found → :class:`RuntimeServerStartError`.
-* Cost record populated from :class:`AssistantUsageData` event.
-* ``reset()`` destroys the session; ``close()`` also disconnects.
+What's left runtime-level — and tested here:
+
+* Binding validation (Copilot bindings pass; Claude bindings rejected
+  even with a Copilot provider, per Phase 0 spike finding).
+* ``CopilotClient`` construction + auth chain (subprocess config
+  wiring: explicit token → env → ``use_logged_in_user``).
+* ``runtime.execute()`` smoke — delegates correctly to a session and
+  returns the result it produced.
+* Lifecycle: ``reset()`` is a no-op; ``close()`` releases the
+  long-lived ``CopilotClient``.
+* Canonical name of the forced ``submit_result`` tool.
 """
 
 from __future__ import annotations
@@ -27,15 +32,6 @@ from airframe.adapters.copilot import (
     SUBMIT_RESULT_TOOL,
     CopilotRuntime,
 )
-from airframe.errors import (
-    AgentRuntimeError,
-    RuntimeAuthError,
-    RuntimeModelNotFoundError,
-    RuntimeProtocolError,
-    RuntimeServerStartError,
-    RuntimeStructuredOutputError,
-    RuntimeTransientError,
-)
 from airframe.protocol import ProviderModel, UnsupportedBindingError
 
 
@@ -44,42 +40,39 @@ class _Schema(BaseModel):
     count: int
 
 
-class _FakeUsage:
-    """Stand-in for ``AssistantUsageData``."""
+# ---------------------------------------------------------------------------
+# Fake event-data classes for the smoke test
+# ---------------------------------------------------------------------------
 
+
+class _FakeUsage:
     def __init__(
         self,
         *,
-        cost: float | None = 0.0034,
-        input_tokens: float | None = 120,
-        output_tokens: float | None = 240,
-        cache_read_tokens: float | None = 80,
-        cache_write_tokens: float | None = 15,
-        model: str = "gpt-5-mini",
+        cost: float | None = 0.001,
+        input_tokens: float | None = 5,
+        output_tokens: float | None = 5,
+        cache_read_tokens: float | None = 0,
+        cache_write_tokens: float | None = 0,
     ) -> None:
         self.cost = cost
         self.input_tokens = input_tokens
         self.output_tokens = output_tokens
         self.cache_read_tokens = cache_read_tokens
         self.cache_write_tokens = cache_write_tokens
-        self.model = model
 
 
 class _FakeAssistantMessage:
-    """Stand-in for ``AssistantMessageData``."""
-
     def __init__(self, content: str = "") -> None:
         self.content = content
 
 
 class _FakeSessionError:
-    """Stand-in for ``SessionErrorData``."""
-
     def __init__(
         self,
         *,
         message: str = "boom",
-        error_type: str = "unknown",
+        error_type: str = "x",
         status_code: int | None = None,
     ) -> None:
         self.message = message
@@ -92,32 +85,44 @@ class _FakeEvent:
         self.data = data
 
 
+# ---------------------------------------------------------------------------
+# Mock fixture: captures subscribed handlers + subprocess kwargs
+# ---------------------------------------------------------------------------
+
+
 @pytest.fixture
 def mock_sdk(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
-    """Mock the ``copilot`` SDK symbols ``CopilotRuntime`` imports lazily.
+    """Mock the ``copilot`` SDK at the boundary.
 
-    Patches the SDK modules that ``_ensure_client`` / ``_ensure_session``
-    pull at runtime:
-
-    * ``copilot.CopilotClient`` — factory that returns a mock client.
-    * ``copilot.SubprocessConfig`` — passthrough (stores kwargs).
-    * ``copilot.define_tool`` — returns a mock tool, captures handler.
-    * ``copilot.session.PermissionHandler`` — exposes ``approve_all``.
-    * ``copilot.generated.session_events`` types — substituted with our
-      fake classes so the ``isinstance`` dispatch in ``_on_event`` fires.
+    The fixture tracks every handler subscribed via ``session.on(handler)``
+    so tests can fire events through ``_fire(handlers, event)`` exactly
+    as the SDK would after Iteration G's session-based architecture.
     """
     import copilot
     from copilot import session as session_mod
     from copilot.generated import session_events as se_mod
 
-    # --- Client + session mocks ---------------------------------------
+    handlers: list[Any] = []
+
+    def fake_on(handler: Any) -> Any:
+        handlers.append(handler)
+
+        def _unsub() -> None:
+            if handler in handlers:
+                handlers.remove(handler)
+
+        return _unsub
+
     mock_session = MagicMock()
+    mock_session.session_id = "live-sess-id"
     mock_session.send_and_wait = AsyncMock()
     mock_session.destroy = AsyncMock()
-    mock_session.on = MagicMock()
+    mock_session.abort = AsyncMock()
+    mock_session.on = fake_on
 
     mock_client = MagicMock()
     mock_client.create_session = AsyncMock(return_value=mock_session)
+    mock_client.resume_session = AsyncMock(return_value=mock_session)
     mock_client.stop = AsyncMock()
 
     captured_subprocess_kwargs: dict[str, Any] = {}
@@ -128,7 +133,6 @@ def mock_sdk(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
 
     mock_client_factory = MagicMock(return_value=mock_client)
 
-    # --- Tool capture --------------------------------------------------
     captured_tools: list[dict[str, Any]] = []
 
     def fake_define_tool(
@@ -148,22 +152,17 @@ def mock_sdk(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
                 "handler": handler,
                 "params_type": params_type,
                 "skip_permission": skip_permission,
-                "tool_obj": tool_obj,
             }
         )
         return tool_obj
 
-    # --- Permission handler -------------------------------------------
-    mock_perm_handler = MagicMock()
-    mock_perm_handler.approve_all = lambda req, inv: MagicMock(kind="approve-once")
+    mock_perm = MagicMock()
+    mock_perm.approve_all = lambda req, inv: MagicMock(kind="approve-once")
 
     monkeypatch.setattr(copilot, "CopilotClient", mock_client_factory)
     monkeypatch.setattr(copilot, "SubprocessConfig", fake_subprocess_config)
     monkeypatch.setattr(copilot, "define_tool", fake_define_tool)
-    monkeypatch.setattr(session_mod, "PermissionHandler", mock_perm_handler)
-
-    # Substitute the event-data classes so isinstance() in _on_event
-    # matches our fakes.
+    monkeypatch.setattr(session_mod, "PermissionHandler", mock_perm)
     monkeypatch.setattr(se_mod, "AssistantUsageData", _FakeUsage)
     monkeypatch.setattr(se_mod, "AssistantMessageData", _FakeAssistantMessage)
     monkeypatch.setattr(se_mod, "SessionErrorData", _FakeSessionError)
@@ -172,9 +171,16 @@ def mock_sdk(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         "client_factory": mock_client_factory,
         "client": mock_client,
         "session": mock_session,
+        "handlers": handlers,
         "subprocess_kwargs": captured_subprocess_kwargs,
         "captured_tools": captured_tools,
     }
+
+
+def _fire(handlers: list[Any], event: Any) -> None:
+    """Invoke every subscribed handler synchronously with one event."""
+    for h in handlers:
+        h(event)
 
 
 # ---------------------------------------------------------------------------
@@ -190,10 +196,8 @@ def test_validate_binding_accepts_canonical_provider() -> None:
 
 def test_validate_binding_rejects_aliases_and_others() -> None:
     rt = CopilotRuntime()
-    # Legacy aliases dropped.
     assert not rt.validate_binding(ProviderModel("copilot", "gpt-4o"))
     assert not rt.validate_binding(ProviderModel("github", "o5"))
-    # Other providers.
     assert not rt.validate_binding(ProviderModel("claude", "claude-haiku-4-5"))
     assert not rt.validate_binding(ProviderModel("openai", "gpt-5-mini"))
     assert not rt.validate_binding(ProviderModel("opencode", "gpt-5-nano"))
@@ -203,121 +207,6 @@ def test_validate_binding_rejects_claude_models_on_copilot() -> None:
     """Phase 0 finding: Claude served via Copilot can't honour tool calls."""
     rt = CopilotRuntime()
     assert not rt.validate_binding(ProviderModel("github-copilot", "claude-opus-4.7"))
-
-
-# ---------------------------------------------------------------------------
-# execute() — shape checks before we hit the SDK
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_execute_plain_text_returns_text(mock_sdk: dict[str, Any]) -> None:
-    """``schema=None`` honours the protocol's plain-text contract.
-
-    The final ``AssistantMessageData`` event's ``content`` lands on
-    ``RuntimeResult.text``; no ``submit_result`` tool is registered;
-    ``structured`` is None.
-    """
-    rt = CopilotRuntime()
-
-    async def fake_send_and_wait(prompt: str, *, timeout: float = 60.0) -> Any:
-        rt._on_event(_FakeEvent(_FakeAssistantMessage(content="Done.")))
-        rt._on_event(_FakeEvent(_FakeUsage()))
-
-    mock_sdk["session"].send_and_wait = fake_send_and_wait
-
-    result = await rt.execute(
-        "ask something",
-        model=ProviderModel("github-copilot", "gpt-5-mini"),
-    )
-
-    assert result.text == "Done."
-    assert result.structured is None
-    assert result.cost.cost_usd == pytest.approx(0.0034)
-    assert result.cost.input_tokens == 120
-    assert result.cost.output_tokens == 240
-    assert result.cost.provider_id == "github-copilot"
-
-
-@pytest.mark.asyncio
-async def test_execute_plain_text_does_not_register_submit_result_tool(
-    mock_sdk: dict[str, Any],
-) -> None:
-    """No forced ``submit_result`` tool when schema is None.
-
-    Plain text mode hands the conversation to the model unmodified —
-    no JSON-extraction shim, no forced tool, no system-message
-    rewrite. The captured tool list must be empty for this call.
-    """
-    rt = CopilotRuntime()
-
-    async def fake_send_and_wait(prompt: str, *, timeout: float = 60.0) -> Any:
-        rt._on_event(_FakeEvent(_FakeAssistantMessage(content="ok")))
-
-    mock_sdk["session"].send_and_wait = fake_send_and_wait
-    await rt.execute("hi")
-
-    assert mock_sdk["captured_tools"] == []
-    create_kwargs = mock_sdk["client"].create_session.call_args.kwargs
-    # No tools passed; no system_message synthesised either (caller
-    # didn't supply one).
-    assert "tools" not in create_kwargs
-    assert "system_message" not in create_kwargs
-
-
-@pytest.mark.asyncio
-async def test_execute_plain_text_forwards_system_prompt(
-    mock_sdk: dict[str, Any],
-) -> None:
-    """``system=`` reaches the model unmodified in plain-text mode.
-
-    The load-bearing test: downstream personas pass long
-    instruction system prompts and expect them to land verbatim,
-    not wrapped in a ``submit_result`` forcing prefix the way the
-    structured path does.
-    """
-    rt = CopilotRuntime()
-
-    async def fake_send_and_wait(prompt: str, *, timeout: float = 60.0) -> Any:
-        rt._on_event(_FakeEvent(_FakeAssistantMessage(content="ok")))
-
-    mock_sdk["session"].send_and_wait = fake_send_and_wait
-    await rt.execute("hi", system="You are the navigator.")
-
-    kwargs = mock_sdk["client"].create_session.call_args.kwargs
-    sysmsg = kwargs["system_message"]
-    assert sysmsg == {"mode": "append", "content": "You are the navigator."}
-    # No forced-tool framing.
-    assert SUBMIT_RESULT_TOOL not in sysmsg["content"]
-
-
-@pytest.mark.asyncio
-async def test_execute_plain_text_ignores_persona(mock_sdk: dict[str, Any]) -> None:
-    """``persona=`` accepted but unused by CopilotRuntime."""
-    rt = CopilotRuntime()
-
-    async def fake_send_and_wait(prompt: str, *, timeout: float = 60.0) -> Any:
-        rt._on_event(_FakeEvent(_FakeAssistantMessage(content="hello")))
-
-    mock_sdk["session"].send_and_wait = fake_send_and_wait
-    result = await rt.execute("hi", persona="navigator")
-    assert result.text == "hello"
-
-
-@pytest.mark.asyncio
-async def test_execute_plain_text_classifies_session_auth_error(
-    mock_sdk: dict[str, Any],
-) -> None:
-    """Auth-classified session errors propagate the same in text mode."""
-    rt = CopilotRuntime()
-
-    async def fake_send_and_wait(prompt: str, *, timeout: float = 60.0) -> Any:
-        rt._on_event(_FakeEvent(_FakeSessionError(message="bad token", status_code=401)))
-
-    mock_sdk["session"].send_and_wait = fake_send_and_wait
-
-    with pytest.raises(RuntimeAuthError):
-        await rt.execute("hi")
 
 
 @pytest.mark.asyncio
@@ -343,292 +232,84 @@ async def test_execute_rejects_claude_on_copilot() -> None:
 
 
 # ---------------------------------------------------------------------------
-# execute() — happy path
+# execute() smoke — verify the sugar delegates correctly
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_execute_captures_structured_output(mock_sdk: dict[str, Any]) -> None:
-    """submit_result tool handler fires → captured payload land in RuntimeResult."""
-    rt = CopilotRuntime()
+async def test_execute_plain_text_smoke(mock_sdk: dict[str, Any]) -> None:
+    """``rt.execute(prompt)`` opens a session, runs one turn, closes.
 
-    expected_payload = _Schema(summary="ok", count=42)
+    Iteration G refactored execute() into pure delegation. Behaviour
+    is exercised by ``test_copilot_session.py``; this is the smoke test
+    that the sugar wire-up returns the session's result through to the
+    runtime caller.
+    """
 
-    async def fake_send_and_wait(prompt: str, *, timeout: float = 60.0) -> Any:
-        # Simulate the SDK invoking our submit_result handler.
-        rt._captured_payload = expected_payload
-        # Simulate the SDK emitting an assistant-message + usage event.
-        rt._on_event(_FakeEvent(_FakeAssistantMessage(content="see tool call")))
-        rt._on_event(_FakeEvent(_FakeUsage()))
-        return _FakeEvent(_FakeAssistantMessage(content="see tool call"))
+    async def fake_send(prompt: str, *, timeout: float, **_: Any) -> None:
+        _fire(mock_sdk["handlers"], _FakeEvent(_FakeUsage()))
+        _fire(mock_sdk["handlers"], _FakeEvent(_FakeAssistantMessage(content="Done.")))
 
-    mock_sdk["session"].send_and_wait = fake_send_and_wait
+    mock_sdk["session"].send_and_wait = AsyncMock(side_effect=fake_send)
 
-    result = await rt.execute(
-        "say hi",
-        schema=_Schema,
+    result = await CopilotRuntime().execute(
+        "ask something",
         model=ProviderModel("github-copilot", "gpt-5-mini"),
     )
 
-    assert result.structured == {"summary": "ok", "count": 42}
-    assert result.finish == "stop"
-    assert result.cost.cost_usd == pytest.approx(0.0034)
-    assert result.cost.input_tokens == 120
-    assert result.cost.output_tokens == 240
-    assert result.cost.cache_read_tokens == 80
-    assert result.cost.cache_write_tokens == 15
+    assert result.text == "Done."
+    assert result.structured is None
     assert result.cost.provider_id == "github-copilot"
-    assert result.cost.model_id == "gpt-5-mini"
+    # The session was destroyed after the call (sugar tears it down).
+    mock_sdk["session"].destroy.assert_awaited()
 
 
 @pytest.mark.asyncio
-async def test_execute_uses_default_model_when_unspecified(mock_sdk: dict[str, Any]) -> None:
-    rt = CopilotRuntime(model="o5-pro")
+async def test_execute_persona_kwarg_does_not_crash(mock_sdk: dict[str, Any]) -> None:
+    """``persona=`` accepted but unused by CopilotRuntime."""
 
-    async def fake_send_and_wait(prompt: str, *, timeout: float = 60.0) -> Any:
-        rt._captured_payload = _Schema(summary="ok", count=1)
+    async def fake_send(prompt: str, *, timeout: float, **_: Any) -> None:
+        _fire(mock_sdk["handlers"], _FakeEvent(_FakeAssistantMessage(content="ok")))
 
-    mock_sdk["session"].send_and_wait = fake_send_and_wait
-
-    result = await rt.execute("hi", schema=_Schema)
-
-    assert result.cost.model_id == "o5-pro"
-    # The model was passed to create_session via kwargs.
-    create_kwargs = mock_sdk["client"].create_session.call_args.kwargs
-    assert create_kwargs["model"] == "o5-pro"
-
-
-@pytest.mark.asyncio
-async def test_execute_registers_submit_result_tool(mock_sdk: dict[str, Any]) -> None:
-    rt = CopilotRuntime()
-
-    async def fake_send_and_wait(prompt: str, *, timeout: float = 60.0) -> Any:
-        rt._captured_payload = _Schema(summary="ok", count=1)
-
-    mock_sdk["session"].send_and_wait = fake_send_and_wait
-    await rt.execute("hi", schema=_Schema)
-
-    tools = mock_sdk["captured_tools"]
-    assert len(tools) == 1
-    submit = tools[0]
-    assert submit["name"] == SUBMIT_RESULT_TOOL
-    assert submit["params_type"] is _Schema
-    assert submit["skip_permission"] is True
-
-
-@pytest.mark.asyncio
-async def test_execute_system_message_includes_force_prefix(
-    mock_sdk: dict[str, Any],
-) -> None:
-    rt = CopilotRuntime()
-
-    async def fake_send_and_wait(prompt: str, *, timeout: float = 60.0) -> Any:
-        rt._captured_payload = _Schema(summary="ok", count=1)
-
-    mock_sdk["session"].send_and_wait = fake_send_and_wait
-    await rt.execute("hi", schema=_Schema, system="You are the navigator.")
-
-    kwargs = mock_sdk["client"].create_session.call_args.kwargs
-    sysmsg = kwargs["system_message"]
-    assert sysmsg["mode"] == "append"
-    assert SUBMIT_RESULT_TOOL in sysmsg["content"]
-    assert "You are the navigator." in sysmsg["content"]
+    mock_sdk["session"].send_and_wait = AsyncMock(side_effect=fake_send)
+    result = await CopilotRuntime().execute("hi", persona="navigator")
+    assert result.text == "ok"
 
 
 # ---------------------------------------------------------------------------
-# execute() — error paths
+# Lifecycle — Iteration G: reset() is a no-op; close() releases the client
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_execute_missing_tool_call_raises_structured_output_error(
-    mock_sdk: dict[str, Any],
-) -> None:
-    """If the model finishes without calling submit_result, we raise."""
+async def test_reset_is_noop_after_iteration_g() -> None:
+    """Per-call sessions own their own state; runtime has nothing scope-bound."""
     rt = CopilotRuntime()
-
-    async def fake_send_and_wait(prompt: str, *, timeout: float = 60.0) -> Any:
-        # Assistant emits text but never calls submit_result.
-        rt._on_event(_FakeEvent(_FakeAssistantMessage(content="here is your answer")))
-
-    mock_sdk["session"].send_and_wait = fake_send_and_wait
-
-    with pytest.raises(RuntimeStructuredOutputError):
-        await rt.execute("hi", schema=_Schema)
-
-
-@pytest.mark.asyncio
-async def test_execute_session_error_auth(mock_sdk: dict[str, Any]) -> None:
-    rt = CopilotRuntime()
-
-    async def fake_send_and_wait(prompt: str, *, timeout: float = 60.0) -> Any:
-        rt._on_event(
-            _FakeEvent(
-                _FakeSessionError(message="unauthorized", error_type="auth", status_code=401)
-            )
-        )
-
-    mock_sdk["session"].send_and_wait = fake_send_and_wait
-
-    with pytest.raises(RuntimeAuthError):
-        await rt.execute("hi", schema=_Schema)
-
-
-@pytest.mark.asyncio
-async def test_execute_session_error_model_not_found(mock_sdk: dict[str, Any]) -> None:
-    rt = CopilotRuntime()
-
-    async def fake_send_and_wait(prompt: str, *, timeout: float = 60.0) -> Any:
-        rt._on_event(
-            _FakeEvent(
-                _FakeSessionError(
-                    message="no such model", error_type="model_not_found", status_code=404
-                )
-            )
-        )
-
-    mock_sdk["session"].send_and_wait = fake_send_and_wait
-
-    with pytest.raises(RuntimeModelNotFoundError):
-        await rt.execute("hi", schema=_Schema)
-
-
-@pytest.mark.asyncio
-async def test_execute_session_error_transient_429(mock_sdk: dict[str, Any]) -> None:
-    rt = CopilotRuntime()
-
-    async def fake_send_and_wait(prompt: str, *, timeout: float = 60.0) -> Any:
-        rt._on_event(
-            _FakeEvent(
-                _FakeSessionError(message="rate limited", error_type="rate_limit", status_code=429)
-            )
-        )
-
-    mock_sdk["session"].send_and_wait = fake_send_and_wait
-
-    with pytest.raises(RuntimeTransientError):
-        await rt.execute("hi", schema=_Schema)
-
-
-@pytest.mark.asyncio
-async def test_execute_session_error_5xx_is_transient(mock_sdk: dict[str, Any]) -> None:
-    rt = CopilotRuntime()
-
-    async def fake_send_and_wait(prompt: str, *, timeout: float = 60.0) -> Any:
-        rt._on_event(
-            _FakeEvent(
-                _FakeSessionError(message="server hosed", error_type="upstream", status_code=502)
-            )
-        )
-
-    mock_sdk["session"].send_and_wait = fake_send_and_wait
-
-    with pytest.raises(RuntimeTransientError):
-        await rt.execute("hi", schema=_Schema)
-
-
-@pytest.mark.asyncio
-async def test_execute_session_error_other_is_protocol(mock_sdk: dict[str, Any]) -> None:
-    rt = CopilotRuntime()
-
-    async def fake_send_and_wait(prompt: str, *, timeout: float = 60.0) -> Any:
-        rt._on_event(
-            _FakeEvent(
-                _FakeSessionError(message="weirdness", error_type="other", status_code=None)
-            )
-        )
-
-    mock_sdk["session"].send_and_wait = fake_send_and_wait
-
-    with pytest.raises(RuntimeProtocolError):
-        await rt.execute("hi", schema=_Schema)
-
-
-@pytest.mark.asyncio
-async def test_execute_timeout_raises_transient_error(mock_sdk: dict[str, Any]) -> None:
-    rt = CopilotRuntime()
-
-    async def slow(prompt: str, *, timeout: float = 60.0) -> Any:
-        import asyncio
-
-        await asyncio.sleep(10)
-
-    mock_sdk["session"].send_and_wait = slow
-
-    with pytest.raises(RuntimeTransientError):
-        await rt.execute("hi", schema=_Schema, timeout=0.05)
-
-
-@pytest.mark.asyncio
-async def test_execute_cli_not_found_raises_server_start_error(
-    mock_sdk: dict[str, Any],
-) -> None:
-    rt = CopilotRuntime()
-    mock_sdk["client_factory"].side_effect = FileNotFoundError("no copilot CLI on PATH")
-
-    with pytest.raises(RuntimeServerStartError):
-        await rt.execute("hi", schema=_Schema)
-
-
-@pytest.mark.asyncio
-async def test_execute_generic_sdk_failure_classifies_as_agent_error(
-    mock_sdk: dict[str, Any],
-) -> None:
-    rt = CopilotRuntime()
-    mock_sdk["client"].create_session.side_effect = RuntimeError("unknown failure")
-
-    with pytest.raises(AgentRuntimeError):
-        await rt.execute("hi", schema=_Schema)
-
-
-# ---------------------------------------------------------------------------
-# Lifecycle
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_reset_destroys_session(mock_sdk: dict[str, Any]) -> None:
-    rt = CopilotRuntime()
-
-    async def fake_send_and_wait(prompt: str, *, timeout: float = 60.0) -> Any:
-        rt._captured_payload = _Schema(summary="ok", count=1)
-
-    mock_sdk["session"].send_and_wait = fake_send_and_wait
-    await rt.execute("hi", schema=_Schema)
-    assert rt._session is not None
-
     await rt.reset()
-    assert rt._session is None
-    assert mock_sdk["session"].destroy.await_count >= 1
+    await rt.reset()
 
 
 @pytest.mark.asyncio
-async def test_close_destroys_session_and_disconnects_client(
-    mock_sdk: dict[str, Any],
-) -> None:
+async def test_close_releases_runtime_client(mock_sdk: dict[str, Any]) -> None:
+    """close() stops the long-lived CopilotClient even if no session ran."""
     rt = CopilotRuntime()
-
-    async def fake_send_and_wait(prompt: str, *, timeout: float = 60.0) -> Any:
-        rt._captured_payload = _Schema(summary="ok", count=1)
-
-    mock_sdk["session"].send_and_wait = fake_send_and_wait
-    await rt.execute("hi", schema=_Schema)
-
+    # Eagerly build the client via _ensure_client.
+    await rt._ensure_client()  # noqa: SLF001
+    assert rt._client is not None  # noqa: SLF001
     await rt.close()
-    assert rt._client is None
-    assert rt._session is None
-    assert mock_sdk["client"].stop.await_count >= 1
+    mock_sdk["client"].stop.assert_awaited()
+    assert rt._client is None  # noqa: SLF001
 
 
 @pytest.mark.asyncio
-async def test_reset_with_no_session_is_noop() -> None:
+async def test_close_with_no_client_is_noop() -> None:
     rt = CopilotRuntime()
-    await rt.reset()
+    await rt.close()
     await rt.close()
 
 
 # ---------------------------------------------------------------------------
-# Auth
+# Auth — CopilotClient construction (runtime-owned, long-lived)
 # ---------------------------------------------------------------------------
 
 
@@ -637,13 +318,7 @@ async def test_explicit_github_token_threaded_to_subprocess_config(
     mock_sdk: dict[str, Any],
 ) -> None:
     rt = CopilotRuntime(github_token="ghu_test_token")
-
-    async def fake_send_and_wait(prompt: str, *, timeout: float = 60.0) -> Any:
-        rt._captured_payload = _Schema(summary="ok", count=1)
-
-    mock_sdk["session"].send_and_wait = fake_send_and_wait
-    await rt.execute("hi", schema=_Schema)
-
+    await rt._ensure_client()  # noqa: SLF001 — runtime-level wiring under test
     kwargs = mock_sdk["subprocess_kwargs"]
     assert kwargs.get("github_token") == "ghu_test_token"
     assert "use_logged_in_user" not in kwargs
@@ -657,13 +332,7 @@ async def test_no_token_falls_back_to_logged_in_user(
     monkeypatch.delenv("GITHUB_TOKEN", raising=False)
     monkeypatch.delenv("GH_TOKEN", raising=False)
     rt = CopilotRuntime()
-
-    async def fake_send_and_wait(prompt: str, *, timeout: float = 60.0) -> Any:
-        rt._captured_payload = _Schema(summary="ok", count=1)
-
-    mock_sdk["session"].send_and_wait = fake_send_and_wait
-    await rt.execute("hi", schema=_Schema)
-
+    await rt._ensure_client()  # noqa: SLF001
     kwargs = mock_sdk["subprocess_kwargs"]
     assert kwargs.get("use_logged_in_user") is True
     assert "github_token" not in kwargs
@@ -676,78 +345,14 @@ async def test_env_token_picked_up(
 ) -> None:
     monkeypatch.setenv("GITHUB_TOKEN", "ghp_from_env")
     rt = CopilotRuntime()
-
-    async def fake_send_and_wait(prompt: str, *, timeout: float = 60.0) -> Any:
-        rt._captured_payload = _Schema(summary="ok", count=1)
-
-    mock_sdk["session"].send_and_wait = fake_send_and_wait
-    await rt.execute("hi", schema=_Schema)
-
+    await rt._ensure_client()  # noqa: SLF001
     kwargs = mock_sdk["subprocess_kwargs"]
     assert kwargs.get("github_token") == "ghp_from_env"
 
 
 # ---------------------------------------------------------------------------
-# Session caching
+# Canonical naming
 # ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_session_reused_when_schema_and_model_match(
-    mock_sdk: dict[str, Any],
-) -> None:
-    rt = CopilotRuntime()
-
-    async def fake_send_and_wait(prompt: str, *, timeout: float = 60.0) -> Any:
-        rt._captured_payload = _Schema(summary="ok", count=1)
-
-    mock_sdk["session"].send_and_wait = fake_send_and_wait
-
-    await rt.execute("hi", schema=_Schema)
-    await rt.execute("hi again", schema=_Schema)
-
-    # create_session should have been called exactly once across the two execute() calls.
-    assert mock_sdk["client"].create_session.await_count == 1
-
-
-@pytest.mark.asyncio
-async def test_session_recreated_when_system_changes(mock_sdk: dict[str, Any]) -> None:
-    rt = CopilotRuntime()
-
-    async def fake_send_and_wait(prompt: str, *, timeout: float = 60.0) -> Any:
-        rt._captured_payload = _Schema(summary="ok", count=1)
-
-    mock_sdk["session"].send_and_wait = fake_send_and_wait
-
-    await rt.execute("hi", schema=_Schema, system="persona A")
-    await rt.execute("hi again", schema=_Schema, system="persona B")
-
-    assert mock_sdk["client"].create_session.await_count == 2
-    assert mock_sdk["session"].destroy.await_count >= 1
-
-
-# ---------------------------------------------------------------------------
-# Cost path when usage is missing
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_cost_record_returns_zero_when_no_usage_event(
-    mock_sdk: dict[str, Any],
-) -> None:
-    rt = CopilotRuntime()
-
-    async def fake_send_and_wait(prompt: str, *, timeout: float = 60.0) -> Any:
-        rt._captured_payload = _Schema(summary="ok", count=1)
-        # Deliberately do not emit a usage event.
-
-    mock_sdk["session"].send_and_wait = fake_send_and_wait
-    result = await rt.execute("hi", schema=_Schema)
-
-    assert result.cost.cost_usd is None
-    assert result.cost.input_tokens == 0
-    assert result.cost.output_tokens == 0
-    assert result.cost.provider_id == "github-copilot"
 
 
 def test_submit_result_tool_name_canonical() -> None:
