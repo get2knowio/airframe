@@ -11,11 +11,10 @@ Usage::
     uv run python examples/probe_supports.py --installed-only
     uv run python examples/probe_supports.py --provider claude
 
-The matrix should match what's in ``docs/feature-roadmap.md`` §1
-once every later phase has landed its features. Today (v0.3.0,
-Phase 0) only ``STRUCTURED_OUTPUT_JSON_SCHEMA`` shows ✓ across the
-board — every other column is ✗ until its corresponding phase
-ships.
+The matrix should match what's in ``docs/capabilities.md`` (and
+the README summary table). After Phase 5 every adapter declares
+the full feature set with vendor-specific declines documented
+per-adapter in ``docs/adapters/``.
 """
 
 from __future__ import annotations

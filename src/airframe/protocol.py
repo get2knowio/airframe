@@ -46,6 +46,7 @@ if TYPE_CHECKING:
     from airframe.hooks import HookEvent
     from airframe.inputs import Prompt
     from airframe.models import ModelInfo
+    from airframe.options import ProviderOptions
     from airframe.permission import PermissionCallback
     from airframe.thinking import ThinkingMode
     from airframe.tools import FunctionTool, McpServerRef
@@ -63,8 +64,9 @@ class ProviderModel:
     filtering on ``model_id``) via :meth:`AgentRuntime.validate_binding`.
 
     Attributes:
-        provider_id: Vendor identifier — ``"anthropic"``, ``"openai"``,
-            ``"copilot"``, ``"opencode"``, etc.
+        provider_id: Canonical adapter identifier — ``"claude"``,
+            ``"github-copilot"``, ``"codex"``, ``"opencode-zen"``,
+            ``"opencode-go"``, etc.
         model_id: The model identifier the vendor recognises
             (e.g. ``"claude-haiku-4-5"``, ``"gpt-5-mini"``).
     """
@@ -349,12 +351,12 @@ class AgentRuntime(Protocol):
         mcp_servers: list[McpServerRef] | None = None,
         on_permission: PermissionCallback | None = None,
         on_event: Callable[[HookEvent], None] | None = None,
-        provider_options: Any | None = None,
+        provider_options: ProviderOptions | None = None,
     ) -> AgentSession:
         """Open a multi-turn session against this runtime.
 
         Phase 1 of the [implementation
-        plan](../../docs/implementation-plan.md) introduces sessions
+        plan](../../dev-docs/implementation-plan.md) introduces sessions
         as the "hinge" abstraction — every later kwarg
         (``thinking=``, ``tools=``, ``mcp_servers=``,
         ``on_permission=``) attaches to the session, not the runtime.
@@ -433,9 +435,16 @@ class AgentRuntime(Protocol):
                 synthesis can't fire ``pre_compact`` /
                 ``rate_limit`` honestly, for example).
             provider_options: Vendor-specific extension namespace
-                (see :mod:`airframe.options`). Accepted in Phase 1
-                but unused — each :class:`ProviderOptions` dataclass
-                is empty scaffolding; later phases (2+) fill them.
+                (see :mod:`airframe.options`). Pass an instance of the
+                adapter's matching dataclass (e.g.
+                :class:`~airframe.options.ClaudeOptions` for
+                :class:`ClaudeCodeRuntime`); a mismatch raises
+                :class:`~airframe.errors.UnsupportedFeatureError` at
+                the adapter boundary. Populated fields vary by
+                adapter — Claude exposes ``append_system_prompt`` /
+                ``fork_session`` / ``strict_mcp_config`` as of v0.5.0;
+                the other namespaces are open-but-empty (additive
+                growth as fields land).
 
         Returns:
             A fresh :class:`AgentSession`.

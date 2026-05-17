@@ -78,6 +78,7 @@ from airframe.events import (
 from airframe.features import Feature
 from airframe.inputs import Prompt
 from airframe.models import ModelInfo
+from airframe.options import CopilotOptions
 from airframe.protocol import (
     AgentRuntime,
     AgentSession,
@@ -90,6 +91,7 @@ from airframe.sessions import (
     _check_hooks_supported,
     _check_mcp_servers_supported,
     _check_permission_supported,
+    _check_provider_options,
     _check_tools_supported,
     _compose_mcp_headers,
     _enforce_budget_pre_turn,
@@ -104,6 +106,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
 
     from airframe.hooks import HookEvent
+    from airframe.options import ProviderOptions
     from airframe.permission import PermissionCallback
 
 logger = logging.getLogger(__name__)
@@ -385,7 +388,7 @@ class CopilotRuntime(AgentRuntime):
         mcp_servers: list[McpServerRef] | None = None,
         on_permission: PermissionCallback | None = None,
         on_event: Callable[[HookEvent], None] | None = None,
-        provider_options: Any | None = None,
+        provider_options: ProviderOptions | None = None,
     ) -> AgentSession:
         """Open a bespoke :class:`CopilotAgentSession`.
 
@@ -441,7 +444,12 @@ class CopilotRuntime(AgentRuntime):
                 :meth:`CopilotSession.on` subscriber that translates
                 the SDK's typed ``*Data`` events into
                 :class:`~airframe.hooks.HookEvent`.
-            provider_options: Reserved for Phase 2+ (currently unused).
+            provider_options: Optional :class:`CopilotOptions` namespace
+                (empty as of v0.5.0 — the namespace is held open for
+                additive field growth). Passing
+                :class:`ClaudeOptions` / :class:`CodexOptions` /
+                :class:`OpenAICompatOptions` here raises
+                :class:`UnsupportedFeatureError`.
         """
         _check_tools_supported(
             tools,
@@ -480,9 +488,14 @@ class CopilotRuntime(AgentRuntime):
             adapter_label=self.label,
             supports=self.supports,
         )
-        # provider_options accepted but unused — Phase 2+ fills each
-        # ProviderOptions dataclass as the corresponding feature lands.
-        del provider_options
+        _check_provider_options(
+            provider_options,
+            expected_type=CopilotOptions,
+            adapter_label=self.label,
+        )
+        copilot_options = (
+            provider_options if isinstance(provider_options, CopilotOptions) else None
+        )
         model_id = self._resolve_model(model) if model is not None else self._default_model
         return CopilotAgentSession(
             self,
@@ -493,6 +506,7 @@ class CopilotRuntime(AgentRuntime):
             mcp_servers=mcp_servers,
             on_permission=on_permission,
             on_event=on_event,
+            provider_options=copilot_options,
         )
 
     async def list_models(self) -> list[ModelInfo]:
@@ -696,6 +710,7 @@ class CopilotAgentSession:
         mcp_servers: list[McpServerRef] | None = None,
         on_permission: PermissionCallback | None = None,
         on_event: Callable[[HookEvent], None] | None = None,
+        provider_options: CopilotOptions | None = None,
     ) -> None:
         self._runtime = runtime
         self._resume = resume
@@ -744,6 +759,12 @@ class CopilotAgentSession:
         self._on_event: Callable[[HookEvent], None] | None = on_event
         self._unsubscribe_event: Any | None = None
         self._session_end_fired = False
+        # ProviderOptions — Copilot-specific knobs that don't fit the
+        # portable surface. All four populated fields
+        # (available_tools, excluded_tools, skill_directories,
+        # working_directory) are baked at create_session() time, so
+        # the namespace fingerprint joins the cache key.
+        self._provider_options: CopilotOptions | None = provider_options
         # Phase 5 Iteration D: per-session running USD total. Copilot
         # doesn't declare BUDGET_TURN_CAP (vendor enforces internally)
         # so we don't track a turn counter on this adapter.
@@ -1039,9 +1060,10 @@ class CopilotAgentSession:
         tools_fragment = f"tools={self._tools_fingerprint}"
         mcp_fragment = f"mcp={self._mcp_servers_fingerprint}"
         permission_fragment = f"perm={self._permission_fingerprint}"
+        provider_options_fragment = f"po={_copilot_options_fingerprint(self._provider_options)}"
         cache_key = (
             f"{schema_fragment}|effort={reasoning_effort}|{tools_fragment}|"
-            f"{mcp_fragment}|{permission_fragment}"
+            f"{mcp_fragment}|{permission_fragment}|{provider_options_fragment}"
         )
         if self._session is not None and self._session_key == cache_key:
             return self._session
@@ -1076,6 +1098,16 @@ class CopilotAgentSession:
             create_kwargs["reasoning_effort"] = reasoning_effort
         if self._mcp_servers:
             create_kwargs["mcp_servers"] = _translate_mcp_servers_for_copilot(self._mcp_servers)
+        po = self._provider_options
+        if po is not None:
+            if po.available_tools is not None:
+                create_kwargs["available_tools"] = list(po.available_tools)
+            if po.excluded_tools:
+                create_kwargs["excluded_tools"] = list(po.excluded_tools)
+            if po.skill_directories:
+                create_kwargs["skill_directories"] = list(po.skill_directories)
+            if po.working_directory is not None:
+                create_kwargs["working_directory"] = po.working_directory
 
         # Assemble the tools list: forced ``submit_result`` first (when
         # schema= is set) so the model sees the structured-output gate
@@ -1582,6 +1614,23 @@ def _permission_fingerprint(callback: PermissionCallback | None) -> str:
     if callback is None:
         return "__no_permission__"
     return f"id={id(callback)}|type={type(callback).__name__}"
+
+
+def _copilot_options_fingerprint(po: CopilotOptions | None) -> str:
+    """Deterministic fingerprint of the :class:`CopilotOptions` value.
+
+    All populated fields bake into
+    :meth:`CopilotClient.create_session` at session-creation time,
+    so a change between turns must force a session rebuild.
+    Value-based — frozen dataclass instances with the same fields
+    fingerprint identically.
+    """
+    if po is None:
+        return "__no_provider_options__"
+    return (
+        f"avail={po.available_tools!r}|excl={po.excluded_tools!r}|"
+        f"skills={po.skill_directories!r}|wd={po.working_directory!r}"
+    )
 
 
 def _copilot_tools_fingerprint(tools: list[FunctionTool]) -> str:

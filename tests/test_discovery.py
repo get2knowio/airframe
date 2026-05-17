@@ -45,7 +45,13 @@ def _stub_find_spec(monkeypatch: pytest.MonkeyPatch, available: set[str]) -> Non
 def test_list_providers_returns_all_when_installed_only_false() -> None:
     """``installed_only=False`` surfaces every adapter's PROVIDER_ID."""
     providers = list_providers(installed_only=False)
-    assert set(providers) == {"claude", "github-copilot", "codex", "opencode"}
+    assert set(providers) == {
+        "claude",
+        "github-copilot",
+        "codex",
+        "opencode-zen",
+        "opencode-go",
+    }
 
 
 def test_list_providers_sorted_alphabetically() -> None:
@@ -78,9 +84,11 @@ def test_list_providers_filters_when_only_codex_installed(
 def test_list_providers_filters_when_only_openai_compat_installed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The ``[openai-compat]`` extra brings ``openai`` — gates ``opencode``."""
+    """The ``[openai-compat]`` extra brings ``openai`` — gates both
+    OpenAI-compatible adapters (per-token ``opencode-zen`` and
+    subscription ``opencode-go``)."""
     _stub_find_spec(monkeypatch, available={"openai"})
-    assert list_providers() == ["opencode"]
+    assert list_providers() == ["opencode-go", "opencode-zen"]
 
 
 def test_list_providers_when_nothing_installed_is_empty(
@@ -116,8 +124,8 @@ def test_runtime_for_codex_returns_codex_runtime() -> None:
     assert runtime_for("codex") is CodexRuntime
 
 
-def test_runtime_for_opencode_returns_opencode_zen_runtime() -> None:
-    assert runtime_for("opencode") is OpenCodeZenRuntime
+def test_runtime_for_opencode_zen_returns_opencode_zen_runtime() -> None:
+    assert runtime_for("opencode-zen") is OpenCodeZenRuntime
 
 
 def test_runtime_for_unknown_provider_raises_value_error() -> None:
@@ -134,7 +142,9 @@ def test_runtime_for_dropped_alias_raises_value_error() -> None:
     with pytest.raises(ValueError):
         runtime_for("anthropic")
     with pytest.raises(ValueError):
-        runtime_for("copilot")  # legacy alias, dropped in v0.2.0
+        runtime_for("copilot")  # legacy alias
+    with pytest.raises(ValueError):
+        runtime_for("opencode")  # bare alias replaced by opencode-zen / opencode-go
 
 
 def test_runtime_for_uninstalled_provider_raises_import_error(
@@ -168,12 +178,12 @@ def test_runtime_for_uninstalled_codex_names_the_extra(
     assert "airframe-agents[codex]" in str(excinfo.value)
 
 
-def test_runtime_for_uninstalled_opencode_names_the_openai_compat_extra(
+def test_runtime_for_uninstalled_opencode_zen_names_the_openai_compat_extra(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _stub_find_spec(monkeypatch, available=set())
     with pytest.raises(ImportError) as excinfo:
-        runtime_for("opencode")
+        runtime_for("opencode-zen")
     assert "airframe-agents[openai-compat]" in str(excinfo.value)
 
 
@@ -254,7 +264,7 @@ def test_entry_point_adapter_appears_in_list_providers(
     providers = list_providers(installed_only=False)
     assert "fake-third-party" in providers
     # Built-ins still surface unchanged.
-    assert {"claude", "github-copilot", "codex", "opencode"} <= set(providers)
+    assert {"claude", "github-copilot", "codex", "opencode-zen", "opencode-go"} <= set(providers)
 
 
 def test_entry_point_adapter_routed_by_runtime_for(

@@ -1,6 +1,6 @@
 """:class:`PermissionCallback` — gating tool execution at the airframe layer.
 
-Phase 5 of the [implementation plan](../../docs/implementation-plan.md)
+Phase 5 of the [implementation plan](../../dev-docs/implementation-plan.md)
 introduces ``on_permission=`` on :meth:`AgentRuntime.session`. Each
 :class:`PermissionRequest` represents the vendor SDK asking
 "shall I let the model run this tool?"; the user-supplied

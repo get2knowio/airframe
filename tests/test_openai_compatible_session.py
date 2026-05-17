@@ -1649,3 +1649,104 @@ async def test_budget_caps_none_open_cleanly(mock_openai: MagicMock) -> None:
             await sess.execute(f"turn {i}")
     finally:
         await sess.close()
+
+
+# ---------------------------------------------------------------------------
+# Provider options (v0.5.0-readiness — OpenAICompatOptions wired)
+# ---------------------------------------------------------------------------
+
+
+async def test_openai_compat_options_prompt_cache_key_lands_on_create(
+    mock_openai: MagicMock,
+) -> None:
+    """``OpenAICompatOptions.prompt_cache_key`` rides into every create() call."""
+    from airframe import OpenAICompatOptions
+
+    rt = _make_runtime()
+    sess = rt.session(provider_options=OpenAICompatOptions(prompt_cache_key="user-42"))
+    try:
+        await sess.execute("hi")
+    finally:
+        await sess.close()
+    call = mock_openai.chat.completions.create.await_args_list[0]
+    assert call.kwargs["prompt_cache_key"] == "user-42"
+
+
+async def test_openai_compat_options_full_field_set_lands(mock_openai: MagicMock) -> None:
+    """Every populated OpenAICompatOptions field reaches the create() kwargs."""
+    from airframe import OpenAICompatOptions
+
+    rt = _make_runtime()
+    sess = rt.session(
+        provider_options=OpenAICompatOptions(
+            prompt_cache_key="k",
+            prompt_cache_retention="24h",
+            service_tier="priority",
+            safety_identifier="user-99",
+            verbosity="low",
+            store=True,
+        )
+    )
+    try:
+        await sess.execute("hi")
+    finally:
+        await sess.close()
+    call = mock_openai.chat.completions.create.await_args_list[0]
+    assert call.kwargs["prompt_cache_key"] == "k"
+    assert call.kwargs["prompt_cache_retention"] == "24h"
+    assert call.kwargs["service_tier"] == "priority"
+    assert call.kwargs["safety_identifier"] == "user-99"
+    assert call.kwargs["verbosity"] == "low"
+    assert call.kwargs["store"] is True
+
+
+async def test_openai_compat_options_default_omits_kwargs(mock_openai: MagicMock) -> None:
+    """No ``provider_options=`` → none of the new kwargs are passed."""
+    rt = _make_runtime()
+    sess = rt.session()
+    try:
+        await sess.execute("hi")
+    finally:
+        await sess.close()
+    call = mock_openai.chat.completions.create.await_args_list[0]
+    for k in (
+        "prompt_cache_key",
+        "prompt_cache_retention",
+        "service_tier",
+        "safety_identifier",
+        "verbosity",
+        "store",
+    ):
+        assert k not in call.kwargs
+
+
+async def test_openai_compat_options_apply_on_stream_path(mock_openai: MagicMock) -> None:
+    """Stream path also routes provider_options through the create() kwargs."""
+    from airframe import OpenAICompatOptions
+
+    chunks = [
+        _make_chunk(content="hi", finish_reason="stop"),
+        _make_usage_chunk(prompt_tokens=1, completion_tokens=1),
+    ]
+    mock_openai.chat.completions.create = AsyncMock(return_value=_AsyncIter(chunks))
+
+    rt = _make_runtime()
+    sess = rt.session(provider_options=OpenAICompatOptions(prompt_cache_key="stream-k"))
+    try:
+        async for _ in sess.stream("hi"):
+            pass
+    finally:
+        await sess.close()
+    call = mock_openai.chat.completions.create.await_args
+    assert call.kwargs["prompt_cache_key"] == "stream-k"
+
+
+async def test_openai_compat_options_wrong_namespace_raises_unsupported_feature() -> None:
+    from airframe import ClaudeOptions
+    from airframe.errors import UnsupportedFeatureError
+
+    rt = _make_runtime()
+    with pytest.raises(UnsupportedFeatureError) as exc_info:
+        rt.session(provider_options=ClaudeOptions())
+    assert "ClaudeOptions" in str(exc_info.value)
+    assert "OpenAICompatOptions" in str(exc_info.value)

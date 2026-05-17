@@ -68,6 +68,7 @@ from airframe.errors import (
     AgentRuntimeError,
     RuntimeAuthError,
     RuntimeCancelledError,
+    RuntimeModelNotFoundError,
     RuntimeServerStartError,
     RuntimeStructuredOutputError,
     RuntimeTransientError,
@@ -77,6 +78,7 @@ from airframe.events import ReasoningDelta, RuntimeEvent, TextDelta, TurnComplet
 from airframe.features import Feature
 from airframe.inputs import Prompt
 from airframe.models import ModelInfo
+from airframe.options import CodexOptions
 from airframe.protocol import (
     AgentRuntime,
     AgentSession,
@@ -89,6 +91,7 @@ from airframe.sessions import (
     _check_budget_supported,
     _check_hooks_supported,
     _check_permission_supported,
+    _check_provider_options,
     _enforce_budget_pre_turn,
     _fire_hook_event,
     _split_prompt_parts,
@@ -100,6 +103,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
 
     from airframe.hooks import HookEvent
+    from airframe.options import ProviderOptions
     from airframe.permission import PermissionCallback
 
 logger = logging.getLogger(__name__)
@@ -132,6 +136,34 @@ _CODEX_METADATA: dict[str, tuple[str, int, float, float]] = {
 
 #: Legacy pricing alias kept for ``_compute_cost_usd``.
 _PRICING: dict[str, tuple[float, float]] = {k: (v[2], v[3]) for k, v in _CODEX_METADATA.items()}
+
+
+def _strictify_schema(node: Any) -> Any:
+    """Recursively annotate object nodes with ``additionalProperties: false``.
+
+    OpenAI's Responses-backed endpoints (which newer Codex models like
+    ``gpt-5.5`` / ``gpt-5.4`` route to) reject any structured-output
+    schema that doesn't pin ``additionalProperties: false`` on every
+    object node. Pydantic's :meth:`BaseModel.model_json_schema` doesn't
+    emit that key by default. We post-process the schema dict here so
+    consumers don't need to set ``ConfigDict(extra="forbid")`` on every
+    response model.
+
+    Walks the schema in place, descending into ``properties`` values,
+    array ``items``, ``$defs`` entries, and ``anyOf`` / ``oneOf`` /
+    ``allOf`` branches. Leaves an explicit ``additionalProperties`` key
+    (whatever the value) untouched so callers can still pass a schema
+    that allows extras intentionally.
+    """
+    if isinstance(node, dict):
+        if node.get("type") == "object" and "additionalProperties" not in node:
+            node["additionalProperties"] = False
+        for value in node.values():
+            _strictify_schema(value)
+    elif isinstance(node, list):
+        for item in node:
+            _strictify_schema(item)
+    return node
 
 
 def _resolve_api_key(api_key: str | None) -> str | None:
@@ -324,6 +356,25 @@ def _compute_cost_usd(model_id: str, *, input_tokens: int, output_tokens: int) -
         return None
     in_rate, out_rate = rates
     return round((input_tokens / 1000.0) * in_rate + (output_tokens / 1000.0) * out_rate, 6)
+
+
+def _codex_options_fingerprint(po: CodexOptions | None) -> str:
+    """Deterministic fingerprint of the :class:`CodexOptions` value.
+
+    All four populated fields bake into :class:`ThreadOptions` at
+    :meth:`Codex.start_thread` / :meth:`resume_thread` time, so a
+    change between turns must force a thread rebuild. Value-based —
+    frozen dataclass instances with the same fields fingerprint
+    identically.
+    """
+    if po is None:
+        return "__no_provider_options__"
+    return (
+        f"wd={po.working_directory!r}|"
+        f"addl={po.additional_directories!r}|"
+        f"net={po.network_access_enabled}|"
+        f"ws={po.web_search_enabled}"
+    )
 
 
 class CodexRuntime(AgentRuntime):
@@ -557,7 +608,7 @@ class CodexRuntime(AgentRuntime):
         mcp_servers: list[McpServerRef] | None = None,
         on_permission: PermissionCallback | None = None,
         on_event: Callable[[HookEvent], None] | None = None,
-        provider_options: Any | None = None,
+        provider_options: ProviderOptions | None = None,
     ) -> AgentSession:
         """Open a bespoke :class:`CodexAgentSession`.
 
@@ -618,7 +669,16 @@ class CodexRuntime(AgentRuntime):
                 :class:`~airframe.hooks.HookEvent` from
                 :class:`ItemStartedEvent` / :class:`ItemCompletedEvent`
                 on the thread stream.
-            provider_options: Reserved for Phase 2+ (currently unused).
+            provider_options: Optional :class:`CodexOptions` namespace
+                carrying Codex-only knobs. Four populated fields:
+                ``working_directory``, ``additional_directories``,
+                ``network_access_enabled``, ``web_search_enabled`` —
+                all baked into :class:`ThreadOptions` at
+                :meth:`Codex.start_thread` / :meth:`resume_thread`
+                time, so a change between turns rebuilds the thread.
+                Passing :class:`ClaudeOptions` / :class:`CopilotOptions`
+                / :class:`OpenAICompatOptions` here raises
+                :class:`UnsupportedFeatureError`.
         """
         if tools:
             raise UnsupportedFeatureError(
@@ -658,9 +718,12 @@ class CodexRuntime(AgentRuntime):
             adapter_label=self.label,
             supports=self.supports,
         )
-        # provider_options accepted but unused — Phase 2+ fills each
-        # ProviderOptions dataclass as the corresponding feature lands.
-        del provider_options
+        _check_provider_options(
+            provider_options,
+            expected_type=CodexOptions,
+            adapter_label=self.label,
+        )
+        codex_options = provider_options if isinstance(provider_options, CodexOptions) else None
         model_id = self._resolve_model(model) if model is not None else self._default_model
         return CodexAgentSession(
             self,
@@ -669,6 +732,7 @@ class CodexRuntime(AgentRuntime):
             model_id=model_id,
             on_permission=on_permission,
             on_event=on_event,
+            provider_options=codex_options,
         )
 
     async def list_models(self) -> list[ModelInfo]:
@@ -832,6 +896,15 @@ class CodexRuntime(AgentRuntime):
                 return RuntimeAuthError(f"codex: auth: {exc}")
             if "rate" in msg or "429" in msg or "503" in msg or "timeout" in msg:
                 return RuntimeTransientError(f"codex: transient: {exc}")
+            if "model" in msg and (
+                "not supported" in msg
+                or "not available" in msg
+                or "not found" in msg
+                or "does not exist" in msg
+            ):
+                return RuntimeModelNotFoundError(
+                    f"codex: model unavailable on this binding: {exc}"
+                )
             if "schema" in msg or "json" in msg:
                 return RuntimeStructuredOutputError(
                     f"codex: structured output failed: {exc}", body=None
@@ -895,6 +968,7 @@ class CodexAgentSession:
         model_id: str,
         on_permission: PermissionCallback | None = None,
         on_event: Callable[[HookEvent], None] | None = None,
+        provider_options: CodexOptions | None = None,
     ) -> None:
         self._runtime = runtime
         self._resume = resume
@@ -939,6 +1013,11 @@ class CodexAgentSession:
         # is additive later via the existing cancel() plumbing.
         self._cumulative_cost_usd: float = 0.0
         self._turn_count: int = 0
+        # ProviderOptions — Codex-only knobs threaded into
+        # ThreadOptions at start_thread() / resume_thread() time.
+        # A namespace change between turns rebuilds the thread (the
+        # cache key in _ensure_thread carries the fingerprint).
+        self._provider_options: CodexOptions | None = provider_options
 
     async def execute(
         self,
@@ -991,7 +1070,7 @@ class CodexAgentSession:
 
         turn_options: dict[str, Any] = {"signal": controller.signal}
         if schema is not None:
-            turn_options["outputSchema"] = schema.model_json_schema()
+            turn_options["outputSchema"] = _strictify_schema(schema.model_json_schema())
 
         self._in_flight = True
         try:
@@ -1087,7 +1166,7 @@ class CodexAgentSession:
 
         turn_options: dict[str, Any] = {"signal": controller.signal}
         if schema is not None:
-            turn_options["outputSchema"] = schema.model_json_schema()
+            turn_options["outputSchema"] = _strictify_schema(schema.model_json_schema())
 
         try:
             streamed = await thread.run_streamed(run_input, turn_options)
@@ -1283,13 +1362,17 @@ class CodexAgentSession:
 
     def _ensure_thread(self, *, thinking: ThinkingMode = None) -> Any:
         effort = _translate_thinking_for_codex(thinking)
-        if self._thread is not None and self._thread_effort == effort:
+        # Cache key combines thinking-effort + provider_options
+        # fingerprint — both bake into ThreadOptions at
+        # start_thread() / resume_thread() time.
+        po_fingerprint = _codex_options_fingerprint(self._provider_options)
+        cache_key = f"effort={effort}|po={po_fingerprint}"
+        if self._thread is not None and self._thread_effort == cache_key:
             return self._thread
-        # Thinking changed between turns — rebuild the Thread, since
-        # modelReasoningEffort is baked at start_thread() / resume_thread()
-        # time. We drop the old Thread reference; the Codex SDK Thread
-        # itself holds no subprocess until run() spawns one.
-        if self._thread is not None and self._thread_effort != effort:
+        # Cache-key change between turns — rebuild the Thread. We drop
+        # the old Thread reference; the Codex SDK Thread itself holds
+        # no subprocess until run() spawns one.
+        if self._thread is not None and self._thread_effort != cache_key:
             self._thread = None
         client = self._runtime._ensure_client()
         thread_options: dict[str, Any] = {
@@ -1303,6 +1386,18 @@ class CodexAgentSession:
         # lazily in _resolve_approval_policy() and cached on self.
         if self._approval_policy is not None:
             thread_options["approval_policy"] = self._approval_policy
+        # ProviderOptions — Codex-only knobs not covered by the
+        # portable surface. Field names map to ThreadOptions camelCase.
+        po = self._provider_options
+        if po is not None:
+            if po.working_directory is not None:
+                thread_options["workingDirectory"] = po.working_directory
+            if po.additional_directories:
+                thread_options["additionalDirectories"] = list(po.additional_directories)
+            if po.network_access_enabled:
+                thread_options["networkAccessEnabled"] = True
+            if po.web_search_enabled:
+                thread_options["webSearchEnabled"] = True
         try:
             if self._resume is not None:
                 thread = client.resume_thread(self._resume, thread_options)
@@ -1311,7 +1406,7 @@ class CodexAgentSession:
         except Exception as exc:
             raise self._runtime._classify_exception(exc) from exc
         self._thread = thread
-        self._thread_effort = effort
+        self._thread_effort = cache_key
         return thread
 
     def _fire_session_start_if_needed(self) -> None:

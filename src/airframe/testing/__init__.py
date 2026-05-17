@@ -30,14 +30,21 @@ test dependency group into an optional ``airframe-agents[testing]``
 extra so adapter authors can ``pip install airframe-agents[testing]``
 and pick up the contracts.
 
-The Phase 0 contracts are *structural* (no network, no auth — they
-run in default unit-test mode). Behavioural / integration contracts
-(401 ⇒ ``RuntimeAuthError``; successful call ⇒ ``input_tokens > 0``;
-``schema=`` round-trip) require live vendor credentials and will
-land alongside Phase 1's streaming/multi-turn integration tests in
-:mod:`airframe.testing.integration`.
+Structural contracts (Phase 0 + Phase 1–5 capability-vs-API
+agreement) live in :mod:`airframe.testing.contracts` and run in
+default unit-test mode — no network, no auth. They cover the
+"declared capability matches the gate's behaviour" surface for
+every Phase 0–5 feature.
+
+Behavioural contracts that require live vendor credentials live in
+:mod:`airframe.testing.integration`. They're parametrized over
+provider id and gated by ``pytest.mark.integration`` so the default
+suite stays passing without credentials. Run them with
+``pytest -m integration`` once the relevant adapter's auth chain is
+satisfied (e.g. ``ANTHROPIC_API_KEY`` for ``claude``,
+``GITHUB_TOKEN`` for ``github-copilot``).
 """
 
 from __future__ import annotations
 
-__all__ = ["contracts"]
+__all__ = ["contracts", "integration"]

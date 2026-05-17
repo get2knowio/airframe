@@ -35,7 +35,7 @@ Usage::
         --image-url https://example.com/cat.png
     uv run python examples/probe_vision.py --image-path /tmp/photo.jpg
 
-Defaults to ``opencode`` (OpenAI-compat, the only adapter that
+Defaults to ``opencode-zen`` (OpenAI-compat, the only adapter that
 natively handles every ``ImageInput`` variant) and the ``path``
 variant against an auto-generated 1×1 test PNG.
 """
@@ -93,8 +93,8 @@ async def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument(
         "--provider",
-        default="opencode",
-        help="Provider ID (default: opencode). Any from list_providers().",
+        default="opencode-zen",
+        help="Provider ID (default: opencode-zen). Any from list_providers().",
     )
     parser.add_argument(
         "--variant",

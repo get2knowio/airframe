@@ -1,15 +1,18 @@
-"""``OpenCodeZenRuntime`` — OpenAI-compatible adapter for the opencode-go Zen gateway.
+"""``OpenCodeZenRuntime`` — OpenAI-compatible adapter for the per-token Zen gateway.
 
 Thin subclass of :class:`OpenAICompatibleRuntime` configured for
-``https://opencode.ai/zen/v1`` — the OpenAI-compatible HTTP endpoint
-that fronts the user's opencode-go subscription.
+``https://opencode.ai/zen/v1`` — the per-token-billed Zen catalog.
+Distinct from :class:`OpenCodeGoRuntime` (``https://opencode.ai/zen/go/v1``),
+which serves the flat-fee subscription catalog. The two share an auth
+scheme but bill differently and expose different model catalogs; pick
+the runtime that matches how you're paying.
 
 **Auth.** The API key resolves in this order:
 
 1. Explicit ``api_key=`` constructor argument.
 2. ``OPENCODE_API_KEY`` env var.
-3. ``~/.local/share/opencode/auth.json::opencode-go.key`` — the key
-   minted by ``opencode auth login opencode-go``.
+3. ``~/.local/share/opencode/auth.json::opencode.key`` — the key
+   minted by ``opencode auth login opencode``.
 
 If none is available, the first call raises :class:`RuntimeAuthError`.
 """
@@ -58,7 +61,7 @@ class OpenCodeZenRuntime(OpenAICompatibleRuntime):
 
     label = "opencode_zen"
 
-    PROVIDER_ID: ClassVar[str] = "opencode"
+    PROVIDER_ID: ClassVar[str] = "opencode-zen"
     DEFAULT_BASE_URL: ClassVar[str] = DEFAULT_ZEN_BASE_URL
     DEFAULT_MODEL: ClassVar[str] = DEFAULT_ZEN_MODEL
     METADATA: ClassVar[dict[str, ModelMeta]] = _METADATA
@@ -91,7 +94,7 @@ class OpenCodeZenRuntime(OpenAICompatibleRuntime):
         if auth_path.exists():
             try:
                 data = json.loads(auth_path.read_text())
-                key = (data.get("opencode-go") or {}).get("key")
+                key = (data.get("opencode") or {}).get("key")
                 if isinstance(key, str) and key:
                     return key
             except (OSError, json.JSONDecodeError) as exc:
@@ -102,7 +105,8 @@ class OpenCodeZenRuntime(OpenAICompatibleRuntime):
                 )
         raise RuntimeAuthError(
             "OpenCodeZenRuntime: no API key found. Set OPENCODE_API_KEY, "
-            "pass api_key= explicitly, or run `opencode auth login opencode-go`."
+            "pass api_key= explicitly, or run `opencode auth login opencode`. "
+            "For the flat-fee subscription path, use OpenCodeGoRuntime instead."
         )
 
 

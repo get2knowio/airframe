@@ -69,7 +69,7 @@ Key invariants when editing:
 - **Provider IDs are strict; no aliases.** `"anthropic"` and
   `"openai"` are reserved for future direct-API adapters; today's
   subscription-path adapters use `"claude"`, `"github-copilot"`,
-  `"codex"`, `"opencode"`.
+  `"codex"`, `"opencode-zen"`, `"opencode-go"`.
 - **`CopilotRuntime.validate_binding` deliberately rejects
   `claude-*` model IDs** — Claude via Copilot Chat Completions emits
   markdown-fenced JSON instead of honouring tool calls. Route Claude
@@ -98,8 +98,10 @@ adapter inherits it.
 
 ### Phasing context
 
-`docs/implementation-plan.md` and `docs/feature-roadmap.md` describe
-the phased rollout. The current release (v0.3.0) is **Phase 0 —
+`dev-docs/implementation-plan.md` and `dev-docs/feature-roadmap.md`
+describe the phased rollout. These docs are dev-internal — they
+don't ship in the PyPI sdist (see `[tool.hatch.build.targets.sdist]`).
+The current release (v0.3.0) is **Phase 0 —
 Foundations**: the `Feature` enum, `ProviderOptions` namespaces,
 `unwrap`, and entry-point discovery all shipped intentionally
 *before* substantive feature work, so later phases can land without

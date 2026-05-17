@@ -1593,3 +1593,104 @@ async def test_budget_caps_none_open_cleanly(mock_sdk: dict[str, Any]) -> None:
             await sess.execute(f"turn {i}")
     finally:
         await sess.close()
+
+
+# ---------------------------------------------------------------------------
+# Provider options (v0.5.0-readiness — CodexOptions wired)
+# ---------------------------------------------------------------------------
+
+
+async def test_codex_options_working_directory_lands_on_thread_options(
+    mock_sdk: dict[str, Any],
+) -> None:
+    """``CodexOptions.working_directory`` rides into ``ThreadOptions.workingDirectory``."""
+    from airframe import CodexOptions
+
+    rt = CodexRuntime()
+    sess = rt.session(provider_options=CodexOptions(working_directory="/tmp/wd"))
+    try:
+        await sess.execute("hi")
+    finally:
+        await sess.close()
+    opts = mock_sdk["client"].start_thread.call_args.args[0]
+    assert opts["workingDirectory"] == "/tmp/wd"
+
+
+async def test_codex_options_additional_directories_lands_on_thread_options(
+    mock_sdk: dict[str, Any],
+) -> None:
+    from airframe import CodexOptions
+
+    rt = CodexRuntime()
+    sess = rt.session(provider_options=CodexOptions(additional_directories=("/a", "/b")))
+    try:
+        await sess.execute("hi")
+    finally:
+        await sess.close()
+    opts = mock_sdk["client"].start_thread.call_args.args[0]
+    assert opts["additionalDirectories"] == ["/a", "/b"]
+
+
+async def test_codex_options_network_and_web_search_flags(mock_sdk: dict[str, Any]) -> None:
+    from airframe import CodexOptions
+
+    rt = CodexRuntime()
+    sess = rt.session(
+        provider_options=CodexOptions(network_access_enabled=True, web_search_enabled=True)
+    )
+    try:
+        await sess.execute("hi")
+    finally:
+        await sess.close()
+    opts = mock_sdk["client"].start_thread.call_args.args[0]
+    assert opts["networkAccessEnabled"] is True
+    assert opts["webSearchEnabled"] is True
+
+
+async def test_codex_options_default_omits_kwargs(mock_sdk: dict[str, Any]) -> None:
+    rt = CodexRuntime()
+    sess = rt.session()
+    try:
+        await sess.execute("hi")
+    finally:
+        await sess.close()
+    opts = mock_sdk["client"].start_thread.call_args.args[0]
+    assert "workingDirectory" not in opts
+    assert "additionalDirectories" not in opts
+    assert "networkAccessEnabled" not in opts
+    assert "webSearchEnabled" not in opts
+
+
+async def test_codex_options_change_between_turns_forces_thread_rebuild(
+    mock_sdk: dict[str, Any],
+) -> None:
+    """A ``CodexOptions`` change across same-session turns forces a rebuild —
+    fields bake at start_thread() time and the cache key carries the fingerprint."""
+    from airframe import CodexOptions
+
+    rt = CodexRuntime()
+    # Same session, two turns with different options — the second turn
+    # rebuilds the Thread because the fingerprint changed.
+    sess = rt.session(provider_options=CodexOptions(network_access_enabled=False))
+    try:
+        await sess.execute("a")
+        # Manually swap on the live session (private-attr touch is the only
+        # path to test cache invalidation without opening a fresh session).
+        sess._provider_options = CodexOptions(network_access_enabled=True)  # type: ignore[attr-defined]
+        await sess.execute("b")
+    finally:
+        await sess.close()
+    assert mock_sdk["client"].start_thread.call_count == 2
+
+
+async def test_codex_options_wrong_namespace_raises_unsupported_feature(
+    mock_sdk: dict[str, Any],
+) -> None:
+    from airframe import OpenAICompatOptions
+    from airframe.errors import UnsupportedFeatureError
+
+    rt = CodexRuntime()
+    with pytest.raises(UnsupportedFeatureError) as exc_info:
+        rt.session(provider_options=OpenAICompatOptions())
+    assert "OpenAICompatOptions" in str(exc_info.value)
+    assert "CodexOptions" in str(exc_info.value)

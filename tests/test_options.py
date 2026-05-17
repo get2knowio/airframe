@@ -1,9 +1,16 @@
 """Unit tests for :mod:`airframe.options`.
 
-Phase 0 ships the scaffold with empty dataclasses. These tests pin
-the *shape* of the public surface — they exist mostly to catch
-accidental field renames or base-class introductions that would break
-the tagged-union pattern.
+Pins the *shape* of the public surface — frozen+slots, tagged union
+(no shared base), value-equality / hashability. The dataclass
+*bodies* (which knobs each adapter exposes) are tested per-adapter
+in the corresponding ``tests/test_*_session.py`` file; this module
+only owns the cross-cutting invariants.
+
+Phase 0 shipped the namespaces empty; v0.5.0-readiness populates
+:class:`ClaudeOptions` (three fields), :class:`CopilotOptions`
+(four), :class:`CodexOptions` (four), :class:`OpenAICompatOptions`
+(six) and threads each adapter's fields through into the matching
+vendor SDK at session-build time.
 """
 
 from __future__ import annotations
@@ -54,20 +61,39 @@ def test_options_have_no_common_base() -> None:
         )
 
 
-def test_options_are_empty_in_phase_0() -> None:
-    """Bodies are deliberately empty pending Phase 2+ feature work.
+def test_options_field_inventory() -> None:
+    """Pin the per-namespace populated field set.
 
-    Populating fields before a feature consumes them would lock names
-    without a real user to validate the shape against. This test
-    documents that decision — if a later phase adds a field, it
-    should also update this test to match.
+    Field additions are additive (consumers default-construct or
+    cherry-pick), so this test exists mainly to catch accidental
+    *removals* / *renames* that would break consumers branching on
+    ``ClaudeOptions.fork_session`` etc.
     """
-    for cls in (ClaudeOptions, CopilotOptions, CodexOptions, OpenAICompatOptions):
-        # __dataclass_fields__ is the canonical introspection surface.
-        assert cls.__dataclass_fields__ == {}, (
-            f"{cls.__name__} should have no fields yet "
-            f"(Phase 0 scaffold); found {list(cls.__dataclass_fields__)}"
-        )
+    assert set(ClaudeOptions.__dataclass_fields__) == {
+        "append_system_prompt",
+        "fork_session",
+        "strict_mcp_config",
+    }
+    assert set(CopilotOptions.__dataclass_fields__) == {
+        "available_tools",
+        "excluded_tools",
+        "skill_directories",
+        "working_directory",
+    }
+    assert set(CodexOptions.__dataclass_fields__) == {
+        "working_directory",
+        "additional_directories",
+        "network_access_enabled",
+        "web_search_enabled",
+    }
+    assert set(OpenAICompatOptions.__dataclass_fields__) == {
+        "prompt_cache_key",
+        "prompt_cache_retention",
+        "service_tier",
+        "safety_identifier",
+        "verbosity",
+        "store",
+    }
 
 
 def test_options_constructible_with_no_args() -> None:

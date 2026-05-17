@@ -156,7 +156,7 @@ def test_unwired_features_stay_false(adapters: list) -> None:
         for feature in must_be_false:
             assert not adapter.supports(feature), (
                 f"{type(adapter).__name__} declares {feature.name} but its API "
-                f"hasn't shipped yet — see docs/implementation-plan.md for the "
+                f"hasn't shipped yet — see dev-docs/implementation-plan.md for the "
                 f"phase that wires it"
             )
 

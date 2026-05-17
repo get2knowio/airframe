@@ -100,6 +100,7 @@ __version__ = "0.5.0"
 from airframe.adapters.claude_code import ClaudeCodeRuntime
 from airframe.adapters.codex import CodexRuntime
 from airframe.adapters.copilot import CopilotRuntime
+from airframe.adapters.opencode_go import OpenCodeGoRuntime
 from airframe.adapters.opencode_zen import OpenCodeZenRuntime
 
 __all__ = [
@@ -127,6 +128,7 @@ __all__ = [
     "McpServerRef",
     "ModelInfo",
     "OpenAICompatOptions",
+    "OpenCodeGoRuntime",
     "OpenCodeZenRuntime",
     "PermissionCallback",
     "PermissionDecision",

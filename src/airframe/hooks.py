@@ -1,6 +1,6 @@
 """:class:`HookEvent` — typed observation of session lifecycle.
 
-Phase 5 of the [implementation plan](../../docs/implementation-plan.md)
+Phase 5 of the [implementation plan](../../dev-docs/implementation-plan.md)
 introduces ``on_event=`` on :meth:`AgentRuntime.session`. The
 adapter translates its vendor SDK's native event stream into
 :class:`HookEvent` instances and fans them out to the user's

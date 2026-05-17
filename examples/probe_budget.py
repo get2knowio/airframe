@@ -74,7 +74,7 @@ def _print_matrix() -> None:
     print("\nBudget-capability matrix (Phase 5 Iteration D):")
     print("  Adapter             | BUDGET_USD | BUDGET_TURN")
     print("  --------------------|------------|------------")
-    for pid in ("claude", "github-copilot", "codex", "opencode"):
+    for pid in ("claude", "github-copilot", "codex", "opencode-zen", "opencode-go"):
         try:
             cls = runtime_for(pid)
             usd = Feature.BUDGET_USD_CAP in cls.SUPPORTED_FEATURES

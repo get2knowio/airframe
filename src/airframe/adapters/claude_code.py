@@ -24,13 +24,24 @@ The CLI enforces the schema server-side and the validated payload
 lands on :attr:`ResultMessage.structured_output`. No tool-forcing,
 no MCP shim, no system-prompt prefix.
 
-**Lifecycle.** ``execute()`` lazily constructs a
-:class:`ClaudeSDKClient` keyed by ``(schema, system, model)`` — any
-change to that triple forces a reconnect because ``output_format``
-is baked into ``ClaudeAgentOptions`` at connect time. Subsequent
-``execute()`` calls reuse the subprocess (warm cache accrues).
-``reset()`` disconnects; the next ``execute()`` reconnects.
-``close()`` is equivalent to ``reset()`` here.
+**Lifecycle.** Phase 1 Iteration G moved per-conversation state off
+the runtime onto :class:`ClaudeCodeSession`. The runtime is now
+**sessionless** — it holds only the long-lived configuration
+(model id, OAuth token override, ``max_turns`` default). Open a
+session with :meth:`session`; each session lazily constructs its
+own :class:`ClaudeSDKClient` keyed by
+``(schema, thinking, attachments, tools, mcp_servers, on_permission,
+max_turns)``. Cache-key changes within one session force a
+reconnect (the SDK bakes most of those into
+:class:`ClaudeAgentOptions` at connect time); separate sessions
+never share a client. ``runtime.reset()`` and ``runtime.close()``
+are no-ops; ``session.close()`` disconnects the underlying SDK
+client and is idempotent.
+
+``runtime.execute(...)`` is sugar for
+``runtime.session(...).execute(...) + close()`` — single-turn,
+ephemeral subprocess; the same path as the bespoke session but
+torn down per call.
 
 **Cost.** The SDK exposes ``total_cost_usd`` on the
 ``ResultMessage`` — populated directly into the
@@ -70,6 +81,7 @@ from airframe.events import (
 from airframe.features import Feature
 from airframe.inputs import Prompt
 from airframe.models import ModelInfo
+from airframe.options import ClaudeOptions
 from airframe.protocol import (
     AgentRuntime,
     AgentSession,
@@ -82,6 +94,7 @@ from airframe.sessions import (
     _check_hooks_supported,
     _check_mcp_servers_supported,
     _check_permission_supported,
+    _check_provider_options,
     _check_tools_supported,
     _compose_mcp_headers,
     _enforce_budget_pre_turn,
@@ -96,6 +109,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
 
     from airframe.hooks import HookEvent
+    from airframe.options import ProviderOptions
     from airframe.permission import PermissionCallback
 
 logger = logging.getLogger(__name__)
@@ -378,7 +392,7 @@ class ClaudeCodeRuntime(AgentRuntime):
         mcp_servers: list[McpServerRef] | None = None,
         on_permission: PermissionCallback | None = None,
         on_event: Callable[[HookEvent], None] | None = None,
-        provider_options: Any | None = None,
+        provider_options: ProviderOptions | None = None,
     ) -> AgentSession:
         """Open a bespoke :class:`ClaudeCodeSession`.
 
@@ -427,7 +441,24 @@ class ClaudeCodeRuntime(AgentRuntime):
                 non-None raises until Phase 5 Iteration C wires
                 :attr:`ClaudeAgentOptions.hooks` +
                 ``include_hook_events=True``.
-            provider_options: Reserved for Phase 2+ (currently unused).
+            provider_options: Optional :class:`ClaudeOptions` namespace
+                carrying Claude-only knobs. Three populated fields
+                as of v0.5.0:
+
+                * ``append_system_prompt`` — text appended to the
+                  resolved system prompt (vs. ``system=`` replacing
+                  it). Lands on
+                  :attr:`ClaudeAgentOptions.append_system_prompt`.
+                * ``fork_session`` — when combined with ``resume=``,
+                  forks instead of resuming. Lands on
+                  :attr:`ClaudeAgentOptions.fork_session`.
+                * ``strict_mcp_config`` — strict MCP tool allowlisting.
+                  Lands on
+                  :attr:`ClaudeAgentOptions.strict_mcp_config`.
+
+                Passing :class:`CopilotOptions` /
+                :class:`CodexOptions` / :class:`OpenAICompatOptions`
+                here raises :class:`UnsupportedFeatureError`.
         """
         _check_tools_supported(
             tools,
@@ -449,9 +480,14 @@ class ClaudeCodeRuntime(AgentRuntime):
             adapter_label=self.label,
             supports=self.supports,
         )
-        # provider_options accepted but unused — Phase 2+ fills each
-        # ProviderOptions dataclass as the corresponding feature lands.
-        del provider_options
+        _check_provider_options(
+            provider_options,
+            expected_type=ClaudeOptions,
+            adapter_label=self.label,
+        )
+        # _check_provider_options narrowed the type; the cast keeps mypy
+        # happy without a runtime isinstance second-check.
+        claude_options = provider_options if isinstance(provider_options, ClaudeOptions) else None
         model_id = self._resolve_model(model) if model is not None else self._default_model
         return ClaudeCodeSession(
             self,
@@ -462,6 +498,7 @@ class ClaudeCodeRuntime(AgentRuntime):
             mcp_servers=mcp_servers,
             on_permission=on_permission,
             on_event=on_event,
+            provider_options=claude_options,
         )
 
     async def list_models(self) -> list[ModelInfo]:
@@ -633,6 +670,7 @@ class ClaudeCodeSession:
         mcp_servers: list[McpServerRef] | None = None,
         on_permission: PermissionCallback | None = None,
         on_event: Callable[[HookEvent], None] | None = None,
+        provider_options: ClaudeOptions | None = None,
     ) -> None:
         self._runtime = runtime
         self._resume = resume
@@ -691,6 +729,12 @@ class ClaudeCodeSession:
         # connects (cache-key invalidations during a session)
         # don't double-fire.
         self._session_start_fired = False
+        # ProviderOptions namespace — Claude-specific knobs that don't
+        # fit the portable surface. All three populated fields
+        # (append_system_prompt, fork_session, strict_mcp_config) are
+        # baked at connect time, so the namespace identity joins the
+        # cache key fragment.
+        self._provider_options: ClaudeOptions | None = provider_options
         # Phase 5 Iteration D: per-session running totals for budget
         # enforcement. ``_cumulative_cost_usd`` accumulates the cost
         # field of every :class:`RuntimeResult` the session produces;
@@ -992,10 +1036,11 @@ class ClaudeCodeSession:
         mcp_fragment = f"mcp={self._mcp_servers_fingerprint}"
         permission_fragment = f"perm={self._permission_fingerprint}"
         max_turns_fragment = f"max_turns={max_turns}"
+        provider_options_fragment = f"po={_claude_options_fingerprint(self._provider_options)}"
         cache_key = (
             f"{schema_fragment}|{thinking_fragment}|{attachments_fragment}|"
             f"{tools_fragment}|{mcp_fragment}|{permission_fragment}|"
-            f"{max_turns_fragment}"
+            f"{max_turns_fragment}|{provider_options_fragment}"
         )
         if self._client is not None and self._client_key == cache_key:
             return self._client
@@ -1052,6 +1097,14 @@ class ClaudeCodeSession:
             options_kwargs["can_use_tool"] = _translate_permission_for_claude(self._on_permission)
         if self._on_event is not None:
             options_kwargs["hooks"] = _build_claude_hooks_config(self._on_event, session=self)
+        po = self._provider_options
+        if po is not None:
+            if po.append_system_prompt is not None:
+                options_kwargs["append_system_prompt"] = po.append_system_prompt
+            if po.fork_session:
+                options_kwargs["fork_session"] = True
+            if po.strict_mcp_config:
+                options_kwargs["strict_mcp_config"] = True
 
         # Bring in the auto-allowed Read tool for attachments, the
         # in-process MCP server for FunctionTools, and the per-name
@@ -1584,6 +1637,24 @@ def _permission_fingerprint(callback: PermissionCallback | None) -> str:
     if callback is None:
         return "__no_permission__"
     return f"id={id(callback)}|type={type(callback).__name__}"
+
+
+def _claude_options_fingerprint(po: ClaudeOptions | None) -> str:
+    """Deterministic fingerprint of the :class:`ClaudeOptions` value.
+
+    All three populated fields (``append_system_prompt``,
+    ``fork_session``, ``strict_mcp_config``) bake into
+    :class:`ClaudeAgentOptions` at connect time, so a change
+    between turns must force reconnect (same pattern as ``schema=``,
+    ``tools=``, ``on_permission=``). Value-based — dataclasses are
+    frozen, so a structurally-equal instance fingerprints
+    identically.
+    """
+    if po is None:
+        return "__no_provider_options__"
+    return (
+        f"asp={po.append_system_prompt!r}|fork={po.fork_session}|strict_mcp={po.strict_mcp_config}"
+    )
 
 
 #: Map Claude's native ``hook_event_name`` values onto airframe's

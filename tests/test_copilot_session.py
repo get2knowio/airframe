@@ -2254,3 +2254,108 @@ async def test_stream_honours_max_budget_usd_cap(mock_sdk: dict[str, Any]) -> No
                 pass
     finally:
         await sess.close()
+
+
+# ---------------------------------------------------------------------------
+# Provider options (v0.5.0-readiness — CopilotOptions wired)
+# ---------------------------------------------------------------------------
+
+
+async def test_copilot_options_available_tools_lands_on_create_session(
+    mock_sdk: dict[str, Any],
+) -> None:
+    from airframe import CopilotOptions
+
+    async def fake_send(prompt: str, *, timeout: float, **_: Any) -> None:
+        _fire(mock_sdk["handlers"], _FakeEvent(_FakeUsage()))
+        _fire(mock_sdk["handlers"], _FakeEvent(_FakeAssistantMessage("ok")))
+
+    mock_sdk["session"].send_and_wait = AsyncMock(side_effect=fake_send)
+    rt = CopilotRuntime()
+    sess = rt.session(provider_options=CopilotOptions(available_tools=("read", "shell")))
+    try:
+        await sess.execute("hi")
+    finally:
+        await sess.close()
+    call = mock_sdk["client"].create_session.await_args_list[0]
+    assert call.kwargs["available_tools"] == ["read", "shell"]
+
+
+async def test_copilot_options_excluded_tools_lands_on_create_session(
+    mock_sdk: dict[str, Any],
+) -> None:
+    from airframe import CopilotOptions
+
+    async def fake_send(prompt: str, *, timeout: float, **_: Any) -> None:
+        _fire(mock_sdk["handlers"], _FakeEvent(_FakeUsage()))
+        _fire(mock_sdk["handlers"], _FakeEvent(_FakeAssistantMessage("ok")))
+
+    mock_sdk["session"].send_and_wait = AsyncMock(side_effect=fake_send)
+    rt = CopilotRuntime()
+    sess = rt.session(provider_options=CopilotOptions(excluded_tools=("write",)))
+    try:
+        await sess.execute("hi")
+    finally:
+        await sess.close()
+    call = mock_sdk["client"].create_session.await_args_list[0]
+    assert call.kwargs["excluded_tools"] == ["write"]
+
+
+async def test_copilot_options_skill_directories_and_working_directory(
+    mock_sdk: dict[str, Any],
+) -> None:
+    from airframe import CopilotOptions
+
+    async def fake_send(prompt: str, *, timeout: float, **_: Any) -> None:
+        _fire(mock_sdk["handlers"], _FakeEvent(_FakeUsage()))
+        _fire(mock_sdk["handlers"], _FakeEvent(_FakeAssistantMessage("ok")))
+
+    mock_sdk["session"].send_and_wait = AsyncMock(side_effect=fake_send)
+    rt = CopilotRuntime()
+    sess = rt.session(
+        provider_options=CopilotOptions(
+            skill_directories=("/tmp/skills", "/opt/skills"),
+            working_directory="/workspaces/foo",
+        )
+    )
+    try:
+        await sess.execute("hi")
+    finally:
+        await sess.close()
+    call = mock_sdk["client"].create_session.await_args_list[0]
+    assert call.kwargs["skill_directories"] == ["/tmp/skills", "/opt/skills"]
+    assert call.kwargs["working_directory"] == "/workspaces/foo"
+
+
+async def test_copilot_options_default_omits_kwargs(mock_sdk: dict[str, Any]) -> None:
+    """No ``provider_options=`` → none of the CopilotOptions kwargs land."""
+
+    async def fake_send(prompt: str, *, timeout: float, **_: Any) -> None:
+        _fire(mock_sdk["handlers"], _FakeEvent(_FakeUsage()))
+        _fire(mock_sdk["handlers"], _FakeEvent(_FakeAssistantMessage("ok")))
+
+    mock_sdk["session"].send_and_wait = AsyncMock(side_effect=fake_send)
+    rt = CopilotRuntime()
+    sess = rt.session()
+    try:
+        await sess.execute("hi")
+    finally:
+        await sess.close()
+    call = mock_sdk["client"].create_session.await_args_list[0]
+    assert "available_tools" not in call.kwargs
+    assert "excluded_tools" not in call.kwargs
+    assert "skill_directories" not in call.kwargs
+    assert "working_directory" not in call.kwargs
+
+
+async def test_copilot_options_wrong_namespace_raises_unsupported_feature(
+    mock_sdk: dict[str, Any],
+) -> None:
+    from airframe import ClaudeOptions
+    from airframe.errors import UnsupportedFeatureError
+
+    rt = CopilotRuntime()
+    with pytest.raises(UnsupportedFeatureError) as exc_info:
+        rt.session(provider_options=ClaudeOptions())
+    assert "ClaudeOptions" in str(exc_info.value)
+    assert "CopilotOptions" in str(exc_info.value)

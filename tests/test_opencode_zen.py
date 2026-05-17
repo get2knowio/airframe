@@ -114,9 +114,22 @@ def test_resolve_api_key_env(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_resolve_api_key_from_auth_file(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("OPENCODE_API_KEY", raising=False)
     auth = tmp_path / "auth.json"
-    auth.write_text(json.dumps({"opencode-go": {"key": "sk-file-key"}}))
+    auth.write_text(json.dumps({"opencode": {"key": "sk-file-key"}}))
     monkeypatch.setenv("OPENCODE_AUTH_PATH", str(auth))
     assert _resolve_api_key(None) == "sk-file-key"
+
+
+def test_resolve_api_key_does_not_steal_go_subscription_key(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Zen and Go share an auth file but live under distinct slots — the
+    Zen adapter must not pick up the opencode-go subscription key."""
+    monkeypatch.delenv("OPENCODE_API_KEY", raising=False)
+    auth = tmp_path / "auth.json"
+    auth.write_text(json.dumps({"opencode-go": {"key": "sk-go-only"}}))
+    monkeypatch.setenv("OPENCODE_AUTH_PATH", str(auth))
+    with pytest.raises(RuntimeAuthError):
+        _resolve_api_key(None)
 
 
 def test_resolve_api_key_missing_raises(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -169,16 +182,17 @@ def test_compute_cost_usd_unknown_model_is_none() -> None:
 
 
 def test_validate_binding_accepts_canonical_provider() -> None:
-    """v0.2.0 dropped the `opencode-go` / `opencode-zen` aliases — just `opencode`."""
+    """Zen's canonical provider ID is `opencode-zen` (sibling of `opencode-go`)."""
     rt = OpenCodeZenRuntime()
-    assert rt.validate_binding(ProviderModel("opencode", "gpt-5-nano"))
+    assert rt.validate_binding(ProviderModel("opencode-zen", "gpt-5-nano"))
 
 
-def test_validate_binding_rejects_aliases_and_others() -> None:
-    """Legacy aliases (`opencode-go`, `opencode-zen`) no longer accepted."""
+def test_validate_binding_rejects_other_providers() -> None:
     rt = OpenCodeZenRuntime()
+    # Bare `opencode` is no longer a provider ID — must be opencode-zen or opencode-go.
+    assert not rt.validate_binding(ProviderModel("opencode", "gpt-5-nano"))
+    # The sibling subscription path is a distinct adapter.
     assert not rt.validate_binding(ProviderModel("opencode-go", "qwen3.6-plus"))
-    assert not rt.validate_binding(ProviderModel("opencode-zen", "big-pickle"))
     assert not rt.validate_binding(ProviderModel("anthropic", "claude-haiku-4-5"))
     assert not rt.validate_binding(ProviderModel("github-copilot", "gpt-5.3-codex"))
 
@@ -207,7 +221,7 @@ async def test_execute_returns_typed_payload(mock_client: MagicMock) -> None:
     assert result.cost.output_tokens == 50
     assert result.cost.cache_read_tokens == 0
     assert result.cost.cache_write_tokens == 0
-    assert result.cost.provider_id == "opencode"
+    assert result.cost.provider_id == "opencode-zen"
     assert result.cost.model_id == "gpt-5-nano"
     # gpt-5-nano is in the pricing map: 0.1 * 0.0001 + 0.05 * 0.0002 = 0.00002
     assert result.cost.cost_usd == pytest.approx(0.00002, rel=1e-3)

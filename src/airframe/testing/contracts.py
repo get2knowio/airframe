@@ -383,6 +383,378 @@ def test_session_resume_not_implemented_until_feature_flips(adapter_runtime: Any
         adapter_runtime.session(resume="any-string")
 
 
+# ---------------------------------------------------------------------------
+# Phase 2 contracts — inputs & reasoning
+# ---------------------------------------------------------------------------
+
+
+def test_session_execute_signature_accepts_thinking_kwarg(adapter_runtime: Any) -> None:
+    """:meth:`AgentSession.execute` accepts the ``thinking=`` kwarg.
+
+    Structural check: the kwarg must exist on every adapter's
+    :meth:`execute` signature regardless of whether REASONING_EFFORT
+    is declared (the protocol requires the signature; the gate
+    inside the method enforces capability).
+    """
+    import inspect
+
+    sess = adapter_runtime.session()
+    try:
+        sig = inspect.signature(type(sess).execute)
+        assert "thinking" in sig.parameters, (
+            f"{type(sess).__name__}.execute must accept thinking= per the AgentSession protocol"
+        )
+    finally:
+        import asyncio
+
+        asyncio.run(_safe_close(sess))
+
+
+async def test_session_thinking_kwarg_declined_when_capability_false(
+    adapter_runtime: Any,
+) -> None:
+    """Adapters declining REASONING_EFFORT raise on ``thinking=`` use.
+
+    Positive case (capability declared) is exercised behaviourally
+    in :mod:`airframe.testing.integration` — it requires live
+    credentials.
+    """
+    if adapter_runtime.supports(Feature.REASONING_EFFORT):
+        return  # behavioural; live-credentials suite
+    from airframe.errors import UnsupportedFeatureError
+
+    sess = adapter_runtime.session()
+    try:
+        with pytest.raises(UnsupportedFeatureError):
+            await sess.execute("hi", thinking="medium")
+    finally:
+        await sess.close()
+
+
+async def test_session_polymorphic_prompt_declined_when_vision_false(
+    adapter_runtime: Any,
+) -> None:
+    """Adapters declining VISION_INPUT raise on a list-shaped prompt.
+
+    Positive case (vision-supporting adapters round-tripping an
+    :class:`ImageInput`) is behavioural — lives in the integration
+    suite where credentials and a real test image are available.
+    """
+    if adapter_runtime.supports(Feature.VISION_INPUT):
+        return
+    from airframe.errors import UnsupportedFeatureError
+    from airframe.inputs import ImageInput
+
+    sess = adapter_runtime.session()
+    try:
+        with pytest.raises(UnsupportedFeatureError):
+            await sess.execute(
+                ["caption:", ImageInput(path="/tmp/__nope__.png")],
+            )
+    finally:
+        await sess.close()
+
+
+# ---------------------------------------------------------------------------
+# Phase 3 contracts — function tools
+# ---------------------------------------------------------------------------
+
+
+def test_session_tools_kwarg_agrees_with_tools_function_capability(
+    adapter_runtime: Any,
+) -> None:
+    """``session(tools=[FunctionTool])`` agrees with :data:`Feature.TOOLS_FUNCTION`.
+
+    Adapters declaring TOOLS_FUNCTION accept the kwarg at session
+    construction without raising. Adapters declining must raise
+    :class:`UnsupportedFeatureError` with ``feature=TOOLS_FUNCTION``.
+    """
+    from pydantic import BaseModel
+
+    from airframe.errors import UnsupportedFeatureError
+    from airframe.tools import FunctionTool
+
+    class _Params(BaseModel):
+        x: int
+
+    async def _handler(p: BaseModel) -> int:
+        return p.x  # type: ignore[attr-defined]  # narrowed by params= at runtime
+
+    tool = FunctionTool(name="probe_t", description="t", params=_Params, handler=_handler)
+
+    if adapter_runtime.supports(Feature.TOOLS_FUNCTION):
+        sess = adapter_runtime.session(tools=[tool])
+        try:
+            assert isinstance(sess, AgentSession)
+        finally:
+            import asyncio
+
+            asyncio.run(_safe_close(sess))
+    else:
+        with pytest.raises(UnsupportedFeatureError) as exc:
+            adapter_runtime.session(tools=[tool])
+        assert exc.value.feature == Feature.TOOLS_FUNCTION, (
+            f"{type(adapter_runtime).__name__}: tools= decline must carry "
+            f"feature=TOOLS_FUNCTION; got {exc.value.feature!r}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Phase 4 contracts — MCP server refs
+# ---------------------------------------------------------------------------
+
+
+def test_session_mcp_servers_kwarg_agrees_with_transport_capabilities(
+    adapter_runtime: Any,
+) -> None:
+    """``session(mcp_servers=[McpServerRef(transport=X)])`` agrees with
+    the matching :data:`Feature.TOOLS_MCP_*` flag.
+
+    For each transport the adapter declares, a ref of that transport
+    must construct cleanly. For each transport the adapter declines,
+    the same ref must raise :class:`UnsupportedFeatureError` with
+    the matching feature attribute.
+    """
+    from airframe.errors import UnsupportedFeatureError
+    from airframe.tools import McpServerRef
+
+    matrix = [
+        (
+            Feature.TOOLS_MCP_STDIO,
+            McpServerRef(name="probe_stdio", transport="stdio", command=["echo"]),
+        ),
+        (
+            Feature.TOOLS_MCP_HTTP,
+            McpServerRef(name="probe_http", transport="http", url="https://example.com"),
+        ),
+        (
+            Feature.TOOLS_MCP_SSE,
+            McpServerRef(name="probe_sse", transport="sse", url="https://example.com"),
+        ),
+    ]
+
+    for feature, ref in matrix:
+        if adapter_runtime.supports(feature):
+            sess = adapter_runtime.session(mcp_servers=[ref])
+            try:
+                assert isinstance(sess, AgentSession)
+            finally:
+                import asyncio
+
+                asyncio.run(_safe_close(sess))
+        else:
+            with pytest.raises(UnsupportedFeatureError) as exc:
+                adapter_runtime.session(mcp_servers=[ref])
+            assert exc.value.feature == feature, (
+                f"{type(adapter_runtime).__name__}: mcp_servers=[{ref.transport}] "
+                f"decline must carry feature={feature.name}; got {exc.value.feature!r}"
+            )
+
+
+# ---------------------------------------------------------------------------
+# Phase 5 contracts — permission, hooks, budget
+# ---------------------------------------------------------------------------
+
+
+def test_session_on_permission_agrees_with_permission_callback_capability(
+    adapter_runtime: Any,
+) -> None:
+    """``session(on_permission=...)`` agrees with :data:`Feature.PERMISSION_CALLBACK`.
+
+    Adapters declaring the flag accept the callback without raising.
+    Adapters declining raise :class:`UnsupportedFeatureError` with
+    ``feature=PERMISSION_CALLBACK``.
+    """
+    from airframe.errors import UnsupportedFeatureError
+    from airframe.permission import PermissionCallback, PermissionDecision, PermissionRequest
+
+    class _Cb(PermissionCallback):
+        async def handle(self, request: PermissionRequest) -> PermissionDecision:
+            return "allow"
+
+    cb = _Cb()
+    if adapter_runtime.supports(Feature.PERMISSION_CALLBACK):
+        sess = adapter_runtime.session(on_permission=cb)
+        try:
+            assert isinstance(sess, AgentSession)
+        finally:
+            import asyncio
+
+            asyncio.run(_safe_close(sess))
+    else:
+        with pytest.raises(UnsupportedFeatureError) as exc:
+            adapter_runtime.session(on_permission=cb)
+        assert exc.value.feature == Feature.PERMISSION_CALLBACK, (
+            f"{type(adapter_runtime).__name__}: on_permission decline must "
+            f"carry feature=PERMISSION_CALLBACK; got {exc.value.feature!r}"
+        )
+
+
+def test_session_on_event_agrees_with_lifecycle_hooks_capability(
+    adapter_runtime: Any,
+) -> None:
+    """``session(on_event=...)`` agrees with :data:`Feature.LIFECYCLE_HOOKS`.
+
+    Adapters declaring the flag accept the observer without raising.
+    Adapters declining raise :class:`UnsupportedFeatureError` with
+    ``feature=LIFECYCLE_HOOKS``.
+    """
+    from airframe.errors import UnsupportedFeatureError
+    from airframe.hooks import HookEvent
+
+    def _observer(_e: HookEvent) -> None:
+        pass
+
+    if adapter_runtime.supports(Feature.LIFECYCLE_HOOKS):
+        sess = adapter_runtime.session(on_event=_observer)
+        try:
+            assert isinstance(sess, AgentSession)
+        finally:
+            import asyncio
+
+            asyncio.run(_safe_close(sess))
+    else:
+        with pytest.raises(UnsupportedFeatureError) as exc:
+            adapter_runtime.session(on_event=_observer)
+        assert exc.value.feature == Feature.LIFECYCLE_HOOKS, (
+            f"{type(adapter_runtime).__name__}: on_event decline must "
+            f"carry feature=LIFECYCLE_HOOKS; got {exc.value.feature!r}"
+        )
+
+
+def test_emittable_hook_kinds_subset_of_eight_literals(adapter_runtime: Any) -> None:
+    """Adapters declaring LIFECYCLE_HOOKS expose ``EMITTABLE_HOOK_KINDS``
+    that is a subset of the eight canonical :data:`HookEventKind` literals.
+
+    Pins the shape lock: an adapter cannot invent a new ``kind``
+    string. Adapters declining LIFECYCLE_HOOKS may omit the ClassVar
+    entirely.
+    """
+    if not adapter_runtime.supports(Feature.LIFECYCLE_HOOKS):
+        return
+    canonical = {
+        "session_start",
+        "session_end",
+        "user_prompt_submit",
+        "pre_tool_use",
+        "post_tool_use",
+        "tool_failure",
+        "pre_compact",
+        "rate_limit",
+    }
+    kinds = getattr(type(adapter_runtime), "EMITTABLE_HOOK_KINDS", None)
+    assert kinds is not None, (
+        f"{type(adapter_runtime).__name__} declares LIFECYCLE_HOOKS but has "
+        f"no EMITTABLE_HOOK_KINDS ClassVar"
+    )
+    assert set(kinds) <= canonical, (
+        f"{type(adapter_runtime).__name__}.EMITTABLE_HOOK_KINDS contains "
+        f"non-canonical kinds: {set(kinds) - canonical}"
+    )
+
+
+def test_session_execute_signature_accepts_budget_kwargs(adapter_runtime: Any) -> None:
+    """:meth:`AgentSession.execute` accepts ``max_turns=`` and ``max_budget_usd=``.
+
+    Structural check — both kwargs are protocol surface regardless
+    of whether the capability is declared.
+    """
+    import inspect
+
+    sess = adapter_runtime.session()
+    try:
+        sig = inspect.signature(type(sess).execute)
+        assert "max_turns" in sig.parameters
+        assert "max_budget_usd" in sig.parameters
+    finally:
+        import asyncio
+
+        asyncio.run(_safe_close(sess))
+
+
+async def test_session_max_turns_declined_when_budget_turn_cap_false(
+    adapter_runtime: Any,
+) -> None:
+    """Adapters declining BUDGET_TURN_CAP raise on ``max_turns=`` use.
+
+    Positive case (enforcement at the turn boundary) is exercised
+    in :mod:`airframe.testing.integration`.
+    """
+    if adapter_runtime.supports(Feature.BUDGET_TURN_CAP):
+        return
+    from airframe.errors import UnsupportedFeatureError
+
+    sess = adapter_runtime.session()
+    try:
+        with pytest.raises(UnsupportedFeatureError) as exc:
+            await sess.execute("hi", max_turns=5)
+        assert exc.value.feature == Feature.BUDGET_TURN_CAP, (
+            f"{type(adapter_runtime).__name__}: max_turns decline must "
+            f"carry feature=BUDGET_TURN_CAP; got {exc.value.feature!r}"
+        )
+    finally:
+        await sess.close()
+
+
+async def test_session_max_budget_usd_declined_when_budget_usd_cap_false(
+    adapter_runtime: Any,
+) -> None:
+    """Adapters declining BUDGET_USD_CAP raise on ``max_budget_usd=`` use."""
+    if adapter_runtime.supports(Feature.BUDGET_USD_CAP):
+        return
+    from airframe.errors import UnsupportedFeatureError
+
+    sess = adapter_runtime.session()
+    try:
+        with pytest.raises(UnsupportedFeatureError) as exc:
+            await sess.execute("hi", max_budget_usd=0.05)
+        assert exc.value.feature == Feature.BUDGET_USD_CAP, (
+            f"{type(adapter_runtime).__name__}: max_budget_usd decline must "
+            f"carry feature=BUDGET_USD_CAP; got {exc.value.feature!r}"
+        )
+    finally:
+        await sess.close()
+
+
+# ---------------------------------------------------------------------------
+# ProviderOptions cross-namespace rejection
+# ---------------------------------------------------------------------------
+
+
+def test_session_rejects_wrong_provider_options_namespace(adapter_runtime: Any) -> None:
+    """Passing the wrong :class:`ProviderOptions` namespace raises.
+
+    Each adapter's ``session(provider_options=)`` must reject options
+    of a different vendor's namespace with
+    :class:`UnsupportedFeatureError`. The contract uses the
+    by-elimination principle: pick a namespace that *isn't* this
+    adapter's matching one and verify it raises.
+    """
+    from airframe.errors import UnsupportedFeatureError
+    from airframe.options import (
+        ClaudeOptions,
+        CodexOptions,
+        CopilotOptions,
+        OpenAICompatOptions,
+    )
+
+    matching = {
+        "claude": ClaudeOptions,
+        "github-copilot": CopilotOptions,
+        "codex": CodexOptions,
+        "opencode-zen": OpenAICompatOptions,
+        "opencode-go": OpenAICompatOptions,
+    }
+    own = matching.get(adapter_runtime.PROVIDER_ID)
+    # Pick any namespace that isn't ours.
+    all_namespaces = (ClaudeOptions, CopilotOptions, CodexOptions, OpenAICompatOptions)
+    others = [c for c in all_namespaces if c is not own]
+    assert others, "test fixture must have at least one foreign namespace"
+    foreign = others[0]
+    with pytest.raises(UnsupportedFeatureError):
+        adapter_runtime.session(provider_options=foreign())
+
+
 # ``TurnComplete`` is exported alongside the contracts so integration-test
 # fixtures (Phase 1 Iteration B+) can build the trailing event without
 # re-importing it from airframe.events. Re-exporting here keeps the
@@ -391,13 +763,25 @@ __all__ = [
     "TurnComplete",
     "test_close_is_idempotent",
     "test_close_on_fresh_runtime",
+    "test_emittable_hook_kinds_subset_of_eight_literals",
     "test_plain_text_execute_path_is_wired",
     "test_session_cancel_when_idle_is_noop",
     "test_session_close_is_idempotent",
     "test_session_close_on_fresh_session_is_safe",
+    "test_session_execute_signature_accepts_budget_kwargs",
+    "test_session_execute_signature_accepts_thinking_kwarg",
     "test_session_factory_returns_agent_session",
+    "test_session_max_budget_usd_declined_when_budget_usd_cap_false",
+    "test_session_max_turns_declined_when_budget_turn_cap_false",
+    "test_session_mcp_servers_kwarg_agrees_with_transport_capabilities",
+    "test_session_on_event_agrees_with_lifecycle_hooks_capability",
+    "test_session_on_permission_agrees_with_permission_callback_capability",
+    "test_session_polymorphic_prompt_declined_when_vision_false",
+    "test_session_rejects_wrong_provider_options_namespace",
     "test_session_resume_not_implemented_until_feature_flips",
     "test_session_stream_is_async_generator",
+    "test_session_thinking_kwarg_declined_when_capability_false",
+    "test_session_tools_kwarg_agrees_with_tools_function_capability",
     "test_supports_accepts_model_kwarg",
     "test_supports_is_idempotent",
     "test_supports_returns_bool_for_every_feature",

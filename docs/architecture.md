@@ -33,7 +33,7 @@ Airframe is two collaborating protocols. **`AgentRuntime`** is the
 runtime-wide entry point — auth, model discovery, capability flags,
 one-shot execution, session factory. **`AgentSession`** is the
 multi-turn conversation handle that owns vendor session state for
-its lifetime. Phase 1 introduced the split (shipped in v0.5.0).
+its lifetime.
 
 ```
 ┌────────────────────────────────────────────────────────────────────┐
@@ -92,7 +92,7 @@ flags, binding-validity predicates) and stays out of the way.
 
 ## Runtime vs session: who owns what
 
-Phase 1 Iteration G drew a clean line:
+The runtime/session split draws a clean line:
 
 | Lives on the runtime | Lives on the session |
 |---|---|
@@ -122,45 +122,68 @@ types from `airframe.events`:
 |---|---|
 | `TextDelta(text)` | A chunk of assistant-visible text. Concatenating all `TextDelta.text` for one turn equals the final result's `text`. |
 | `ReasoningDelta(text)` | A chunk of hidden reasoning / extended-thinking text. Distinct from `TextDelta` — the model's private chain-of-thought. |
-| `ToolCallStart(tool_name, tool_call_id, arguments_preview)` | The model asked to invoke a tool. Phase 3 wires the call-back path; today only fires for vendor-side tools. |
+| `ToolCallStart(tool_name, tool_call_id, arguments_preview)` | The model asked to invoke a tool. User-supplied `FunctionTool` round-trips wire on Claude / Copilot / OpenAI-compat; external `McpServerRef` routes wire on Claude / Copilot. |
 | `ToolCallResult(tool_call_id, output, is_error)` | A tool invocation completed. Pairs with the matching `ToolCallStart`. |
 | `TurnComplete(result)` | Final event in every successful stream. Carries the same `RuntimeResult` `execute()` would have returned. |
 
-**Shape lock (ADR-003).** The variant set and field-by-field shapes
+**Shape lock.** The variant set and field-by-field shapes
 are public surface — once consumer code does `match event:`,
 renaming or removing is a major-version break. Adding a new variant
 later is safe (consumers branch with a wildcard / `isinstance`).
 
 Adapters declaring `Feature.STREAMING` emit fine-grained deltas as
-the vendor produces them. Adapters that don't (none today after
-Phase 1) may emit a single `TextDelta` carrying the full response
-immediately before `TurnComplete`.
+the vendor produces them. Adapters that don't (none today) may emit
+a single `TextDelta` carrying the full response immediately before
+`TurnComplete`.
 
 ## Capability negotiation
 
 Each adapter declares which protocol features it implements via
-`runtime.supports(Feature.X)`. The capability matrix at the end of
-Phase 1:
+`runtime.supports(Feature.X)`. Current capability matrix:
 
 | Feature | Claude Code | Copilot | Codex | OpenAI-compat |
 |---|---|---|---|---|
 | `STRUCTURED_OUTPUT_JSON_SCHEMA` | ✓ | ✓ | ✓ | ✓ |
+| `STRUCTURED_OUTPUT_STRICT` | ✗ | ✗ | ✗ | ✗ |
 | `STREAMING` | ✓ | ✓ | ✓ | ✓ |
 | `CANCEL` | ✓ | ✓ | ✓ | ✓ |
 | `SESSION_RESUME` | ✓ | ✓ | ✓ | ✗ (no server-side session) |
-| `STRUCTURED_OUTPUT_STRICT` | ✗ | ✗ | ✗ | ✗ |
-| `REASONING_EFFORT` / `REASONING_BUDGET_TOKENS` | (Phase 2) | (Phase 2) | (Phase 2) | (Phase 2) |
-| `VISION_INPUT` / `FILE_INPUT` | (Phase 2) | (Phase 2) | (Phase 2) | (Phase 2) |
-| `TOOLS_FUNCTION` | (Phase 3) | (Phase 3) | ✗ (no SDK tool API) | (Phase 3) |
-| `TOOLS_MCP_*` | (Phase 4) | (Phase 4) | ✗ | ✗ (Responses-only) |
-| `PERMISSION_CALLBACK`, `LIFECYCLE_HOOKS`, `BUDGET_*` | (Phase 5) | (Phase 5) | (Phase 5) | (Phase 5) |
+| `REASONING_EFFORT` | ✓ | ✓ | ✓ | ✓ |
+| `REASONING_BUDGET_TOKENS` | ✓ | ✗ | ✗ | ✗ |
+| `VISION_INPUT` | ✓ | ✓ | ✓ | ✓ |
+| `FILE_INPUT` | ✓ | ✓ | ✓ | ✗ (chat-completions has no file slot) |
+| `TOOLS_FUNCTION` | ✓ | ✓ | ✗ (no SDK tool API) | ✓ |
+| `TOOLS_MCP_STDIO` | ✓ | ✓ | ✗ (CLI-config only) | ✗ (Responses-only) |
+| `TOOLS_MCP_HTTP` | ✓ | ✓ | ✗ | ✗ |
+| `TOOLS_MCP_SSE` | ✓ | ✗ (declined, switch to http) | ✗ | ✗ |
+| `TOOLS_MCP_IN_PROCESS` | ✗ (internal `tools=` plumbing) | ✗ | ✗ | ✗ |
+| `PERMISSION_CALLBACK` | ✓ | ✓ | ✓ (session-wide) | ✗ (permanent) |
+| `LIFECYCLE_HOOKS` | ✓ (8 kinds) | ✓ (7 kinds, no `rate_limit`) | ✓ (6 kinds, synthesised) | ✓ (6 kinds, synthesised) |
+| `BUDGET_USD_CAP` | ✓ | ✓ | ✓ | ✓ |
+| `BUDGET_TURN_CAP` | ✓ | ✗ (vendor caps internally) | ✓ | ✓ |
+| `SANDBOX` / `SUBAGENTS` | ✗ (planned, signal-gated) | ✗ (planned) | ✗ (planned) | ✗ (planned) |
 
 `supports()` is a cheap static lookup — no network, no SDK version
 sniffing. The conformance suite (`airframe.testing.contracts`)
 asserts every adapter's `supports(STRUCTURED_OUTPUT_JSON_SCHEMA)` is
-True. Behavioural contracts that require live credentials live in
-`airframe.testing.integration` (deferred; the live probes under
-`examples/probe_*.py` cover this today).
+True plus the structural contracts for every feature surface (each
+declared-True flag must accept the corresponding kwarg without
+raising `UnsupportedFeatureError`; each declared-False flag must
+raise with the correct `feature=` attribute). Behavioural contracts
+that require live credentials live in
+`airframe.testing.integration` (pytest-marker-gated; the live
+probes under `examples/probe_*.py` are the manual counterpart).
+
+**Per-adapter hook subsets.** Every adapter that declares
+`LIFECYCLE_HOOKS=True` also exposes an `EMITTABLE_HOOK_KINDS:
+ClassVar[frozenset[str]]` containing the subset of the eight
+[`HookEventKind`](../src/airframe/hooks.py) literals it can
+honestly emit. Claude has all 8 (native `PreCompact` + `RateLimit`
+events); Copilot drops `rate_limit`; Codex and OpenAI-compat drop
+both `pre_compact` and `rate_limit` since they have to synthesise
+events from their respective event streams / tool loops. Consumers
+writing portable observers can branch defensively on the per-runtime
+set.
 
 ## Why the protocol looks like this
 
@@ -177,9 +200,8 @@ True. Behavioural contracts that require live credentials live in
   vendors leave it `None` because there's no vendor-side session to
   refer to. Consumer code branching on `session.id is None` can
   treat that as the "stateless adapter" signal.
-* **`reset()` is a no-op after Iteration G.** Per-call sessions own
-  their own state; the runtime has nothing scope-bound to drop.
-  Kept on the protocol for completeness and back-compat.
+* **`reset()` is a no-op on every adapter today.** Per-call sessions
+  own their own state; the runtime has nothing scope-bound to drop.
 * **`validate_binding()` is non-async and cheap.** "Would you serve
   this?" predicate the caller can evaluate before attempting the
   call. Adapters check `provider_id` + maybe a pattern on `model_id`;
@@ -207,7 +229,7 @@ type without needing per-adapter knowledge:
 | `RuntimeServerStartError` | Adapter couldn't bring its backend up at all. |
 | `RuntimeCancelledError` | Caller-initiated abort (`session.cancel()`). |
 | `UnsupportedBindingError` | Programming error — adapter doesn't serve this `(provider, model)` pair. |
-| `UnsupportedFeatureError` | Capability decline — adapter doesn't wire this feature. Phase 1+ companion to `UnsupportedBindingError` that honours the "no silent fallbacks" principle. |
+| `UnsupportedFeatureError` | Capability decline — adapter doesn't wire this feature. Raised at the boundary so the call fails fast rather than silently downgrading. |
 
 Adapters classify their vendor's failures into these buckets at the
 adapter boundary. What to *do* with each — retry, fall back to a
@@ -293,7 +315,7 @@ These are the sharp edges the adapters absorb so you don't have to.
 * Auth: codex CLI reads `~/.codex/auth.json` directly when present.
   Adapter falls through to that when no env var is set.
 
-### OpenAI-compatible HTTP (OpenCode Zen today)
+### OpenAI-compatible HTTP (OpenCode Zen + OpenCode Go today)
 
 * Stateless HTTP; the simplest transport. The `OpenAICompatibleSession`
   maintains a client-side `messages=[]` buffer because chat-completions
@@ -323,11 +345,9 @@ logged at debug level and swallowed. This matters because
 real exception. Both `AgentRuntime.close()` and `AgentSession.close()`
 honour this.
 
-`reset()` is also idempotent — and, after Phase 1 Iteration G, a
-no-op on every adapter. Per-call sessions own their state; the
-runtime has nothing scope-bound to drop. `reset()` is kept on the
-protocol for completeness and back-compat with consumers that
-called it pre-Iteration-G.
+`reset()` is also idempotent — and a no-op on every adapter today.
+Per-call sessions own their state; the runtime has nothing
+scope-bound to drop.
 
 `cancel()` on `AgentSession` is cheap and idempotent: no-op when no
 turn is in flight; adapters not declaring `Feature.CANCEL` raise
@@ -352,11 +372,11 @@ each adapter's `_PRICING` / `_METADATA` dict.
 
 ## Where to look next
 
-* `docs/implementation-plan.md` — phased rollout (Phase 0 through
-  6 / 7+), version targets, gating decisions, and the criteria for
-  cutting v1.0.
-* `docs/feature-roadmap.md` — per-SDK feature audit and prioritised
-  cross-vendor work.
+* `dev-docs/implementation-plan.md` — iteration plan, version
+  targets, gating decisions, and the criteria for cutting v1.0.
+  *(Dev-internal; not published to PyPI.)*
+* `dev-docs/feature-roadmap.md` — per-SDK feature audit and
+  prioritised cross-vendor work. *(Dev-internal.)*
 * `examples/probe_*.py` — live-vendor probes that exercise each
   adapter end-to-end. Including:
   - `probe_streaming.py` — `session.stream()` against any installed
@@ -364,3 +384,20 @@ each adapter's `_PRICING` / `_METADATA` dict.
   - `probe_session_resume.py` — two-turn resume via `session(resume=)`
     on the three SDK adapters.
   - `probe_supports.py` — the `Feature × adapter` capability matrix.
+  - `probe_thinking.py` / `probe_vision.py` — reasoning controls and
+    polymorphic image/file prompts.
+  - `probe_tools.py` — `FunctionTool` round-trip.
+  - `probe_mcp.py` — `McpServerRef` registration across stdio / http
+    / sse transports.
+  - `probe_permission.py` — `PermissionCallback` per-call
+    interception.
+  - `probe_hooks.py` — `HookEvent` observation; prints the
+    declared `EMITTABLE_HOOK_KINDS` and the per-kind histogram.
+  - `probe_budget.py` — `max_turns=` / `max_budget_usd=`;
+    deliberately tiny cap demonstrates `RuntimeBudgetExceededError`.
+* `airframe.testing.contracts` — shared structural conformance
+  contracts every adapter satisfies (schema round-trip plus the
+  full capability-vs-API agreement).
+* `airframe.testing.integration` — pytest-marker-gated live-vendor
+  probes mirroring the `examples/probe_*.py` set. Run with
+  `pytest -m integration` once credentials are configured.
