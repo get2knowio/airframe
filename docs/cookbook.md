@@ -25,6 +25,22 @@ confirm credentials are wired and the vendor responds.
 uv run python examples/probe_claude_code.py
 ```
 
+## Cross-provider parity
+
+| Probe | What it does |
+|---|---|
+| `examples/probe_parity.py` | Same `execute(schema=)` round-trip against every installed adapter via `runtime_for(pid)()`. Demonstrates that consumer code is identical across vendors — no per-vendor imports, no per-vendor conditionals. |
+
+```bash
+uv run python examples/probe_parity.py
+uv run python examples/probe_parity.py --providers claude,codex
+AIRFRAME_PROBE_MODEL_CODEX=gpt-5.5 uv run python examples/probe_parity.py
+```
+
+Outcomes: `PASS` (structured output returned), `SKIP` (no creds for
+that adapter), `FAIL` (any other error). Skips are non-fatal — exit
+code is 0 unless a provider had creds but raised something else.
+
 ## Capability discovery
 
 | Probe | What it does |
