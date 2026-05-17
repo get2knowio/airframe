@@ -14,7 +14,7 @@ Anthropic's `/v1/messages/openai` proxy) gets the same surface in
 
 | | |
 |---|---|
-| **PROVIDER_ID** | `opencode` |
+| **PROVIDER_ID** | `opencode-zen` |
 | **Pip extra** | `airframe-agents[openai-compat]` |
 | **Vendor SDK** | `openai` (HTTP only — no subprocess) |
 | **Transport** | Direct HTTP via `AsyncOpenAI` |
@@ -39,7 +39,7 @@ runtime = OpenCodeZenRuntime(api_key="opc_...")
 result = await runtime.execute(
     "Brief me on the project structure.",
     schema=Brief,
-    model=ProviderModel("opencode", "gpt-5-nano"),
+    model=ProviderModel("opencode-zen", "gpt-5-nano"),
 )
 print(result.structured)
 await runtime.close()

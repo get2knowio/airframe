@@ -53,7 +53,7 @@ async def main() -> int:
         result = await runtime.execute(
             "What is 17 + 25? Reply with answer and a short rationale.",
             schema=Result,
-            model=ProviderModel("opencode", model_id),
+            model=ProviderModel("opencode-zen", model_id),
         )
         structured = result.structured
         print(f"  structured: PASS ({time.monotonic() - t0:.1f}s)")
@@ -71,7 +71,7 @@ async def main() -> int:
     try:
         result = await runtime.execute(
             "Reply with the single word: ready.",
-            model=ProviderModel("opencode", model_id),
+            model=ProviderModel("opencode-zen", model_id),
         )
         print(f"  plain text: PASS ({time.monotonic() - t0:.1f}s)")
         print(f"    text: {result.text[:200]!r}")

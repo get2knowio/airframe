@@ -25,7 +25,7 @@ class Brief(BaseModel):
     risks: list[str]
 
 # Provider ID comes from config — YAML, env, CLI flag, whatever.
-provider_id = "claude"  # or "github-copilot", "codex", "opencode"
+provider_id = "claude"  # or "github-copilot", "codex", "opencode-zen", "opencode-go"
 
 cls = runtime_for(provider_id)       # discovery lookup by ID
 runtime = cls()                      # auth resolves from env / credential files
@@ -68,7 +68,7 @@ is `airframe`.
 | [`ClaudeCodeRuntime`](docs/adapters/claude.md) | `claude` | `claude-agent-sdk` | Claude Max OAuth → `~/.claude/credentials.json` → `ANTHROPIC_API_KEY` | yes, per-runtime |
 | [`CopilotRuntime`](docs/adapters/copilot.md) | `github-copilot` | `github-copilot-sdk` | `GITHUB_TOKEN` → `gh auth` | yes, per-runtime |
 | [`CodexRuntime`](docs/adapters/codex.md) | `codex` | `openai-codex-sdk` | `OPENAI_API_KEY` → opencode `auth.json` → `~/.codex/auth.json` | yes, per-turn |
-| [`OpenCodeZenRuntime`](docs/adapters/opencode-zen.md) | `opencode` | `openai` (HTTP) | `OPENCODE_API_KEY` → opencode `auth.json::opencode.key` | no (direct HTTP) |
+| [`OpenCodeZenRuntime`](docs/adapters/opencode-zen.md) | `opencode-zen` | `openai` (HTTP) | `OPENCODE_API_KEY` → opencode `auth.json::opencode.key` | no (direct HTTP) |
 | [`OpenCodeGoRuntime`](docs/adapters/opencode-go.md) | `opencode-go` | `openai` (HTTP) | `OPENCODE_API_KEY` → opencode `auth.json::opencode-go.key` | no (direct HTTP) |
 
 The OpenAI-compatible family (`OpenCodeZenRuntime` per-token and

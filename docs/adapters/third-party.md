@@ -267,7 +267,8 @@ adapters (when airframe ships an `AnthropicRuntime` against the
 Messages API or `OpenAIRuntime` against the Responses API).
 
 A few existing IDs are taken by the built-in adapters:
-`"claude"`, `"github-copilot"`, `"codex"`, `"opencode"`. If your
+`"claude"`, `"github-copilot"`, `"codex"`, `"opencode-zen"`,
+`"opencode-go"`. If your
 adapter targets one of these vendors with a different transport
 or auth chain, choose a discriminating suffix:
 `"github-copilot-pro"`, `"opencode-zen-fork"`, etc.

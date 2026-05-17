@@ -61,7 +61,7 @@ class OpenCodeZenRuntime(OpenAICompatibleRuntime):
 
     label = "opencode_zen"
 
-    PROVIDER_ID: ClassVar[str] = "opencode"
+    PROVIDER_ID: ClassVar[str] = "opencode-zen"
     DEFAULT_BASE_URL: ClassVar[str] = DEFAULT_ZEN_BASE_URL
     DEFAULT_MODEL: ClassVar[str] = DEFAULT_ZEN_MODEL
     METADATA: ClassVar[dict[str, ModelMeta]] = _METADATA

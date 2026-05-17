@@ -69,7 +69,7 @@ Key invariants when editing:
 - **Provider IDs are strict; no aliases.** `"anthropic"` and
   `"openai"` are reserved for future direct-API adapters; today's
   subscription-path adapters use `"claude"`, `"github-copilot"`,
-  `"codex"`, `"opencode"`.
+  `"codex"`, `"opencode-zen"`, `"opencode-go"`.
 - **`CopilotRuntime.validate_binding` deliberately rejects
   `claude-*` model IDs** — Claude via Copilot Chat Completions emits
   markdown-fenced JSON instead of honouring tool calls. Route Claude

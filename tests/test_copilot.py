@@ -200,7 +200,7 @@ def test_validate_binding_rejects_aliases_and_others() -> None:
     assert not rt.validate_binding(ProviderModel("github", "o5"))
     assert not rt.validate_binding(ProviderModel("claude", "claude-haiku-4-5"))
     assert not rt.validate_binding(ProviderModel("openai", "gpt-5-mini"))
-    assert not rt.validate_binding(ProviderModel("opencode", "gpt-5-nano"))
+    assert not rt.validate_binding(ProviderModel("opencode-zen", "gpt-5-nano"))
 
 
 def test_validate_binding_rejects_claude_models_on_copilot() -> None:

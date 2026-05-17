@@ -34,7 +34,7 @@ Usage::
     uv run python examples/probe_tools.py --provider opencode
     uv run python examples/probe_tools.py --provider codex     # declines
 
-Defaults to ``opencode`` (OpenAI-compat) since it has the simplest
+Defaults to ``opencode-zen`` (OpenAI-compat) since it has the simplest
 auth (single API key) and the client-side tool-loop is the most
 deterministic of the three wired adapters. Requires whatever auth
 the chosen provider's adapter expects.
@@ -116,8 +116,8 @@ async def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument(
         "--provider",
-        default="opencode",
-        help="Provider ID (default: opencode). Any from list_providers().",
+        default="opencode-zen",
+        help="Provider ID (default: opencode-zen). Any from list_providers().",
     )
     parser.add_argument(
         "--prompt",

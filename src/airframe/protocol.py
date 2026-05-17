@@ -64,8 +64,9 @@ class ProviderModel:
     filtering on ``model_id``) via :meth:`AgentRuntime.validate_binding`.
 
     Attributes:
-        provider_id: Vendor identifier — ``"anthropic"``, ``"openai"``,
-            ``"copilot"``, ``"opencode"``, etc.
+        provider_id: Canonical adapter identifier — ``"claude"``,
+            ``"github-copilot"``, ``"codex"``, ``"opencode-zen"``,
+            ``"opencode-go"``, etc.
         model_id: The model identifier the vendor recognises
             (e.g. ``"claude-haiku-4-5"``, ``"gpt-5-mini"``).
     """

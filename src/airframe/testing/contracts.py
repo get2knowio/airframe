@@ -742,7 +742,8 @@ def test_session_rejects_wrong_provider_options_namespace(adapter_runtime: Any) 
         "claude": ClaudeOptions,
         "github-copilot": CopilotOptions,
         "codex": CodexOptions,
-        "opencode": OpenAICompatOptions,
+        "opencode-zen": OpenAICompatOptions,
+        "opencode-go": OpenAICompatOptions,
     }
     own = matching.get(adapter_runtime.PROVIDER_ID)
     # Pick any namespace that isn't ours.

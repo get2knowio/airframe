@@ -466,7 +466,7 @@ async def test_opencode_zen_list_models_returns_enriched_model_info(
     models = await rt.list_models()
 
     assert len(models) == 3
-    assert all(m.provider_id == "opencode" for m in models)
+    assert all(m.provider_id == "opencode-zen" for m in models)
 
     nano = next(m for m in models if m.id == "gpt-5-nano")
     assert nano.display_name == "GPT-5 Nano"
