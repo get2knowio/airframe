@@ -1,10 +1,14 @@
 # OpenCodeZenRuntime
 
-Routes work through the [opencode-go](https://github.com/opencode-ai/opencode)
-Zen gateway via the standard `openai` Python SDK over HTTP. The
-canonical example of the `OpenAICompatibleRuntime` base class —
-any vendor speaking OpenAI's Chat Completions wire format
-(Together, Groq, Fireworks, OpenRouter, vLLM, LM Studio,
+Routes work through the [opencode.ai Zen
+gateway](https://opencode.ai/docs/zen) (`https://opencode.ai/zen/v1`) —
+the **per-token-billed** catalog of ~40 models. For the flat-fee
+subscription catalog, use [`OpenCodeGoRuntime`](./opencode-go.md)
+instead; the two share an auth scheme but bill differently.
+
+This is also the canonical example of the `OpenAICompatibleRuntime`
+base class — any vendor speaking OpenAI's Chat Completions wire
+format (Together, Groq, Fireworks, OpenRouter, vLLM, LM Studio,
 Anthropic's `/v1/messages/openai` proxy) gets the same surface in
 ~30 lines of subclass code.
 

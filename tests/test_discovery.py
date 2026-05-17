@@ -45,7 +45,13 @@ def _stub_find_spec(monkeypatch: pytest.MonkeyPatch, available: set[str]) -> Non
 def test_list_providers_returns_all_when_installed_only_false() -> None:
     """``installed_only=False`` surfaces every adapter's PROVIDER_ID."""
     providers = list_providers(installed_only=False)
-    assert set(providers) == {"claude", "github-copilot", "codex", "opencode"}
+    assert set(providers) == {
+        "claude",
+        "github-copilot",
+        "codex",
+        "opencode",
+        "opencode-go",
+    }
 
 
 def test_list_providers_sorted_alphabetically() -> None:
@@ -78,9 +84,11 @@ def test_list_providers_filters_when_only_codex_installed(
 def test_list_providers_filters_when_only_openai_compat_installed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The ``[openai-compat]`` extra brings ``openai`` — gates ``opencode``."""
+    """The ``[openai-compat]`` extra brings ``openai`` — gates both
+    OpenAI-compatible adapters (per-token ``opencode`` and subscription
+    ``opencode-go``)."""
     _stub_find_spec(monkeypatch, available={"openai"})
-    assert list_providers() == ["opencode"]
+    assert list_providers() == ["opencode", "opencode-go"]
 
 
 def test_list_providers_when_nothing_installed_is_empty(

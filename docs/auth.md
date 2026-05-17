@@ -13,7 +13,8 @@ production (explicit constructor argument).
 | **ClaudeCodeRuntime** | `CLAUDE_CODE_OAUTH_TOKEN` → `~/.claude/.credentials.json` → `ANTHROPIC_API_KEY` | `airframe-agents[claude]` |
 | **CopilotRuntime** | `github_token=` constructor arg → `GITHUB_TOKEN` env → `GH_TOKEN` env → `use_logged_in_user=True` (`gh auth login` storage) | `airframe-agents[copilot]` |
 | **CodexRuntime** | `api_key=` constructor arg → `OPENAI_API_KEY` env → `CODEX_API_KEY` env → `~/.local/share/opencode/auth.json::openai.key` → implicit `~/.codex/auth.json` (CLI-managed) | `airframe-agents[codex]` |
-| **OpenCodeZenRuntime** | `api_key=` constructor arg → `OPENCODE_API_KEY` env → `~/.local/share/opencode/auth.json::opencode-zen.key` | `airframe-agents[openai-compat]` |
+| **OpenCodeZenRuntime** | `api_key=` constructor arg → `OPENCODE_API_KEY` env → `~/.local/share/opencode/auth.json::opencode.key` | `airframe-agents[openai-compat]` |
+| **OpenCodeGoRuntime** | `api_key=` constructor arg → `OPENCODE_API_KEY` env → `~/.local/share/opencode/auth.json::opencode-go.key` | `airframe-agents[openai-compat]` |
 
 `list_models()` calls always require a credential — the vendor's
 models endpoint won't honour an anonymous request. Tests / scripts
@@ -132,10 +133,11 @@ runtime_explicit = OpenCodeZenRuntime(api_key="opc_...")
 Three sources, checked in order:
 
 1. **`api_key=` constructor arg** — explicit Zen gateway key.
-2. **`OPENCODE_API_KEY` env var**.
-3. **`~/.local/share/opencode/auth.json::opencode-zen.key`** —
-   the key minted by `opencode auth login zen`. Same auth file
-   as the Codex chain reads, different key path inside it.
+2. **`OPENCODE_API_KEY` env var** (shared with `OpenCodeGoRuntime`).
+3. **`~/.local/share/opencode/auth.json::opencode.key`** —
+   the per-token Zen key minted by `opencode auth login opencode`.
+   Same auth file as `OpenCodeGoRuntime` reads, different slot
+   inside it (the Go subscription key lives under `opencode-go`).
 
 ### Notes
 
@@ -144,6 +146,32 @@ Three sources, checked in order:
   process.
 - `base_url=` overrides the Zen endpoint URL; honours
   `OPENCODE_ZEN_BASE_URL` env var.
+
+## OpenCodeGoRuntime
+
+```python
+from airframe import OpenCodeGoRuntime
+runtime = OpenCodeGoRuntime()  # env var or opencode auth.json
+runtime_explicit = OpenCodeGoRuntime(api_key="opc_...")
+```
+
+Three sources, checked in order:
+
+1. **`api_key=` constructor arg** — explicit subscription key.
+2. **`OPENCODE_API_KEY` env var** (shared with `OpenCodeZenRuntime`).
+3. **`~/.local/share/opencode/auth.json::opencode-go.key`** — the
+   subscription key minted by `opencode auth login opencode-go`.
+   Same auth file as `OpenCodeZenRuntime`, distinct slot.
+
+### Notes
+
+- Picks the **subscription** gateway (`https://opencode.ai/zen/go/v1`),
+  which serves the 14 bundled models for $0 per call at the caller's
+  margin. For per-token access to GPT/Claude/Gemini, use
+  `OpenCodeZenRuntime` instead.
+- `base_url=` overrides the gateway URL; honours `OPENCODE_GO_BASE_URL`
+  env var.
+- HTTP-only — no subprocess, credential stays in-process.
 - The same `OpenAICompatibleRuntime` base class powers any future
   compat-vendor adapter (Together / Groq / Fireworks). Each
   subclass overrides `_resolve_api_key()` with its own env-var and

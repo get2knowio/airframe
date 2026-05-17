@@ -68,11 +68,13 @@ is `airframe`.
 | [`ClaudeCodeRuntime`](docs/adapters/claude.md) | `claude` | `claude-agent-sdk` | Claude Max OAuth → `~/.claude/credentials.json` → `ANTHROPIC_API_KEY` | yes, per-runtime |
 | [`CopilotRuntime`](docs/adapters/copilot.md) | `github-copilot` | `github-copilot-sdk` | `GITHUB_TOKEN` → `gh auth` | yes, per-runtime |
 | [`CodexRuntime`](docs/adapters/codex.md) | `codex` | `openai-codex-sdk` | `OPENAI_API_KEY` → opencode `auth.json` → `~/.codex/auth.json` | yes, per-turn |
-| [`OpenCodeZenRuntime`](docs/adapters/opencode-zen.md) | `opencode` | `openai` (HTTP) | `OPENCODE_API_KEY` → opencode `auth.json` | no (direct HTTP) |
+| [`OpenCodeZenRuntime`](docs/adapters/opencode-zen.md) | `opencode` | `openai` (HTTP) | `OPENCODE_API_KEY` → opencode `auth.json::opencode.key` | no (direct HTTP) |
+| [`OpenCodeGoRuntime`](docs/adapters/opencode-go.md) | `opencode-go` | `openai` (HTTP) | `OPENCODE_API_KEY` → opencode `auth.json::opencode-go.key` | no (direct HTTP) |
 
-The OpenAI-compatible family (`OpenCodeZenRuntime` today; Together /
-Groq / Fireworks / OpenRouter as future siblings) shares the
-`OpenAICompatibleRuntime` base — subclasses are ~30 lines. See
+The OpenAI-compatible family (`OpenCodeZenRuntime` per-token and
+`OpenCodeGoRuntime` subscription today; Together / Groq / Fireworks /
+OpenRouter as future siblings) shares the `OpenAICompatibleRuntime`
+base — subclasses are ~30 lines. See
 [`docs/adapters/third-party.md`](docs/adapters/third-party.md).
 
 Each adapter has one canonical provider ID. `"anthropic"` is
@@ -154,7 +156,7 @@ absorbs its vendor's quirks.
 pip install airframe-agents[claude]         # ClaudeCodeRuntime
 pip install airframe-agents[copilot]        # CopilotRuntime
 pip install airframe-agents[codex]          # CodexRuntime
-pip install airframe-agents[openai-compat]  # OpenCodeZenRuntime (+ future siblings)
+pip install airframe-agents[openai-compat]  # OpenCodeZenRuntime + OpenCodeGoRuntime (+ future siblings)
 pip install airframe-agents[all]            # Everything
 pip install airframe-agents[testing]        # Conformance contract suite (pytest)
 ```
@@ -291,7 +293,8 @@ Full list with one-line descriptions in
   [Claude](docs/adapters/claude.md) ·
   [Copilot](docs/adapters/copilot.md) ·
   [Codex](docs/adapters/codex.md) ·
-  [OpenCode Zen](docs/adapters/opencode-zen.md).
+  [OpenCode Zen](docs/adapters/opencode-zen.md) ·
+  [OpenCode Go](docs/adapters/opencode-go.md).
 - **[Writing your own adapter](docs/adapters/third-party.md)** —
   the `airframe.adapters` entry-point group + conformance
   contracts.

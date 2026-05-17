@@ -114,9 +114,22 @@ def test_resolve_api_key_env(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_resolve_api_key_from_auth_file(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("OPENCODE_API_KEY", raising=False)
     auth = tmp_path / "auth.json"
-    auth.write_text(json.dumps({"opencode-go": {"key": "sk-file-key"}}))
+    auth.write_text(json.dumps({"opencode": {"key": "sk-file-key"}}))
     monkeypatch.setenv("OPENCODE_AUTH_PATH", str(auth))
     assert _resolve_api_key(None) == "sk-file-key"
+
+
+def test_resolve_api_key_does_not_steal_go_subscription_key(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Zen and Go share an auth file but live under distinct slots — the
+    Zen adapter must not pick up the opencode-go subscription key."""
+    monkeypatch.delenv("OPENCODE_API_KEY", raising=False)
+    auth = tmp_path / "auth.json"
+    auth.write_text(json.dumps({"opencode-go": {"key": "sk-go-only"}}))
+    monkeypatch.setenv("OPENCODE_AUTH_PATH", str(auth))
+    with pytest.raises(RuntimeAuthError):
+        _resolve_api_key(None)
 
 
 def test_resolve_api_key_missing_raises(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:

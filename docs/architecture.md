@@ -315,7 +315,7 @@ These are the sharp edges the adapters absorb so you don't have to.
 * Auth: codex CLI reads `~/.codex/auth.json` directly when present.
   Adapter falls through to that when no env var is set.
 
-### OpenAI-compatible HTTP (OpenCode Zen today)
+### OpenAI-compatible HTTP (OpenCode Zen + OpenCode Go today)
 
 * Stateless HTTP; the simplest transport. The `OpenAICompatibleSession`
   maintains a client-side `messages=[]` buffer because chat-completions

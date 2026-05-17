@@ -17,6 +17,7 @@ import airframe
 | `CopilotRuntime` | `github-copilot` | [adapters/copilot.md](./adapters/copilot.md) |
 | `CodexRuntime` | `codex` | [adapters/codex.md](./adapters/codex.md) |
 | `OpenCodeZenRuntime` | `opencode` | [adapters/opencode-zen.md](./adapters/opencode-zen.md) |
+| `OpenCodeGoRuntime` | `opencode-go` | [adapters/opencode-go.md](./adapters/opencode-go.md) |
 
 Every runtime implements the `AgentRuntime` protocol.
 
@@ -460,7 +461,8 @@ Everything below is importable from `airframe`:
 
 ```
 AgentRuntime, AgentSession, AgentRuntimeError
-ClaudeCodeRuntime, CopilotRuntime, CodexRuntime, OpenCodeZenRuntime
+ClaudeCodeRuntime, CopilotRuntime, CodexRuntime,
+OpenCodeZenRuntime, OpenCodeGoRuntime
 ClaudeOptions, CopilotOptions, CodexOptions, OpenAICompatOptions, ProviderOptions
 ProviderModel, RuntimeResult, ModelInfo, CostRecord
 Feature
