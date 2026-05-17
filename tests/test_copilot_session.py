@@ -1485,3 +1485,772 @@ async def test_mcp_capability_flags_final_truth() -> None:
     assert rt.supports(Feature.TOOLS_MCP_HTTP)
     assert not rt.supports(Feature.TOOLS_MCP_SSE)
     assert not rt.supports(Feature.TOOLS_MCP_IN_PROCESS)
+
+
+# ---------------------------------------------------------------------------
+# Permission callback (Phase 5 Iteration B)
+# ---------------------------------------------------------------------------
+
+
+class _FakeCopilotPermissionRequest:
+    """Minimal stand-in for copilot.session.PermissionRequest in unit tests."""
+
+    def __init__(
+        self,
+        *,
+        tool_name: str = "",
+        tool_title: str | None = None,
+        kind: str = "tool_use",
+        tool_args: Any = None,
+        args: Any = None,
+        reason: str | None = None,
+        tool_description: str | None = None,
+        intention: str | None = None,
+    ) -> None:
+        self.tool_name = tool_name
+        self.tool_title = tool_title
+        self.kind = kind
+        self.tool_args = tool_args
+        self.args = args
+        self.reason = reason
+        self.tool_description = tool_description
+        self.intention = intention
+
+
+async def test_permission_callback_replaces_approve_all_handler(
+    mock_sdk: dict[str, Any],
+) -> None:
+    """on_permission= overrides the default PermissionHandler.approve_all."""
+    from airframe import PermissionDecision, PermissionRequest
+
+    received: list[PermissionRequest] = []
+
+    class _RecordingCallback:
+        async def handle(self, request: PermissionRequest) -> PermissionDecision:
+            received.append(request)
+            return "allow"
+
+    async def fake_send(prompt: str, *, timeout: float, **_: Any) -> None:
+        _fire(mock_sdk["handlers"], _FakeEvent(_FakeUsage()))
+        _fire(mock_sdk["handlers"], _FakeEvent(_FakeAssistantMessage("ok")))
+
+    mock_sdk["session"].send_and_wait = AsyncMock(side_effect=fake_send)
+
+    rt = CopilotRuntime()
+    sess = rt.session(on_permission=_RecordingCallback())
+    try:
+        await sess.execute("hi")
+    finally:
+        await sess.close()
+
+    create_call = mock_sdk["client"].create_session.await_args_list[0]
+    handler = create_call.kwargs["on_permission_request"]
+    # The handler isn't the default approve_all anymore — it's
+    # airframe's wrapper. Invoke it directly to verify the mapping.
+    from copilot.session import PermissionRequestResult
+
+    result = await handler(
+        _FakeCopilotPermissionRequest(
+            tool_name="read_file",
+            tool_args={"path": "/etc/hosts"},
+            reason="reads filesystem",
+        ),
+        {},
+    )
+    assert isinstance(result, PermissionRequestResult)
+    assert result.kind == "approve-once"
+    assert len(received) == 1
+    req = received[0]
+    assert req.tool_name == "read_file"
+    assert req.tool_args == {"path": "/etc/hosts"}
+    assert req.reason == "reads filesystem"
+
+
+async def test_permission_callback_deny_maps_to_reject(
+    mock_sdk: dict[str, Any],
+) -> None:
+    """``deny`` → ``"reject"`` PermissionRequestResultKind."""
+    from airframe import PermissionDecision, PermissionRequest
+
+    class _DenyAll:
+        async def handle(self, request: PermissionRequest) -> PermissionDecision:
+            return "deny"
+
+    async def fake_send(prompt: str, *, timeout: float, **_: Any) -> None:
+        _fire(mock_sdk["handlers"], _FakeEvent(_FakeUsage()))
+        _fire(mock_sdk["handlers"], _FakeEvent(_FakeAssistantMessage("ok")))
+
+    mock_sdk["session"].send_and_wait = AsyncMock(side_effect=fake_send)
+
+    rt = CopilotRuntime()
+    sess = rt.session(on_permission=_DenyAll())
+    try:
+        await sess.execute("hi")
+    finally:
+        await sess.close()
+
+    handler = mock_sdk["client"].create_session.await_args_list[0].kwargs["on_permission_request"]
+    result = await handler(_FakeCopilotPermissionRequest(tool_name="x"), {})
+    assert result.kind == "reject"
+
+
+async def test_permission_callback_defer_maps_to_user_not_available(
+    mock_sdk: dict[str, Any],
+) -> None:
+    """``defer`` → ``"user-not-available"`` — Copilot's default policy takes over."""
+    from airframe import PermissionDecision, PermissionRequest
+
+    class _Defer:
+        async def handle(self, request: PermissionRequest) -> PermissionDecision:
+            return "defer"
+
+    async def fake_send(prompt: str, *, timeout: float, **_: Any) -> None:
+        _fire(mock_sdk["handlers"], _FakeEvent(_FakeUsage()))
+        _fire(mock_sdk["handlers"], _FakeEvent(_FakeAssistantMessage("ok")))
+
+    mock_sdk["session"].send_and_wait = AsyncMock(side_effect=fake_send)
+
+    rt = CopilotRuntime()
+    sess = rt.session(on_permission=_Defer())
+    try:
+        await sess.execute("hi")
+    finally:
+        await sess.close()
+
+    handler = mock_sdk["client"].create_session.await_args_list[0].kwargs["on_permission_request"]
+    result = await handler(_FakeCopilotPermissionRequest(tool_name="x"), {})
+    assert result.kind == "user-not-available"
+
+
+async def test_no_permission_callback_keeps_approve_all_default(
+    mock_sdk: dict[str, Any],
+) -> None:
+    """Without on_permission= the adapter uses PermissionHandler.approve_all."""
+
+    async def fake_send(prompt: str, *, timeout: float, **_: Any) -> None:
+        _fire(mock_sdk["handlers"], _FakeEvent(_FakeUsage()))
+        _fire(mock_sdk["handlers"], _FakeEvent(_FakeAssistantMessage("ok")))
+
+    mock_sdk["session"].send_and_wait = AsyncMock(side_effect=fake_send)
+
+    rt = CopilotRuntime()
+    sess = rt.session()
+    try:
+        await sess.execute("hi")
+    finally:
+        await sess.close()
+
+    handler = mock_sdk["client"].create_session.await_args_list[0].kwargs["on_permission_request"]
+    # The mock fixture replaced PermissionHandler.approve_all with a
+    # lambda; check identity against what the fixture installed
+    # (anything that's not the airframe wrapper would pass — we just
+    # care that the user's callback isn't being routed through).
+    assert handler is not None
+    assert not asyncio.iscoroutinefunction(handler) or handler.__name__ == "<lambda>"
+
+
+async def test_permission_callback_change_between_sessions_rebuilds(
+    mock_sdk: dict[str, Any],
+) -> None:
+    """Switching ``on_permission=`` invalidates the cached session.
+
+    on_permission_request is baked at create_session time; a callback
+    swap must force a session rebuild.
+    """
+    from airframe import PermissionDecision, PermissionRequest
+
+    class _Cb1:
+        async def handle(self, request: PermissionRequest) -> PermissionDecision:
+            return "allow"
+
+    class _Cb2:
+        async def handle(self, request: PermissionRequest) -> PermissionDecision:
+            return "deny"
+
+    async def fake_send(prompt: str, *, timeout: float, **_: Any) -> None:
+        _fire(mock_sdk["handlers"], _FakeEvent(_FakeUsage()))
+        _fire(mock_sdk["handlers"], _FakeEvent(_FakeAssistantMessage("r")))
+
+    mock_sdk["session"].send_and_wait = AsyncMock(side_effect=fake_send)
+
+    rt = CopilotRuntime()
+    sess1 = rt.session(on_permission=_Cb1())
+    try:
+        await sess1.execute("turn 1")
+    finally:
+        await sess1.close()
+    first_count = mock_sdk["client"].create_session.await_count
+
+    sess2 = rt.session(on_permission=_Cb2())
+    try:
+        await sess2.execute("turn 2")
+    finally:
+        await sess2.close()
+
+    assert mock_sdk["client"].create_session.await_count > first_count
+
+
+def test_copilot_permission_fingerprint_distinguishes_identity() -> None:
+    """The Copilot session also uses identity-based fingerprinting."""
+    from airframe import PermissionDecision, PermissionRequest
+    from airframe.adapters.copilot import _permission_fingerprint
+
+    class _Cb:
+        async def handle(self, request: PermissionRequest) -> PermissionDecision:
+            return "allow"
+
+    a, b = _Cb(), _Cb()
+    assert _permission_fingerprint(None) == "__no_permission__"
+    assert _permission_fingerprint(a) != _permission_fingerprint(b)
+    assert _permission_fingerprint(a) == _permission_fingerprint(a)
+
+
+# ---------------------------------------------------------------------------
+# Lifecycle hooks (Phase 5 Iteration C)
+# ---------------------------------------------------------------------------
+
+
+class _FakeSessionStartData:
+    def __init__(self, *, session_id: str = "live-sess-id") -> None:
+        self.session_id = session_id
+
+
+class _FakeSessionShutdownData:
+    def __init__(self) -> None:
+        pass
+
+
+class _FakeUserMessageData:
+    def __init__(self, *, content: str = "") -> None:
+        self.content = content
+
+
+class _FakeSessionCompactionStartData:
+    def __init__(self) -> None:
+        pass
+
+
+def _patch_hook_event_types(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Install fake hook-related event-data classes so isinstance() dispatch
+    in ``_on_copilot_hook_event`` recognises them.
+
+    The standard ``mock_sdk`` fixture monkeypatches the
+    ``ToolExecution*`` / ``AssistantUsage*`` family; hook tests also
+    need ``SessionStartData`` / ``SessionShutdownData`` /
+    ``UserMessageData`` / ``SessionCompactionStartData``.
+    """
+    from copilot.generated import session_events as se_mod
+
+    monkeypatch.setattr(se_mod, "SessionStartData", _FakeSessionStartData)
+    monkeypatch.setattr(se_mod, "SessionShutdownData", _FakeSessionShutdownData)
+    monkeypatch.setattr(se_mod, "UserMessageData", _FakeUserMessageData)
+    monkeypatch.setattr(se_mod, "SessionCompactionStartData", _FakeSessionCompactionStartData)
+
+
+def test_copilot_runtime_declares_lifecycle_hooks() -> None:
+    """LIFECYCLE_HOOKS is True at the runtime level."""
+    rt = CopilotRuntime()
+    assert rt.supports(Feature.LIFECYCLE_HOOKS)
+
+
+def test_copilot_emittable_hook_kinds_matches_plan() -> None:
+    """The seven kinds Copilot can emit; ``rate_limit`` is excluded
+    because Copilot's SDK has no explicit rate-limit event."""
+    assert (
+        frozenset(
+            {
+                "session_start",
+                "session_end",
+                "user_prompt_submit",
+                "pre_tool_use",
+                "post_tool_use",
+                "tool_failure",
+                "pre_compact",
+            }
+        )
+        == CopilotRuntime.EMITTABLE_HOOK_KINDS
+    )
+
+
+async def test_on_event_subscribes_hook_handler_alongside_capture(
+    mock_sdk: dict[str, Any],
+) -> None:
+    """on_event= installs a second session.on() handler beside the
+    capture handler — both fire for the same event stream."""
+    from airframe.hooks import HookEvent
+
+    events: list[HookEvent] = []
+
+    async def fake_send(prompt: str, *, timeout: float, **_: Any) -> None:
+        _fire(mock_sdk["handlers"], _FakeEvent(_FakeUsage()))
+        _fire(mock_sdk["handlers"], _FakeEvent(_FakeAssistantMessage("ok")))
+
+    mock_sdk["session"].send_and_wait = AsyncMock(side_effect=fake_send)
+
+    rt = CopilotRuntime()
+    sess = rt.session(on_event=events.append)
+    try:
+        await sess.execute("hi")
+    finally:
+        await sess.close()
+
+    # The capture handler + the hook-event handler — two subscriptions
+    # were installed on session.on() during _ensure_session.
+    # After close(), both unsubscribe — handlers list is empty.
+    assert mock_sdk["handlers"] == []
+
+
+async def test_on_event_session_start_translates_from_native_event(
+    mock_sdk: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """SessionStartData → session_start HookEvent with model in payload."""
+    from airframe.hooks import HookEvent
+
+    _patch_hook_event_types(monkeypatch)
+    events: list[HookEvent] = []
+
+    async def fake_send(prompt: str, *, timeout: float, **_: Any) -> None:
+        _fire(mock_sdk["handlers"], _FakeEvent(_FakeSessionStartData()))
+        _fire(mock_sdk["handlers"], _FakeEvent(_FakeUsage()))
+        _fire(mock_sdk["handlers"], _FakeEvent(_FakeAssistantMessage("ok")))
+
+    mock_sdk["session"].send_and_wait = AsyncMock(side_effect=fake_send)
+
+    rt = CopilotRuntime()
+    sess = rt.session(on_event=events.append)
+    try:
+        await sess.execute("hi")
+    finally:
+        await sess.close()
+
+    starts = [e for e in events if e.kind == "session_start"]
+    assert len(starts) == 1
+    assert "model" in starts[0].payload
+
+
+async def test_on_event_user_message_translates_to_user_prompt_submit(
+    mock_sdk: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """UserMessageData → user_prompt_submit with prompt + length payload."""
+    from airframe.hooks import HookEvent
+
+    _patch_hook_event_types(monkeypatch)
+    events: list[HookEvent] = []
+
+    async def fake_send(prompt: str, *, timeout: float, **_: Any) -> None:
+        _fire(mock_sdk["handlers"], _FakeEvent(_FakeUserMessageData(content="hi there")))
+        _fire(mock_sdk["handlers"], _FakeEvent(_FakeUsage()))
+        _fire(mock_sdk["handlers"], _FakeEvent(_FakeAssistantMessage("ok")))
+
+    mock_sdk["session"].send_and_wait = AsyncMock(side_effect=fake_send)
+
+    rt = CopilotRuntime()
+    sess = rt.session(on_event=events.append)
+    try:
+        await sess.execute("hi there")
+    finally:
+        await sess.close()
+
+    prompts = [e for e in events if e.kind == "user_prompt_submit"]
+    assert len(prompts) == 1
+    assert prompts[0].payload["prompt"] == "hi there"
+    assert prompts[0].payload["length"] == len("hi there")
+
+
+async def test_on_event_tool_execution_translates_to_pre_and_post_tool_use(
+    mock_sdk: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ToolExecutionStart → pre_tool_use; ToolExecutionComplete(success=True)
+    → post_tool_use; the tool_name + tool_call_id ride the payload."""
+    from airframe.hooks import HookEvent
+
+    _patch_hook_event_types(monkeypatch)
+    events: list[HookEvent] = []
+
+    async def fake_send(prompt: str, *, timeout: float, **_: Any) -> None:
+        _fire(
+            mock_sdk["handlers"],
+            _FakeEvent(
+                _FakeToolStart(
+                    tool_call_id="tc-1",
+                    tool_name="add",
+                    arguments={"a": 1, "b": 2},
+                )
+            ),
+        )
+        _fire(
+            mock_sdk["handlers"],
+            _FakeEvent(
+                _FakeToolComplete(
+                    tool_call_id="tc-1",
+                    success=True,
+                    result=_FakeToolResult(content="3"),
+                )
+            ),
+        )
+        _fire(mock_sdk["handlers"], _FakeEvent(_FakeUsage()))
+        _fire(mock_sdk["handlers"], _FakeEvent(_FakeAssistantMessage("3")))
+
+    mock_sdk["session"].send_and_wait = AsyncMock(side_effect=fake_send)
+
+    rt = CopilotRuntime()
+    sess = rt.session(on_event=events.append)
+    try:
+        await sess.execute("call add")
+    finally:
+        await sess.close()
+
+    pre = [e for e in events if e.kind == "pre_tool_use"]
+    post = [e for e in events if e.kind == "post_tool_use"]
+    assert len(pre) == 1
+    assert pre[0].payload["tool_name"] == "add"
+    assert pre[0].payload["tool_call_id"] == "tc-1"
+    assert len(post) == 1
+    assert post[0].payload["tool_call_id"] == "tc-1"
+    assert post[0].payload["success"] is True
+
+
+async def test_on_event_tool_failure_translates_to_tool_failure_kind(
+    mock_sdk: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ToolExecutionComplete(success=False) → tool_failure HookEvent."""
+    from airframe.hooks import HookEvent
+
+    _patch_hook_event_types(monkeypatch)
+    events: list[HookEvent] = []
+
+    async def fake_send(prompt: str, *, timeout: float, **_: Any) -> None:
+        _fire(
+            mock_sdk["handlers"],
+            _FakeEvent(_FakeToolStart(tool_call_id="t-1", tool_name="add")),
+        )
+        _fire(
+            mock_sdk["handlers"],
+            _FakeEvent(
+                _FakeToolComplete(
+                    tool_call_id="t-1",
+                    success=False,
+                    error=_FakeToolError(message="boom", code="E_X"),
+                )
+            ),
+        )
+        _fire(mock_sdk["handlers"], _FakeEvent(_FakeUsage()))
+        _fire(mock_sdk["handlers"], _FakeEvent(_FakeAssistantMessage("apologies")))
+
+    mock_sdk["session"].send_and_wait = AsyncMock(side_effect=fake_send)
+
+    rt = CopilotRuntime()
+    sess = rt.session(on_event=events.append)
+    try:
+        await sess.execute("call add")
+    finally:
+        await sess.close()
+
+    failures = [e for e in events if e.kind == "tool_failure"]
+    posts = [e for e in events if e.kind == "post_tool_use"]
+    assert len(failures) == 1
+    assert failures[0].payload["success"] is False
+    assert posts == []
+
+
+async def test_on_event_pre_compact_translates_from_native(
+    mock_sdk: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """SessionCompactionStartData → pre_compact HookEvent."""
+    from airframe.hooks import HookEvent
+
+    _patch_hook_event_types(monkeypatch)
+    events: list[HookEvent] = []
+
+    async def fake_send(prompt: str, *, timeout: float, **_: Any) -> None:
+        _fire(mock_sdk["handlers"], _FakeEvent(_FakeSessionCompactionStartData()))
+        _fire(mock_sdk["handlers"], _FakeEvent(_FakeUsage()))
+        _fire(mock_sdk["handlers"], _FakeEvent(_FakeAssistantMessage("ok")))
+
+    mock_sdk["session"].send_and_wait = AsyncMock(side_effect=fake_send)
+
+    rt = CopilotRuntime()
+    sess = rt.session(on_event=events.append)
+    try:
+        await sess.execute("hi")
+    finally:
+        await sess.close()
+
+    compacts = [e for e in events if e.kind == "pre_compact"]
+    assert len(compacts) == 1
+
+
+async def test_on_event_submit_result_tool_calls_are_suppressed(
+    mock_sdk: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The forced submit_result tool is structured-output plumbing —
+    hook emission suppresses it consistently with the streaming events."""
+    from airframe.hooks import HookEvent
+
+    _patch_hook_event_types(monkeypatch)
+    events: list[HookEvent] = []
+
+    async def fake_send(prompt: str, *, timeout: float, **_: Any) -> None:
+        # Drive the submit_result handler so _build_result yields a
+        # structured payload.
+        submit_entry = next(
+            t for t in mock_sdk["captured_tools"] if t["name"] == SUBMIT_RESULT_TOOL
+        )
+        await submit_entry["handler"](_Schema(summary="ok", count=1), MagicMock())
+        _fire(
+            mock_sdk["handlers"],
+            _FakeEvent(
+                _FakeToolStart(
+                    tool_call_id="submit-1",
+                    tool_name=SUBMIT_RESULT_TOOL,
+                    arguments={"summary": "ok", "count": 1},
+                )
+            ),
+        )
+        _fire(mock_sdk["handlers"], _FakeEvent(_FakeUsage()))
+        _fire(mock_sdk["handlers"], _FakeEvent(_FakeAssistantMessage("")))
+
+    mock_sdk["session"].send_and_wait = AsyncMock(side_effect=fake_send)
+
+    rt = CopilotRuntime()
+    sess = rt.session(on_event=events.append)
+    try:
+        await sess.execute("brief me", schema=_Schema)
+    finally:
+        await sess.close()
+
+    pre = [e for e in events if e.kind == "pre_tool_use"]
+    assert pre == []
+
+
+async def test_close_synthesises_session_end_when_native_event_missing(
+    mock_sdk: dict[str, Any],
+) -> None:
+    """If the SDK never fires SessionShutdownData, close() must still
+    emit a synthetic session_end so consumer observers see the
+    end-of-life marker."""
+    from airframe.hooks import HookEvent
+
+    events: list[HookEvent] = []
+
+    async def fake_send(prompt: str, *, timeout: float, **_: Any) -> None:
+        _fire(mock_sdk["handlers"], _FakeEvent(_FakeUsage()))
+        _fire(mock_sdk["handlers"], _FakeEvent(_FakeAssistantMessage("ok")))
+
+    mock_sdk["session"].send_and_wait = AsyncMock(side_effect=fake_send)
+
+    rt = CopilotRuntime()
+    sess = rt.session(on_event=events.append)
+    await sess.execute("hi")
+    # Before close: no session_end yet.
+    assert [e for e in events if e.kind == "session_end"] == []
+    await sess.close()
+    ends = [e for e in events if e.kind == "session_end"]
+    assert len(ends) == 1
+
+
+async def test_close_session_end_is_idempotent(mock_sdk: dict[str, Any]) -> None:
+    """Multiple close() calls fire session_end exactly once."""
+    from airframe.hooks import HookEvent
+
+    events: list[HookEvent] = []
+
+    async def fake_send(prompt: str, *, timeout: float, **_: Any) -> None:
+        _fire(mock_sdk["handlers"], _FakeEvent(_FakeUsage()))
+        _fire(mock_sdk["handlers"], _FakeEvent(_FakeAssistantMessage("ok")))
+
+    mock_sdk["session"].send_and_wait = AsyncMock(side_effect=fake_send)
+
+    rt = CopilotRuntime()
+    sess = rt.session(on_event=events.append)
+    await sess.execute("hi")
+    await sess.close()
+    await sess.close()
+    await sess.close()
+    ends = [e for e in events if e.kind == "session_end"]
+    assert len(ends) == 1
+
+
+async def test_close_skips_session_end_if_native_already_fired(
+    mock_sdk: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If SessionShutdownData fired during the turn, close() must NOT
+    fire a second synthetic session_end."""
+    from airframe.hooks import HookEvent
+
+    _patch_hook_event_types(monkeypatch)
+    events: list[HookEvent] = []
+
+    async def fake_send(prompt: str, *, timeout: float, **_: Any) -> None:
+        _fire(mock_sdk["handlers"], _FakeEvent(_FakeUsage()))
+        _fire(mock_sdk["handlers"], _FakeEvent(_FakeAssistantMessage("ok")))
+        _fire(mock_sdk["handlers"], _FakeEvent(_FakeSessionShutdownData()))
+
+    mock_sdk["session"].send_and_wait = AsyncMock(side_effect=fake_send)
+
+    rt = CopilotRuntime()
+    sess = rt.session(on_event=events.append)
+    await sess.execute("hi")
+    await sess.close()
+    ends = [e for e in events if e.kind == "session_end"]
+    assert len(ends) == 1
+
+
+async def test_no_on_event_skips_hook_subscription(mock_sdk: dict[str, Any]) -> None:
+    """No on_event= → only the capture handler is installed."""
+
+    async def fake_send(prompt: str, *, timeout: float, **_: Any) -> None:
+        _fire(mock_sdk["handlers"], _FakeEvent(_FakeUsage()))
+        _fire(mock_sdk["handlers"], _FakeEvent(_FakeAssistantMessage("ok")))
+
+    mock_sdk["session"].send_and_wait = AsyncMock(side_effect=fake_send)
+
+    rt = CopilotRuntime()
+    sess = rt.session()
+    # During the turn there's exactly one handler (the capture slot);
+    # the hook subscription is absent because on_event=None.
+
+    handlers_during_turn: list[int] = []
+
+    async def probe_send(prompt: str, *, timeout: float, **_: Any) -> None:
+        handlers_during_turn.append(len(mock_sdk["handlers"]))
+        _fire(mock_sdk["handlers"], _FakeEvent(_FakeUsage()))
+        _fire(mock_sdk["handlers"], _FakeEvent(_FakeAssistantMessage("ok")))
+
+    mock_sdk["session"].send_and_wait = AsyncMock(side_effect=probe_send)
+    try:
+        await sess.execute("hi")
+    finally:
+        await sess.close()
+
+    assert handlers_during_turn == [1]
+
+
+async def test_on_event_observer_that_raises_does_not_break_session(
+    mock_sdk: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If the observer raises, the session continues — _fire_hook_event
+    catches everything except KeyboardInterrupt/SystemExit."""
+    from airframe.hooks import HookEvent
+
+    _patch_hook_event_types(monkeypatch)
+    calls = {"n": 0}
+
+    def boom(event: HookEvent) -> None:
+        calls["n"] += 1
+        raise RuntimeError("observer broke")
+
+    async def fake_send(prompt: str, *, timeout: float, **_: Any) -> None:
+        _fire(mock_sdk["handlers"], _FakeEvent(_FakeSessionStartData()))
+        _fire(mock_sdk["handlers"], _FakeEvent(_FakeUsage()))
+        _fire(mock_sdk["handlers"], _FakeEvent(_FakeAssistantMessage("ok")))
+
+    mock_sdk["session"].send_and_wait = AsyncMock(side_effect=fake_send)
+
+    rt = CopilotRuntime()
+    sess = rt.session(on_event=boom)
+    try:
+        # The turn completes despite the raising observer.
+        result = await sess.execute("hi")
+    finally:
+        await sess.close()
+
+    assert result.text == "ok"
+    assert calls["n"] >= 1
+
+
+# ---------------------------------------------------------------------------
+# Budget caps (Phase 5 Iteration D)
+# ---------------------------------------------------------------------------
+
+
+def test_copilot_runtime_declares_budget_usd_cap_only() -> None:
+    """Copilot flips BUDGET_USD_CAP True; BUDGET_TURN_CAP stays False.
+
+    The Copilot SDK caps internal turns at the CLI level via the
+    runtime's ``--max-turns`` config; exposing a user-facing
+    ``max_turns=`` on per-execute would mislead consumers, so we
+    decline.
+    """
+    rt = CopilotRuntime()
+    assert rt.supports(Feature.BUDGET_USD_CAP)
+    assert not rt.supports(Feature.BUDGET_TURN_CAP)
+
+
+async def test_max_turns_raises_unsupported_feature(mock_sdk: dict[str, Any]) -> None:
+    """``max_turns=`` always raises on Copilot (capability declined)."""
+    from airframe.errors import UnsupportedFeatureError
+
+    rt = CopilotRuntime()
+    sess = rt.session()
+    try:
+        with pytest.raises(UnsupportedFeatureError) as exc_info:
+            await sess.execute("hi", max_turns=5)
+        assert exc_info.value.feature == Feature.BUDGET_TURN_CAP
+    finally:
+        await sess.close()
+
+
+async def test_max_budget_usd_cap_raises_when_cumulative_cost_reached(
+    mock_sdk: dict[str, Any],
+) -> None:
+    """Once cumulative cost >= max_budget_usd, the next execute()
+    raises RuntimeBudgetExceededError(kind='usd')."""
+    from airframe.errors import RuntimeBudgetExceededError
+
+    async def fake_send(prompt: str, *, timeout: float, **_: Any) -> None:
+        _fire(mock_sdk["handlers"], _FakeEvent(_FakeUsage(cost=0.03)))
+        _fire(mock_sdk["handlers"], _FakeEvent(_FakeAssistantMessage("ok")))
+
+    mock_sdk["session"].send_and_wait = AsyncMock(side_effect=fake_send)
+    rt = CopilotRuntime()
+    sess = rt.session()
+    try:
+        await sess.execute("turn 1", max_budget_usd=0.05)
+        await sess.execute("turn 2", max_budget_usd=0.05)
+        with pytest.raises(RuntimeBudgetExceededError) as exc_info:
+            await sess.execute("turn 3", max_budget_usd=0.05)
+    finally:
+        await sess.close()
+    err = exc_info.value
+    assert err.kind == "usd"
+    assert err.cap == 0.05
+
+
+async def test_budget_caps_none_open_cleanly(mock_sdk: dict[str, Any]) -> None:
+    """No cap → no enforcement; turns run freely."""
+
+    async def fake_send(prompt: str, *, timeout: float, **_: Any) -> None:
+        _fire(mock_sdk["handlers"], _FakeEvent(_FakeUsage(cost=1.0)))
+        _fire(mock_sdk["handlers"], _FakeEvent(_FakeAssistantMessage("ok")))
+
+    mock_sdk["session"].send_and_wait = AsyncMock(side_effect=fake_send)
+    rt = CopilotRuntime()
+    sess = rt.session()
+    try:
+        await sess.execute("a")
+        await sess.execute("b")
+        await sess.execute("c")
+    finally:
+        await sess.close()
+
+
+async def test_stream_honours_max_budget_usd_cap(mock_sdk: dict[str, Any]) -> None:
+    """Stream path uses the same enforce — exhausted cap raises."""
+    from airframe.errors import RuntimeBudgetExceededError
+
+    async def fake_send(prompt: str, *, timeout: float, **_: Any) -> None:
+        _fire(mock_sdk["handlers"], _FakeEvent(_FakeUsage(cost=0.02)))
+        _fire(mock_sdk["handlers"], _FakeEvent(_FakeAssistantMessage("ok")))
+
+    mock_sdk["session"].send_and_wait = AsyncMock(side_effect=fake_send)
+    rt = CopilotRuntime()
+    sess = rt.session()
+    try:
+        async for _ in sess.stream("a", max_budget_usd=0.01):
+            pass
+        with pytest.raises(RuntimeBudgetExceededError):
+            async for _ in sess.stream("b", max_budget_usd=0.01):
+                pass
+    finally:
+        await sess.close()

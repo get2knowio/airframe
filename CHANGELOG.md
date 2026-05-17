@@ -6,6 +6,261 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+**Phase 5 of the [implementation plan](docs/implementation-plan.md)
+is complete — permission, hooks, budget.** Iteration A landed the
+protocol-surface shape locks (:class:`PermissionRequest`,
+:class:`PermissionCallback`, :data:`PermissionDecision`,
+:class:`HookEvent` with the eight ``kind`` literals, the four new
+kwargs on :meth:`session` / :meth:`execute` / :meth:`stream` gated
+by shared capability helpers). Iteration B wires the permission
+callback: Claude / Copilot / Codex accept it natively, OpenAI-compat
+declines permanently. Iteration C wires lifecycle hooks across all
+four adapters — each declares its emittable-kinds subset via the
+new :attr:`EMITTABLE_HOOK_KINDS` ClassVar; observers receive
+:class:`~airframe.hooks.HookEvent` instances in causal order with
+synthetic ``session_end`` at :meth:`close` if the vendor SDK never
+fired one. **Iteration D wires the budget caps** — ``max_turns=`` /
+``max_budget_usd=`` honoured at turn boundary across all four
+adapters, with the new :class:`RuntimeBudgetExceededError` carrying
+``cap`` / ``current`` / ``kind`` attributes for retry-with-larger-cap
+or fail-closed branching.
+
+### Added (Phase 5, Iteration D — budget caps + wrap-up)
+
+- **New error class:** :class:`~airframe.errors.RuntimeBudgetExceededError`
+  (`AgentRuntimeError` subclass) with ``cap: float``,
+  ``current: float``, and ``kind: Literal["usd", "turns"]``
+  attributes. Raised at the turn boundary when ``max_turns=`` or
+  ``max_budget_usd=`` would be exceeded by the about-to-fire turn;
+  mid-turn interrupts are additive later via
+  :meth:`AgentSession.cancel`. Exported from top-level :mod:`airframe`.
+- **Shared helper:** :func:`airframe.sessions._enforce_budget_pre_turn`
+  — every wiring adapter calls it at the top of
+  :meth:`AgentSession.execute` / :meth:`AgentSession.stream`. Checks
+  ``max_turns`` first (raises with ``kind="turns"``), then
+  ``max_budget_usd`` (raises with ``kind="usd"``). The session
+  tracks ``_turn_count`` and ``_cumulative_cost_usd`` (sum of
+  ``RuntimeResult.cost.cost_usd`` across all turns); both reset at
+  :meth:`close`.
+- **Claude:** ``max_turns=`` overrides the runtime-default
+  ``DEFAULT_MAX_TURNS=60`` by riding into
+  :attr:`ClaudeAgentOptions.max_turns` at connect time. The cache
+  key carries the value so a turn-cap change forces reconnect (same
+  pattern as ``schema=`` / ``thinking=``). ``max_budget_usd`` uses
+  the shared client-side accumulator.
+- **Copilot:** ``max_budget_usd`` uses the shared client-side
+  accumulator. ``max_turns=`` is **declined permanently** —
+  Copilot's SDK caps internal turns at the CLI level via the
+  runtime's ``--max-turns`` config, so a user-facing
+  ``max_turns=`` on per-execute would mislead consumers.
+  ``Feature.BUDGET_TURN_CAP`` stays False on Copilot.
+- **Codex / OpenAI-compat:** both flip
+  :data:`Feature.BUDGET_USD_CAP` and :data:`Feature.BUDGET_TURN_CAP`
+  True; both caps enforced via the shared helper. OpenAI-compat's
+  ``max_turns`` is distinct from the internal
+  ``MAX_TOOL_ITERATIONS=20`` runaway guard (the latter is a fail-safe
+  for misbehaving tool loops; ``max_turns=`` is a caller-facing
+  per-session budget).
+- :data:`Feature.BUDGET_USD_CAP` flipped True on all four adapters.
+  :data:`Feature.BUDGET_TURN_CAP` flipped True on Claude / Codex /
+  OpenAI-compat; stays False on Copilot.
+- ``examples/probe_budget.py`` — multi-provider live probe with a
+  deliberately tiny cap; verifies the error fires with the right
+  ``kind`` / ``cap`` / ``current`` attributes and prints the
+  per-adapter capability matrix at the end. Copilot's branch
+  demonstrates the ``max_turns=`` decline.
+- 25 new unit tests across the four adapter session test files
+  covering: gate-supported declaration, turn-cap firing at the
+  cumulative count, USD-cap firing at the cumulative cost,
+  stream-path uses the same enforce, no-caps default opens cleanly,
+  ``RuntimeBudgetExceededError`` attribute correctness, and
+  ``max_turns=`` decline on Copilot. ``tests/test_features.py``
+  added ``test_phase_5_final_matrix`` pinning the endgame coverage
+  table (the Iteration D deliverable) plus
+  ``test_budget_usd_cap_universal`` and
+  ``test_budget_turn_cap_universal_except_copilot``.
+
+### Changed (Phase 5, Iteration D)
+
+- ``tests/test_features.py``: replaced
+  ``test_phase_5_budget_stays_false_iteration_c`` with the
+  Iteration-D matrix tests above; replaced
+  ``test_execute_max_turns_kwarg_raises_on_every_adapter`` with
+  ``test_execute_max_turns_kwarg_raises_only_on_copilot``; replaced
+  ``test_execute_max_budget_usd_kwarg_raises_on_every_adapter``
+  with ``test_execute_max_budget_usd_kwarg_no_longer_raises``.
+  ``test_unwired_features_stay_false`` admits ``BUDGET_USD_CAP`` and
+  ``BUDGET_TURN_CAP`` into the ``any_adapter_may_support`` set.
+- ``ClaudeCodeSession._ensure_client`` now accepts a ``max_turns=``
+  kwarg and bakes it into the cache key fragment so a per-execute
+  override forces reconnect.
+
+### Added (Phase 5, Iteration C — lifecycle hooks)
+
+- Shared :func:`airframe.sessions._fire_hook_event` helper — every
+  adapter funnels emissions through it. Provides two invariants the
+  per-adapter wiring would otherwise duplicate: (1) no-op when
+  ``on_event`` is ``None`` so per-event call sites need no guard,
+  (2) exception safety — a raising observer is caught (except
+  ``KeyboardInterrupt`` / ``SystemExit``) and debug-logged so it
+  cannot break the session.
+- ``EMITTABLE_HOOK_KINDS: ClassVar[frozenset[str]]`` on every
+  built-in adapter, documenting the subset of the eight
+  :data:`~airframe.hooks.HookEventKind` literals it actually emits.
+  Adapters differ by vendor capability: **Claude** emits all eight
+  (the only adapter with native ``pre_compact`` + ``rate_limit``);
+  **Copilot** emits seven (no ``rate_limit``); **Codex** and
+  **OpenAI-compat** emit six (no ``pre_compact``, no
+  ``rate_limit``). Consumers writing portable observers can branch
+  defensively on the per-runtime set.
+- **Claude:** :func:`_build_claude_hooks_config` registers
+  :class:`HookMatcher` callbacks for the native SDK kinds
+  (``PreToolUse``, ``PostToolUse``, ``UserPromptSubmit``,
+  ``PreCompact``, ``SessionStart``, ``SessionEnd``,
+  ``Stop`` / ``SubagentStop``). Each callback returns ``{}`` (pure
+  observation — never blocks tool use). :func:`_extract_claude_hook_payload`
+  normalises per-kind payloads. ``hooks=`` joins
+  :attr:`ClaudeAgentOptions` at :meth:`_ensure_client` — connect-time
+  bake means observer identity joins the cache key.
+- **Copilot:** :meth:`CopilotAgentSession._on_copilot_hook_event`
+  subscribes alongside the existing capture handler via a second
+  :meth:`CopilotSession.on` registration. Translates
+  :class:`SessionStartData` / :class:`SessionShutdownData` /
+  :class:`UserMessageData` / :class:`ToolExecutionStartData` /
+  :class:`ToolExecutionCompleteData` /
+  :class:`SessionCompactionStartData` into the matching
+  :class:`HookEvent`. ``submit_result`` tool calls are suppressed
+  consistently with the streaming-event filter (structured-output
+  plumbing isn't a user-visible tool).
+- **Codex:** synthetic ``session_start`` at first ``execute()`` /
+  ``stream()`` (no native event); ``user_prompt_submit`` per turn;
+  ``pre_tool_use`` / ``post_tool_use`` / ``tool_failure`` translated
+  from :class:`CommandExecutionItem` / :class:`McpToolCallItem`
+  events. The execute path replays ``turn.items`` post-completion
+  (``execute()`` doesn't iterate the event stream — the
+  :func:`_fire_item_hooks_post_execute` helper produces the same
+  per-tool ordering as the streaming path). Streaming path emits
+  ``pre_tool_use`` exactly once per item id via a
+  ``tool_pre_fired`` set so repeated ``ItemUpdatedEvent`` frames
+  don't multi-fire.
+- **OpenAI-compat:** synthetic ``session_start`` at first call;
+  ``user_prompt_submit`` per turn; ``pre_tool_use`` /
+  ``post_tool_use`` / ``tool_failure`` fired around each
+  :meth:`_invoke_tool` call inside the client-side tool loop on both
+  ``execute()`` and ``stream()`` paths. ``session_id`` is always
+  ``None`` (Chat Completions has no server-side session concept).
+- :data:`Feature.LIFECYCLE_HOOKS` flipped True on all four adapters.
+- ``examples/probe_hooks.py`` — multi-provider live probe that
+  registers a logging observer, drives a tool round-trip, and
+  reports the per-kind histogram plus causal-ordering sanity checks
+  (``session_start`` first, ``session_end`` last, every emitted kind
+  in the declared :attr:`EMITTABLE_HOOK_KINDS`).
+- :meth:`close` on every adapter session synthesises ``session_end``
+  if the vendor SDK never fired one, gated on a
+  ``_session_end_fired`` flag so repeat closes are idempotent.
+  Codex / OpenAI-compat additionally gate on
+  ``_session_start_fired`` — closing a session that never ran a
+  turn does NOT emit a phantom end.
+- 43 new unit tests across the four adapter session test files
+  covering: hook wiring (SDK options / subscriptions), per-kind
+  translation, ordering invariants, idempotent ``close()``, no-op
+  when ``on_event`` is omitted, observer-raises tolerance, and
+  per-adapter ``EMITTABLE_HOOK_KINDS`` matrix pins. The cross-adapter
+  matrix tests in ``tests/test_features.py`` were updated for the
+  Iteration-C surface.
+
+### Changed (Phase 5, Iteration C)
+
+- ``tests/test_features.py``: replaced
+  ``test_phase_5_hooks_and_budget_stay_false_iteration_b`` with
+  ``test_phase_5_budget_stays_false_iteration_c`` (only budget
+  remains scaffolded). New ``test_lifecycle_hooks_universal`` pins
+  ``LIFECYCLE_HOOKS=True`` on all four adapters;
+  ``test_emittable_hook_kinds_matrix`` pins each adapter's emittable
+  set so a regression where (e.g.) Codex stops emitting
+  ``post_tool_use`` is caught at PR time.
+  ``test_unwired_features_stay_false`` admits ``LIFECYCLE_HOOKS``
+  into the ``any_adapter_may_support`` set.
+- ``CopilotAgentSession._tear_down_session`` refactored to
+  unsubscribe both the capture handler and the new hook-event
+  handler via a shared loop, keeping cleanup symmetric.
+
+### Added (Phase 5, Iteration B — permission callback)
+
+- **Claude:** ``_translate_permission_for_claude(cb)`` wraps the
+  user's :class:`~airframe.permission.PermissionCallback` as
+  :attr:`ClaudeAgentOptions.can_use_tool`. Decision mapping:
+  ``"allow"`` → :class:`PermissionResultAllow`, ``"deny"`` →
+  :class:`PermissionResultDeny` (with the request's ``reason`` as
+  the message), ``"defer"`` → :class:`PermissionResultAllow` with a
+  debug log (Claude's binary result type has no third option; the
+  existing ``permission_mode="bypassPermissions"`` default already
+  matches the "defer" intent). Callback identity joins the
+  :meth:`ClaudeCodeSession._ensure_client` cache key — a callback
+  swap forces reconnect because ``can_use_tool`` is baked at
+  connect time.
+- **Copilot:** ``_translate_permission_for_copilot(cb)`` wraps the
+  callback as Copilot's ``_PermissionHandlerFn`` (replacing the
+  ``PermissionHandler.approve_all`` default when supplied). Decision
+  mapping: ``"allow"`` → ``"approve-once"``, ``"deny"`` →
+  ``"reject"``, ``"defer"`` → ``"user-not-available"`` (Copilot's
+  default policy takes over). Callback identity joins the session
+  cache key so a swap forces a session rebuild.
+- **Codex:** ``approval_policy`` is *session-wide*, not per-call —
+  the airframe per-call contract bridges by invoking the callback
+  exactly **once** at first ``execute()`` with a sentinel
+  :class:`PermissionRequest` (``tool_name="*"``, explanatory
+  ``reason``). The returned decision maps to
+  :data:`ApprovalMode`: ``"allow"`` → ``"never"`` (auto-approve
+  everything), ``"deny"`` → ``"untrusted"`` (strictest), ``"defer"``
+  → ``"on-request"`` (Codex's default per-call prompting). Resolved
+  policy is cached for the session's lifetime. Consumers needing
+  per-call interception should use Claude or Copilot; the
+  limitation is documented in the class docstring and surfaced via
+  the sentinel ``reason``.
+- **OpenAI-compat:** permanent decline. Inline raise in
+  :meth:`OpenAICompatibleRuntime.session` returns
+  :class:`UnsupportedFeatureError` (``feature=PERMISSION_CALLBACK``)
+  with an actionable pointer at a future
+  ``OpenAIResponsesRuntime``. Symmetric with Phase 4 Iteration D's
+  permanent ``mcp_servers=`` decline.
+- :data:`Feature.PERMISSION_CALLBACK` flipped True on Claude /
+  Copilot / Codex.
+- ``examples/probe_permission.py`` — multi-provider live probe that
+  registers a logging callback approving every request. Defaults to
+  ``claude`` (richest per-call permission channel); OpenAI-compat
+  surfaces the decline verbatim (probe-as-docs).
+- 17 new unit tests across the four adapter session test files
+  covering: wrap-into-vendor-channel translation, decision mapping
+  per adapter (allow / deny / defer), defer-coercion debug logging
+  on Claude, ``user-not-available`` mapping on Copilot, session-wide
+  ApprovalMode mapping on Codex, called-once semantics on Codex,
+  callback-identity cache invalidation on Claude / Copilot,
+  no-callback default behaviour on every adapter, permanent decline
+  message on OpenAI-compat, and the cross-adapter matrix in
+  ``tests/test_features.py``.
+
+### Changed (Phase 5, Iteration B)
+
+- ``tests/test_features.py``: replaced
+  ``test_phase_5_features_stay_false_iteration_a`` and
+  ``test_session_on_permission_kwarg_raises_on_every_adapter`` with
+  per-adapter expectations now that PERMISSION_CALLBACK has flipped
+  on three of four. New tests
+  ``test_permission_callback_universal_except_openai_compat``,
+  ``test_phase_5_hooks_and_budget_stay_false_iteration_b``, and
+  ``test_session_on_permission_kwarg_raises_only_on_openai_compat``
+  pin the Iteration-B matrix. ``test_unwired_features_stay_false``
+  admits ``PERMISSION_CALLBACK`` into the
+  ``any_adapter_may_support`` set.
+- ``OpenAICompatibleRuntime`` no longer calls
+  :func:`airframe.sessions._check_permission_supported` — the
+  permanent decline is now inline with a vendor-specific message
+  (same shape as the ``mcp_servers=`` decline added in Phase 4
+  Iteration D).
+
+---
+
 **Phase 4 of the [implementation plan](docs/implementation-plan.md) is
 complete — MCP server references (Tier 2).** Iteration A landed the
 protocol-surface shape locks (the :class:`McpServerRef` dataclass,
@@ -19,8 +274,6 @@ message. Iteration D codifies the Codex + OpenAI-compat permanent
 declines with vendor-specific actionable pointers (``~/.codex/config.toml``
 for Codex, a future ``OpenAIResponsesRuntime`` for OpenAI-compat),
 ships the multi-provider probe, and pins the final transport matrix.
-Ready for release as ``v0.7.0`` or to roll straight into Phase 5
-(permission, hooks, budget).
 
 ### Added (Phase 4, Iteration D — declines, probe, wrap-up)
 

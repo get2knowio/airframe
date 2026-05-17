@@ -78,9 +78,14 @@ from airframe.protocol import (
     UnsupportedBindingError,
 )
 from airframe.sessions import (
+    _check_budget_supported,
+    _check_hooks_supported,
     _check_mcp_servers_supported,
+    _check_permission_supported,
     _check_tools_supported,
     _compose_mcp_headers,
+    _enforce_budget_pre_turn,
+    _fire_hook_event,
     _mcp_servers_fingerprint,
     _split_prompt_parts,
 )
@@ -88,7 +93,10 @@ from airframe.thinking import ThinkingMode
 from airframe.tools import FunctionTool, McpServerRef
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Callable
+
+    from airframe.hooks import HookEvent
+    from airframe.permission import PermissionCallback
 
 logger = logging.getLogger(__name__)
 
@@ -212,6 +220,27 @@ class ClaudeCodeRuntime(AgentRuntime):
     #:   sorted header *keys* participate; header values and
     #:   ``auth_token`` never enter the fingerprint (Phase 4,
     #:   Iteration B).
+    #: * ``PERMISSION_CALLBACK`` — wired by translating
+    #:   :class:`~airframe.permission.PermissionCallback` into the
+    #:   SDK's :attr:`ClaudeAgentOptions.can_use_tool` callable. The
+    #:   adapter awaits the user's callback per tool-use request,
+    #:   maps ``"allow"`` / ``"deny"`` to
+    #:   :class:`PermissionResultAllow` / :class:`PermissionResultDeny`,
+    #:   and treats ``"defer"`` as ``"allow"`` (with a debug log)
+    #:   since the existing ``permission_mode="bypassPermissions"``
+    #:   default is already the no-gate behaviour. Callback identity
+    #:   joins the ``_ensure_client`` cache key so a callback swap
+    #:   forces reconnect (Phase 5, Iteration B).
+    #: * ``LIFECYCLE_HOOKS`` — wired by translating each native
+    #:   :attr:`ClaudeAgentOptions.hooks` event into a
+    #:   :class:`~airframe.hooks.HookEvent` and fanning it out to the
+    #:   user's ``on_event=`` callback. Claude is the richest source
+    #:   here: every one of airframe's 8 :class:`HookEventKind`
+    #:   literals is emittable (``session_start`` is synthesised at
+    #:   connect since Claude has no native event for that; the
+    #:   other 7 map 1:1 from SDK hooks). Observer raises are
+    #:   debug-logged and swallowed so a buggy observer can't break
+    #:   the session (Phase 5, Iteration C).
     SUPPORTED_FEATURES: ClassVar[frozenset[Feature]] = frozenset(
         {
             Feature.STRUCTURED_OUTPUT_JSON_SCHEMA,
@@ -226,6 +255,28 @@ class ClaudeCodeRuntime(AgentRuntime):
             Feature.TOOLS_MCP_STDIO,
             Feature.TOOLS_MCP_HTTP,
             Feature.TOOLS_MCP_SSE,
+            Feature.PERMISSION_CALLBACK,
+            Feature.LIFECYCLE_HOOKS,
+            Feature.BUDGET_USD_CAP,
+            Feature.BUDGET_TURN_CAP,
+        }
+    )
+
+    #: The set of :class:`~airframe.hooks.HookEventKind` literals
+    #: this adapter can emit through ``on_event=``. Claude is the
+    #: richest source — every kind in airframe's enumeration is
+    #: supported (``session_start`` is synthesised at connect time
+    #: since Claude has no native event for it).
+    EMITTABLE_HOOK_KINDS: ClassVar[frozenset[str]] = frozenset(
+        {
+            "session_start",
+            "session_end",
+            "user_prompt_submit",
+            "pre_tool_use",
+            "post_tool_use",
+            "tool_failure",
+            "pre_compact",
+            "rate_limit",
         }
     )
 
@@ -325,6 +376,8 @@ class ClaudeCodeRuntime(AgentRuntime):
         model: ProviderModel | None = None,
         tools: list[FunctionTool] | None = None,
         mcp_servers: list[McpServerRef] | None = None,
+        on_permission: PermissionCallback | None = None,
+        on_event: Callable[[HookEvent], None] | None = None,
         provider_options: Any | None = None,
     ) -> AgentSession:
         """Open a bespoke :class:`ClaudeCodeSession`.
@@ -365,6 +418,15 @@ class ClaudeCodeRuntime(AgentRuntime):
                 :class:`~airframe.events.ToolCallResult` events with
                 the ``mcp__<server>__`` prefix stripped. Phase 4
                 Iteration B.
+            on_permission: Phase 5 scaffolding accepted by the
+                signature; non-None raises
+                :class:`~airframe.errors.UnsupportedFeatureError`
+                until Phase 5 Iteration B wires
+                :attr:`ClaudeAgentOptions.can_use_tool`.
+            on_event: Phase 5 scaffolding accepted by the signature;
+                non-None raises until Phase 5 Iteration C wires
+                :attr:`ClaudeAgentOptions.hooks` +
+                ``include_hook_events=True``.
             provider_options: Reserved for Phase 2+ (currently unused).
         """
         _check_tools_supported(
@@ -374,6 +436,16 @@ class ClaudeCodeRuntime(AgentRuntime):
         )
         _check_mcp_servers_supported(
             mcp_servers,
+            adapter_label=self.label,
+            supports=self.supports,
+        )
+        _check_permission_supported(
+            on_permission,
+            adapter_label=self.label,
+            supports=self.supports,
+        )
+        _check_hooks_supported(
+            on_event,
             adapter_label=self.label,
             supports=self.supports,
         )
@@ -388,6 +460,8 @@ class ClaudeCodeRuntime(AgentRuntime):
             model_id=model_id,
             tools=tools,
             mcp_servers=mcp_servers,
+            on_permission=on_permission,
+            on_event=on_event,
         )
 
     async def list_models(self) -> list[ModelInfo]:
@@ -557,6 +631,8 @@ class ClaudeCodeSession:
         model_id: str,
         tools: list[FunctionTool] | None = None,
         mcp_servers: list[McpServerRef] | None = None,
+        on_permission: PermissionCallback | None = None,
+        on_event: Callable[[HookEvent], None] | None = None,
     ) -> None:
         self._runtime = runtime
         self._resume = resume
@@ -600,6 +676,30 @@ class ClaudeCodeSession:
         if self._tools:
             names.add(AIRFRAME_MCP_SERVER_NAME)
         self._known_mcp_servers: frozenset[str] = frozenset(names)
+        # Phase 5 Iteration B: permission callback baked at connect
+        # time via ClaudeAgentOptions.can_use_tool. Callback identity
+        # joins the cache key so a callback swap forces reconnect.
+        self._on_permission: PermissionCallback | None = on_permission
+        self._permission_fingerprint = _permission_fingerprint(on_permission)
+        # Phase 5 Iteration C: lifecycle-hook observer. Stored
+        # directly on the session — hook callbacks are pure
+        # observation and don't affect SDK flow, so we don't need
+        # to fingerprint the callback into the cache key (the
+        # observer's identity never changes the request semantics).
+        self._on_event: Callable[[HookEvent], None] | None = on_event
+        # Track whether session_start has fired so re-entrant
+        # connects (cache-key invalidations during a session)
+        # don't double-fire.
+        self._session_start_fired = False
+        # Phase 5 Iteration D: per-session running totals for budget
+        # enforcement. ``_cumulative_cost_usd`` accumulates the cost
+        # field of every :class:`RuntimeResult` the session produces;
+        # ``_turn_count`` counts user-visible turns (one per
+        # :meth:`execute` / :meth:`stream` call). Both reset on
+        # :meth:`close` but persist across multiple turns of one
+        # session — the budget cap is *session-wide*, not per-call.
+        self._cumulative_cost_usd: float = 0.0
+        self._turn_count: int = 0
 
     async def execute(
         self,
@@ -607,10 +707,25 @@ class ClaudeCodeSession:
         *,
         schema: type[BaseModel] | None = None,
         thinking: ThinkingMode = None,
+        max_turns: int | None = None,
+        max_budget_usd: float | None = None,
         timeout: float = 600.0,
     ) -> RuntimeResult:
         if self._closed:
             raise RuntimeError("session is closed")
+        _check_budget_supported(
+            max_turns=max_turns,
+            max_budget_usd=max_budget_usd,
+            adapter_label=self._runtime.label,
+            supports=self._runtime.supports,
+        )
+        _enforce_budget_pre_turn(
+            max_turns=max_turns,
+            max_budget_usd=max_budget_usd,
+            cumulative_cost_usd=self._cumulative_cost_usd,
+            turn_count=self._turn_count,
+            adapter_label=self._runtime.label,
+        )
         text, images, files = _split_prompt_parts(
             prompt,
             adapter_label=self._runtime.label,
@@ -625,16 +740,23 @@ class ClaudeCodeSession:
                 schema=schema,
                 thinking=thinking,
                 has_attachments=has_attachments,
+                max_turns=max_turns,
                 timeout=timeout,
             )
         )
         self._in_flight_task = task
         try:
-            return await task
+            result = await task
         except asyncio.CancelledError as exc:
             raise RuntimeCancelledError(f"{self._runtime.label}: cancelled") from exc
         finally:
             self._in_flight_task = None
+        # Accumulate post-turn so the *next* execute() sees the
+        # updated running total. Cost can be None on some result
+        # shapes — coerce to 0.0 so the cap math stays well-defined.
+        self._turn_count += 1
+        self._cumulative_cost_usd += result.cost.cost_usd or 0.0
+        return result
 
     async def _do_execute(
         self,
@@ -643,10 +765,14 @@ class ClaudeCodeSession:
         schema: type[BaseModel] | None,
         thinking: ThinkingMode,
         has_attachments: bool,
+        max_turns: int | None,
         timeout: float,
     ) -> RuntimeResult:
         client = await self._ensure_client(
-            schema=schema, thinking=thinking, has_attachments=has_attachments
+            schema=schema,
+            thinking=thinking,
+            has_attachments=has_attachments,
+            max_turns=max_turns,
         )
         self._in_flight = True
         try:
@@ -670,10 +796,25 @@ class ClaudeCodeSession:
         *,
         schema: type[BaseModel] | None = None,
         thinking: ThinkingMode = None,
+        max_turns: int | None = None,
+        max_budget_usd: float | None = None,
         timeout: float = 600.0,
     ) -> AsyncIterator[RuntimeEvent]:
         if self._closed:
             raise RuntimeError("session is closed")
+        _check_budget_supported(
+            max_turns=max_turns,
+            max_budget_usd=max_budget_usd,
+            adapter_label=self._runtime.label,
+            supports=self._runtime.supports,
+        )
+        _enforce_budget_pre_turn(
+            max_turns=max_turns,
+            max_budget_usd=max_budget_usd,
+            cumulative_cost_usd=self._cumulative_cost_usd,
+            turn_count=self._turn_count,
+            adapter_label=self._runtime.label,
+        )
         text, images, files = _split_prompt_parts(
             prompt,
             adapter_label=self._runtime.label,
@@ -685,7 +826,10 @@ class ClaudeCodeSession:
         self._stream_cancelled = False
         try:
             client = await self._ensure_client(
-                schema=schema, thinking=thinking, has_attachments=has_attachments
+                schema=schema,
+                thinking=thinking,
+                has_attachments=has_attachments,
+                max_turns=max_turns,
             )
         except Exception as exc:
             raise self._runtime._classify_exception(exc) from exc
@@ -755,6 +899,12 @@ class ClaudeCodeSession:
 
         self._in_flight = False
         result = self._build_result(result_msg, schema=schema)
+        # Phase 5 Iteration D: bump session-wide budget trackers
+        # before yielding TurnComplete so a consumer observing the
+        # event sees the updated cumulative state via subsequent
+        # execute() / stream() calls.
+        self._turn_count += 1
+        self._cumulative_cost_usd += result.cost.cost_usd or 0.0
         yield TurnComplete(result=result)
 
     async def cancel(self) -> None:
@@ -776,6 +926,18 @@ class ClaudeCodeSession:
                 logger.debug("%s.session_interrupt_failed error=%s", self._runtime.label, exc)
 
     async def close(self) -> None:
+        # Phase 5 Iteration C: fire session_end before tearing down
+        # if we ever connected (so consumer observers see a clean
+        # start→end pair). Don't fire if the session never connected,
+        # and don't re-fire on repeat close() calls (close is
+        # idempotent).
+        if self._session_start_fired and not self._closed:
+            _fire_hook_event(
+                self._on_event,
+                "session_end",
+                session_id=self.id,
+                payload={"model": self._model_id},
+            )
         self._closed = True
         client = self._client
         self._client = None
@@ -810,11 +972,12 @@ class ClaudeCodeSession:
         schema: type[BaseModel] | None,
         thinking: ThinkingMode = None,
         has_attachments: bool = False,
+        max_turns: int | None = None,
     ) -> Any:
         # Reconnect when the schema OR thinking OR attachments OR tools
-        # OR mcp_servers fingerprint changes — ``output_format``,
-        # ``effort`` / ``thinking``, ``allowed_tools``, and
-        # ``mcp_servers`` are all baked into ClaudeAgentOptions at
+        # OR mcp_servers OR max_turns fingerprint changes — ``output_format``,
+        # ``effort`` / ``thinking``, ``allowed_tools``, ``mcp_servers``,
+        # and ``max_turns`` are all baked into ClaudeAgentOptions at
         # connect time. (model, system, resume) are fixed for the
         # session and don't contribute to the key.
         schema_fragment = (
@@ -827,9 +990,12 @@ class ClaudeCodeSession:
         attachments_fragment = f"attachments={has_attachments}"
         tools_fragment = f"tools={self._tools_fingerprint}"
         mcp_fragment = f"mcp={self._mcp_servers_fingerprint}"
+        permission_fragment = f"perm={self._permission_fingerprint}"
+        max_turns_fragment = f"max_turns={max_turns}"
         cache_key = (
             f"{schema_fragment}|{thinking_fragment}|{attachments_fragment}|"
-            f"{tools_fragment}|{mcp_fragment}"
+            f"{tools_fragment}|{mcp_fragment}|{permission_fragment}|"
+            f"{max_turns_fragment}"
         )
         if self._client is not None and self._client_key == cache_key:
             return self._client
@@ -856,7 +1022,12 @@ class ClaudeCodeSession:
 
         options_kwargs: dict[str, Any] = {
             "model": self._model_id,
-            "max_turns": self._runtime._max_turns,
+            # Phase 5 Iteration D: ``max_turns=`` on execute()/stream()
+            # overrides the runtime-default DEFAULT_MAX_TURNS by riding
+            # into ClaudeAgentOptions.max_turns at connect time. Cache
+            # key carries the value so a turn-cap change forces
+            # reconnect (same pattern as schema= / thinking=).
+            "max_turns": max_turns if max_turns is not None else self._runtime._max_turns,
             "permission_mode": "bypassPermissions",
             "env": env_override or {},
             # Always-on so stream() gets fine-grained deltas. execute()
@@ -877,6 +1048,10 @@ class ClaudeCodeSession:
             options_kwargs["effort"] = effort
         if thinking_config is not None:
             options_kwargs["thinking"] = thinking_config
+        if self._on_permission is not None:
+            options_kwargs["can_use_tool"] = _translate_permission_for_claude(self._on_permission)
+        if self._on_event is not None:
+            options_kwargs["hooks"] = _build_claude_hooks_config(self._on_event, session=self)
 
         # Bring in the auto-allowed Read tool for attachments, the
         # in-process MCP server for FunctionTools, and the per-name
@@ -925,6 +1100,20 @@ class ClaudeCodeSession:
             raise self._runtime._classify_exception(exc) from exc
         self._client = client
         self._client_key = cache_key
+        # Phase 5 Iteration C: synthesise session_start on first
+        # connect. Claude has no native event for this (its
+        # ``SessionStart`` hook fires inside the CLI process before
+        # the SDK client wires up), so airframe emits it from the
+        # adapter layer. Subsequent reconnects (cache-key changes
+        # mid-session) don't re-fire.
+        if not self._session_start_fired:
+            _fire_hook_event(
+                self._on_event,
+                "session_start",
+                session_id=self.id,
+                payload={"model": self._model_id, "resumed": self._resume is not None},
+            )
+            self._session_start_fired = True
         return client
 
     async def _query_and_drain(self, client: Any, prompt: str) -> Any:
@@ -1312,6 +1501,203 @@ def _translate_mcp_servers_for_claude(
                 cfg["headers"] = merged
             out[ref.name] = cfg
     return out
+
+
+def _translate_permission_for_claude(callback: PermissionCallback) -> Any:
+    """Wrap an airframe :class:`PermissionCallback` as Claude's
+    :attr:`ClaudeAgentOptions.can_use_tool`.
+
+    The SDK calls the returned coroutine with
+    ``(tool_name, tool_args, ToolPermissionContext)`` and expects a
+    :class:`PermissionResultAllow` / :class:`PermissionResultDeny`
+    back. We build a :class:`PermissionRequest`, await the user's
+    callback, and translate the :data:`PermissionDecision`:
+
+    * ``"allow"`` → :class:`PermissionResultAllow`.
+    * ``"deny"`` → :class:`PermissionResultDeny` with the
+      :attr:`PermissionRequest.reason` (or a generic message) so the
+      model sees actionable feedback.
+    * ``"defer"`` → :class:`PermissionResultAllow` with a debug log.
+      Claude's binary result type has no third option; the existing
+      ``permission_mode="bypassPermissions"`` default already
+      allows everything, so ``"defer"`` matches that semantics —
+      "I don't have an opinion; let the SDK / default policy
+      decide" collapses to "allow" on this adapter.
+
+    The :attr:`PermissionRequest.reason` is built from the SDK
+    context's :attr:`ToolPermissionContext.decision_reason` /
+    :attr:`description` / :attr:`title` (first non-empty); the
+    :attr:`tool_args` come from the SDK's raw ``tool_args`` dict.
+    """
+    from claude_agent_sdk import PermissionResultAllow, PermissionResultDeny
+
+    from airframe.permission import PermissionRequest
+
+    async def _can_use_tool(
+        tool_name: str,
+        tool_args: dict[str, Any],
+        context: Any,
+    ) -> Any:
+        reason = (
+            getattr(context, "decision_reason", None)
+            or getattr(context, "description", None)
+            or getattr(context, "title", None)
+        )
+        request = PermissionRequest(
+            tool_name=tool_name,
+            tool_args=tool_args,
+            reason=reason,
+        )
+        decision = await callback.handle(request)
+        if decision == "allow":
+            return PermissionResultAllow()
+        if decision == "deny":
+            return PermissionResultDeny(
+                message=reason or f"airframe PermissionCallback denied {tool_name!r}",
+            )
+        # "defer" — Claude's binary result type has no third option;
+        # treat as allow to match the existing bypassPermissions
+        # default. Debug-log so consumers can audit the deferral.
+        logger.debug(
+            "claude_code: PermissionCallback returned 'defer' for tool=%r; "
+            "coercing to 'allow' (Claude's can_use_tool result is binary; "
+            "the existing permission_mode='bypassPermissions' default "
+            "matches the 'defer' intent)",
+            tool_name,
+        )
+        return PermissionResultAllow()
+
+    return _can_use_tool
+
+
+def _permission_fingerprint(callback: PermissionCallback | None) -> str:
+    """Deterministic fingerprint of the permission-callback identity.
+
+    Used in the :meth:`ClaudeCodeSession._ensure_client` cache key so
+    a callback swap between turns forces reconnect (Claude's
+    ``can_use_tool`` is baked at connect time). Identity-based —
+    we don't try to introspect the callable's behaviour, just
+    detect "same object" vs "different object" so consumers who pass
+    a fresh lambda per call see a clear reconnect rather than silent
+    staleness.
+    """
+    if callback is None:
+        return "__no_permission__"
+    return f"id={id(callback)}|type={type(callback).__name__}"
+
+
+#: Map Claude's native ``hook_event_name`` values onto airframe's
+#: :data:`HookEventKind` literals. SDK events not in this map
+#: (``SubagentStop``, ``Notification``, ``SubagentStart``,
+#: ``PermissionRequest``) don't have a direct airframe equivalent —
+#: ``PermissionRequest`` is its own callback channel, the others fall
+#: outside the 8 lifecycle moments airframe normalises today.
+_CLAUDE_HOOK_NAME_TO_KIND: dict[str, str] = {
+    "PreToolUse": "pre_tool_use",
+    "PostToolUse": "post_tool_use",
+    "PostToolUseFailure": "tool_failure",
+    "UserPromptSubmit": "user_prompt_submit",
+    "PreCompact": "pre_compact",
+    "Stop": "session_end",
+}
+
+
+def _build_claude_hooks_config(
+    on_event: Callable[[HookEvent], None],
+    *,
+    session: ClaudeCodeSession,
+) -> dict[str, list[Any]]:
+    """Build :attr:`ClaudeAgentOptions.hooks` that fans every native
+    Claude hook into the user's ``on_event=`` callback.
+
+    The SDK dispatches each hook with
+    ``(HookInput, tool_use_id, HookContext)`` and expects a JSON
+    output back. airframe's observer contract is pure observation —
+    we never block or modify the SDK flow — so the returned
+    :class:`SyncHookJSONOutput` is always empty (``{}``). The session
+    keeps the latest known ``session_id`` so subsequent
+    synthesised events (``session_end`` at close) carry the right
+    value.
+
+    Per-kind payload schema (airframe normalises across vendors):
+
+    * ``pre_tool_use`` / ``post_tool_use`` / ``tool_failure`` —
+      ``{"tool_name", "tool_use_id", "tool_input"}``; success path
+      additionally carries ``"tool_response"``; failure path carries
+      ``"error"`` when the SDK exposes one.
+    * ``user_prompt_submit`` — ``{"prompt", "length"}`` (prompt is
+      the raw user-supplied string).
+    * ``pre_compact`` — ``{"trigger", "custom_instructions"}``.
+    * ``session_end`` — ``{"stop_hook_active"}``; vendor-specific
+      shutdown semantics live in :attr:`payload` for consumers that
+      need to branch.
+    """
+    from claude_agent_sdk import HookMatcher
+
+    async def _make_handler(kind: str, hook_input: Any) -> dict[str, Any]:
+        # Hook inputs are TypedDicts at runtime (plain dicts). Pull
+        # the session_id off the input when present and forward to
+        # the session so synthesised events stay consistent.
+        if isinstance(hook_input, dict):
+            sid = hook_input.get("session_id")
+            if sid:
+                session.id = sid
+        payload = _extract_claude_hook_payload(kind, hook_input)
+        _fire_hook_event(
+            on_event,
+            kind,
+            session_id=session.id,
+            payload=payload,
+        )
+        # Pure observation — no continue=/decision=/etc. signals.
+        return {}
+
+    def _make_callback(kind: str) -> Any:
+        async def _cb(hook_input: Any, _tool_use_id: str | None, _ctx: Any) -> dict[str, Any]:
+            return await _make_handler(kind, hook_input)
+
+        return _cb
+
+    hooks_config: dict[str, list[Any]] = {}
+    for sdk_event_name, kind in _CLAUDE_HOOK_NAME_TO_KIND.items():
+        hooks_config[sdk_event_name] = [HookMatcher(matcher=None, hooks=[_make_callback(kind)])]
+    return hooks_config
+
+
+def _extract_claude_hook_payload(kind: str, hook_input: Any) -> dict[str, Any]:
+    """Pull airframe's normalised payload fields out of a Claude
+    hook-input TypedDict.
+
+    Each kind exposes a different field set; this helper picks the
+    portable subset so consumer code can branch on
+    ``event.kind == "pre_tool_use"`` without writing per-vendor
+    glue. Unknown fields stay accessible via the raw SDK type behind
+    ``runtime.unwrap()`` if a consumer needs them.
+    """
+    if not isinstance(hook_input, dict):
+        return {}
+    if kind in ("pre_tool_use", "post_tool_use", "tool_failure"):
+        payload: dict[str, Any] = {
+            "tool_name": hook_input.get("tool_name", ""),
+            "tool_use_id": hook_input.get("tool_use_id", ""),
+            "tool_input": hook_input.get("tool_input", {}),
+        }
+        if "tool_response" in hook_input:
+            payload["tool_response"] = hook_input["tool_response"]
+        if "error" in hook_input:
+            payload["error"] = hook_input["error"]
+        return payload
+    if kind == "user_prompt_submit":
+        prompt = hook_input.get("prompt", "")
+        return {"prompt": prompt, "length": len(prompt) if isinstance(prompt, str) else 0}
+    if kind == "pre_compact":
+        return {
+            "trigger": hook_input.get("trigger"),
+            "custom_instructions": hook_input.get("custom_instructions"),
+        }
+    if kind == "session_end":
+        return {"stop_hook_active": hook_input.get("stop_hook_active", False)}
+    return {}
 
 
 def _tool_result_output(block: Any) -> Any:

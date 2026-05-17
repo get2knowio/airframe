@@ -45,7 +45,7 @@ import logging
 import os
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
-from typing import Any, ClassVar, TypeVar
+from typing import TYPE_CHECKING, Any, ClassVar, TypeVar
 
 from pydantic import BaseModel
 
@@ -73,11 +73,21 @@ from airframe.protocol import (
 )
 from airframe.sessions import (
     _MCP_TRANSPORT_TO_FEATURE,
+    _check_budget_supported,
+    _check_hooks_supported,
     _check_tools_supported,
+    _enforce_budget_pre_turn,
+    _fire_hook_event,
     _split_prompt_parts,
 )
 from airframe.thinking import ThinkingMode
 from airframe.tools import FunctionTool, McpServerRef
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from airframe.hooks import HookEvent
+    from airframe.permission import PermissionCallback
 
 logger = logging.getLogger(__name__)
 
@@ -200,6 +210,32 @@ class OpenAICompatibleRuntime(AgentRuntime):
             Feature.REASONING_EFFORT,
             Feature.VISION_INPUT,
             Feature.TOOLS_FUNCTION,
+            Feature.LIFECYCLE_HOOKS,
+            # Phase 5 Iteration D: client-side accumulation per
+            # session. Both caps enforced at turn boundary in v0
+            # (mid-turn interrupt is additive later). Note: ``max_turns``
+            # is a *user-facing per-execute() budget*, distinct from
+            # ``MAX_TOOL_ITERATIONS`` (the internal runaway guard
+            # in the tool loop) — see the class docstring.
+            Feature.BUDGET_USD_CAP,
+            Feature.BUDGET_TURN_CAP,
+        }
+    )
+
+    #: The :class:`~airframe.hooks.HookEventKind` literals this
+    #: adapter can emit through ``on_event=``. Synthesised from the
+    #: client-side tool-loop in :class:`OpenAICompatibleSession`.
+    #: ``pre_compact`` / ``rate_limit`` are **not emittable** —
+    #: chat-completions has no compaction concept and the SDK
+    #: doesn't surface rate-limit signals as discrete events.
+    EMITTABLE_HOOK_KINDS: ClassVar[frozenset[str]] = frozenset(
+        {
+            "session_start",
+            "session_end",
+            "user_prompt_submit",
+            "pre_tool_use",
+            "post_tool_use",
+            "tool_failure",
         }
     )
 
@@ -306,6 +342,8 @@ class OpenAICompatibleRuntime(AgentRuntime):
         model: ProviderModel | None = None,
         tools: list[FunctionTool] | None = None,
         mcp_servers: list[McpServerRef] | None = None,
+        on_permission: PermissionCallback | None = None,
+        on_event: Callable[[HookEvent], None] | None = None,
         provider_options: Any | None = None,
     ) -> AgentSession:
         """Open a bespoke :class:`OpenAICompatibleSession`.
@@ -347,6 +385,18 @@ class OpenAICompatibleRuntime(AgentRuntime):
                 :data:`~airframe.features.Feature.TOOLS_MCP_HTTP` /
                 :data:`~airframe.features.Feature.TOOLS_MCP_SSE`
                 still works.
+            on_permission: Phase 5 scaffolding accepted by the
+                signature; non-None raises
+                :class:`~airframe.errors.UnsupportedFeatureError`.
+                Chat Completions has no permission wire shape — the
+                decline is **permanent** for this compat family
+                (Phase 5 Iteration B); a future
+                ``OpenAIResponsesRuntime`` could wire it.
+            on_event: Phase 5 scaffolding accepted by the signature;
+                non-None raises until Phase 5 Iteration C synthesises
+                :class:`~airframe.hooks.HookEvent` from the client-
+                side tool-loop in
+                :class:`OpenAICompatibleSession`.
 
         Raises:
             UnsupportedFeatureError: when ``resume`` is non-None.
@@ -364,6 +414,25 @@ class OpenAICompatibleRuntime(AgentRuntime):
             tools,
             adapter_label=self.label,
             feature_supported=self.supports(Feature.TOOLS_FUNCTION),
+        )
+        if on_permission is not None:
+            # Phase 5 Iteration B — Chat Completions has no permission
+            # wire shape. Decline is permanent for this compat family;
+            # point consumers at the future OpenAIResponsesRuntime
+            # path (Responses API exposes a tool-permission concept).
+            raise UnsupportedFeatureError(
+                f"{type(self).__name__}.session(on_permission=...) is not "
+                f"supported — Chat Completions has no tool-permission wire "
+                f"shape. A future ``OpenAIResponsesRuntime`` (separate "
+                f"from this compat family) could wire it. Check "
+                f"runtime.supports(Feature.PERMISSION_CALLBACK) before "
+                f"passing on_permission=.",
+                feature=Feature.PERMISSION_CALLBACK,
+            )
+        _check_hooks_supported(
+            on_event,
+            adapter_label=self.label,
+            supports=self.supports,
         )
         if mcp_servers:
             # Phase 4 Iteration D — the chat-completions wire shape
@@ -388,7 +457,9 @@ class OpenAICompatibleRuntime(AgentRuntime):
         # provider_options accepted but unused — Phase 2+ fills each
         # ProviderOptions dataclass as the corresponding feature lands.
         del provider_options
-        return OpenAICompatibleSession(self, system=system, model=model, tools=tools)
+        return OpenAICompatibleSession(
+            self, system=system, model=model, tools=tools, on_event=on_event
+        )
 
     async def list_models(self) -> list[ModelInfo]:
         """Return the live model menu from the vendor.
@@ -609,6 +680,7 @@ class OpenAICompatibleSession:
         system: str | None = None,
         model: ProviderModel | None = None,
         tools: list[FunctionTool] | None = None,
+        on_event: Callable[[HookEvent], None] | None = None,
     ) -> None:
         self._runtime = runtime
         self._model = model
@@ -619,6 +691,19 @@ class OpenAICompatibleSession:
         self._in_flight_task: asyncio.Task[Any] | None = None
         self._active_stream: Any | None = None
         self._stream_cancelled = False
+        # Phase 5 Iteration C: lifecycle-hook observer. Chat
+        # Completions has no native event channel; the adapter
+        # synthesises events from the existing client-side tool-loop.
+        # session_start fires on first execute(); session_end fires
+        # on close(); per-tool events fire around handler invocation.
+        self._on_event: Callable[[HookEvent], None] | None = on_event
+        self._session_start_fired = False
+        self._session_end_fired = False
+        # Phase 5 Iteration D: per-session running budget. Both
+        # caps enforced at turn boundary in v0. Distinct from the
+        # tool-loop's MAX_TOOL_ITERATIONS runaway guard.
+        self._cumulative_cost_usd: float = 0.0
+        self._turn_count: int = 0
         # Tools are fixed for the session's lifetime — translated once
         # and reused on every chat.completions.create() call. ``None``
         # / ``[]`` both mean "don't send the kwarg" so the wire shape
@@ -634,10 +719,25 @@ class OpenAICompatibleSession:
         *,
         schema: type[BaseModel] | None = None,
         thinking: ThinkingMode = None,
+        max_turns: int | None = None,
+        max_budget_usd: float | None = None,
         timeout: float = 600.0,
     ) -> RuntimeResult:
         if self._closed:
             raise RuntimeError("session is closed")
+        _check_budget_supported(
+            max_turns=max_turns,
+            max_budget_usd=max_budget_usd,
+            adapter_label=self._runtime.label,
+            supports=self._runtime.supports,
+        )
+        _enforce_budget_pre_turn(
+            max_turns=max_turns,
+            max_budget_usd=max_budget_usd,
+            cumulative_cost_usd=self._cumulative_cost_usd,
+            turn_count=self._turn_count,
+            adapter_label=self._runtime.label,
+        )
         text, images, _files = _split_prompt_parts(
             prompt,
             adapter_label=self._runtime.label,
@@ -647,6 +747,13 @@ class OpenAICompatibleSession:
         reasoning_effort = _translate_thinking_for_openai(thinking, label=self._runtime.label)
         pre_len = len(self._messages)
         self._messages.append({"role": "user", "content": _build_user_content(text, images)})
+        self._fire_session_start_if_needed()
+        _fire_hook_event(
+            self._on_event,
+            "user_prompt_submit",
+            session_id=None,
+            payload={"prompt": text, "length": len(text)},
+        )
         task = asyncio.create_task(
             self._do_execute(schema=schema, reasoning_effort=reasoning_effort, timeout=timeout)
         )
@@ -661,6 +768,8 @@ class OpenAICompatibleSession:
             raise
         finally:
             self._in_flight_task = None
+        self._turn_count += 1
+        self._cumulative_cost_usd += result.cost.cost_usd or 0.0
         return result
 
     async def _do_execute(
@@ -718,9 +827,29 @@ class OpenAICompatibleSession:
             # before the matching role="tool" messages), then dispatch.
             self._messages.append(_assistant_tool_call_message(message, tool_calls))
             for tc in tool_calls:
+                _fire_hook_event(
+                    self._on_event,
+                    "pre_tool_use",
+                    session_id=None,
+                    payload={
+                        "tool_name": tc.function.name,
+                        "tool_call_id": tc.id,
+                        "arguments": tc.function.arguments or "",
+                    },
+                )
                 output, is_error = await self._invoke_tool(
                     tool_name=tc.function.name,
                     arguments_json=tc.function.arguments or "",
+                )
+                _fire_hook_event(
+                    self._on_event,
+                    "tool_failure" if is_error else "post_tool_use",
+                    session_id=None,
+                    payload={
+                        "tool_name": tc.function.name,
+                        "tool_call_id": tc.id,
+                        ("error" if is_error else "output"): output,
+                    },
                 )
                 self._messages.append(
                     {
@@ -773,10 +902,25 @@ class OpenAICompatibleSession:
         *,
         schema: type[BaseModel] | None = None,
         thinking: ThinkingMode = None,
+        max_turns: int | None = None,
+        max_budget_usd: float | None = None,
         timeout: float = 600.0,
     ) -> AsyncIterator[RuntimeEvent]:
         if self._closed:
             raise RuntimeError("session is closed")
+        _check_budget_supported(
+            max_turns=max_turns,
+            max_budget_usd=max_budget_usd,
+            adapter_label=self._runtime.label,
+            supports=self._runtime.supports,
+        )
+        _enforce_budget_pre_turn(
+            max_turns=max_turns,
+            max_budget_usd=max_budget_usd,
+            cumulative_cost_usd=self._cumulative_cost_usd,
+            turn_count=self._turn_count,
+            adapter_label=self._runtime.label,
+        )
         text, images, _files = _split_prompt_parts(
             prompt,
             adapter_label=self._runtime.label,
@@ -787,6 +931,13 @@ class OpenAICompatibleSession:
         pre_len = len(self._messages)
         self._messages.append({"role": "user", "content": _build_user_content(text, images)})
         self._stream_cancelled = False
+        self._fire_session_start_if_needed()
+        _fire_hook_event(
+            self._on_event,
+            "user_prompt_submit",
+            session_id=None,
+            payload={"prompt": text, "length": len(text)},
+        )
         # Accumulators that span the whole user turn (multiple model
         # turns under the tool loop). Assistant text is appended across
         # iterations because the final visible response may be split
@@ -870,6 +1021,8 @@ class OpenAICompatibleSession:
                     )
                     self._messages.append({"role": "assistant", "content": full_text})
                     committed = True
+                    self._turn_count += 1
+                    self._cumulative_cost_usd += result.cost.cost_usd or 0.0
                     yield TurnComplete(result=result)
                     return
 
@@ -892,10 +1045,30 @@ class OpenAICompatibleSession:
                         tool_call_id=tc_id,
                         arguments_preview=args_str,
                     )
+                    _fire_hook_event(
+                        self._on_event,
+                        "pre_tool_use",
+                        session_id=None,
+                        payload={
+                            "tool_name": name,
+                            "tool_call_id": tc_id,
+                            "arguments": args_str,
+                        },
+                    )
                     output, is_error = await self._invoke_tool(
                         tool_name=name, arguments_json=args_str
                     )
                     yield ToolCallResult(tool_call_id=tc_id, output=output, is_error=is_error)
+                    _fire_hook_event(
+                        self._on_event,
+                        "tool_failure" if is_error else "post_tool_use",
+                        session_id=None,
+                        payload={
+                            "tool_name": name,
+                            "tool_call_id": tc_id,
+                            ("error" if is_error else "output"): output,
+                        },
+                    )
                     self._messages.append(
                         {
                             "role": "tool",
@@ -942,10 +1115,46 @@ class OpenAICompatibleSession:
                 logger.debug("%s.stream_close_failed error=%s", self._runtime.label, exc)
 
     async def close(self) -> None:
+        # Phase 5 Iteration C: synthesise session_end at close if
+        # session_start ever fired. Repeat close() calls are
+        # idempotent — gated on both flags.
+        already_closed = self._closed
         self._closed = True
+        if (
+            not already_closed
+            and self._on_event is not None
+            and self._session_start_fired
+            and not self._session_end_fired
+        ):
+            self._session_end_fired = True
+            _fire_hook_event(
+                self._on_event,
+                "session_end",
+                session_id=None,
+                payload={},
+            )
         # Runtime owns the AsyncOpenAI client; never tear it down here.
         # Cancel any in-flight work as a courtesy.
         await self.cancel()
+
+    def _fire_session_start_if_needed(self) -> None:
+        """Emit ``session_start`` once per session at first
+        ``execute()`` / ``stream()`` call.
+
+        Chat Completions has no native session-start event; the
+        adapter synthesises one at first use so consumer observers
+        see a clean start → end pair.
+        """
+        if self._on_event is None or self._session_start_fired:
+            return
+        self._session_start_fired = True
+        model_id = self._runtime._resolve_model(self._model) if self._model else None
+        _fire_hook_event(
+            self._on_event,
+            "session_start",
+            session_id=None,
+            payload={"model": model_id} if model_id else {},
+        )
 
     def unwrap(self, cls: type[T]) -> T:
         # Stateless HTTP — the only "session state" is the messages

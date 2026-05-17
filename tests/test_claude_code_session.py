@@ -1571,3 +1571,622 @@ def test_mcp_fingerprint_empty_list_is_constant() -> None:
     from airframe.sessions import _mcp_servers_fingerprint
 
     assert _mcp_servers_fingerprint([]) == "__no_mcp_servers__"
+
+
+# ---------------------------------------------------------------------------
+# Permission callback (Phase 5 Iteration B)
+# ---------------------------------------------------------------------------
+
+
+class _FakePermissionContext:
+    """Minimal stand-in for ToolPermissionContext for unit tests."""
+
+    def __init__(
+        self,
+        *,
+        decision_reason: str | None = None,
+        description: str | None = None,
+        title: str | None = None,
+    ) -> None:
+        self.decision_reason = decision_reason
+        self.description = description
+        self.title = title
+        self.signal = None
+        self.suggestions: list = []
+        self.tool_use_id = None
+        self.agent_id = None
+        self.blocked_path = None
+
+
+async def test_permission_callback_wraps_into_can_use_tool(
+    mock_sdk: dict[str, Any],
+) -> None:
+    """on_permission= becomes the SDK's can_use_tool callable on options."""
+    from airframe import PermissionDecision, PermissionRequest
+
+    received: list[PermissionRequest] = []
+
+    class _RecordingCallback:
+        async def handle(self, request: PermissionRequest) -> PermissionDecision:
+            received.append(request)
+            return "allow"
+
+    final = _FakeResultMessage(result="ok")
+
+    async def fake_receive() -> Any:
+        yield final
+
+    mock_sdk["client"].receive_response = fake_receive
+
+    rt = ClaudeCodeRuntime()
+    sess = rt.session(on_permission=_RecordingCallback())
+    try:
+        await sess.execute("hi")
+    finally:
+        await sess.close()
+
+    opts = mock_sdk["options_kwargs"][0]
+    assert "can_use_tool" in opts
+    # Invoke the wrapped callable directly to verify the airframe
+    # PermissionRequest is constructed correctly and the decision
+    # maps to PermissionResultAllow.
+    from claude_agent_sdk import PermissionResultAllow
+
+    can_use_tool = opts["can_use_tool"]
+    result = await can_use_tool(
+        "write_file",
+        {"path": "/tmp/x"},
+        _FakePermissionContext(decision_reason="writes to filesystem"),
+    )
+    assert isinstance(result, PermissionResultAllow)
+    assert len(received) == 1
+    req = received[0]
+    assert req.tool_name == "write_file"
+    assert req.tool_args == {"path": "/tmp/x"}
+    assert req.reason == "writes to filesystem"
+
+
+async def test_permission_callback_deny_returns_permission_result_deny(
+    mock_sdk: dict[str, Any],
+) -> None:
+    """``deny`` decision maps to :class:`PermissionResultDeny`."""
+    from airframe import PermissionDecision, PermissionRequest
+
+    class _DenyAll:
+        async def handle(self, request: PermissionRequest) -> PermissionDecision:
+            return "deny"
+
+    final = _FakeResultMessage(result="ok")
+
+    async def fake_receive() -> Any:
+        yield final
+
+    mock_sdk["client"].receive_response = fake_receive
+
+    rt = ClaudeCodeRuntime()
+    sess = rt.session(on_permission=_DenyAll())
+    try:
+        await sess.execute("hi")
+    finally:
+        await sess.close()
+
+    from claude_agent_sdk import PermissionResultDeny
+
+    can_use_tool = mock_sdk["options_kwargs"][0]["can_use_tool"]
+    result = await can_use_tool("read_file", {}, _FakePermissionContext())
+    assert isinstance(result, PermissionResultDeny)
+    # Reason falls through into the message when present; otherwise
+    # an actionable generic message names the tool.
+    assert "read_file" in result.message
+
+
+async def test_permission_callback_defer_coerces_to_allow_with_debug_log(
+    mock_sdk: dict[str, Any],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """``defer`` collapses to :class:`PermissionResultAllow` + debug log.
+
+    Claude's binary result type has no third option; the existing
+    ``permission_mode="bypassPermissions"`` default already allows
+    everything, so "I don't have an opinion" collapses to "allow"
+    with an audit-trail debug log.
+    """
+    import logging
+
+    from airframe import PermissionDecision, PermissionRequest
+
+    class _Defer:
+        async def handle(self, request: PermissionRequest) -> PermissionDecision:
+            return "defer"
+
+    final = _FakeResultMessage(result="ok")
+
+    async def fake_receive() -> Any:
+        yield final
+
+    mock_sdk["client"].receive_response = fake_receive
+
+    rt = ClaudeCodeRuntime()
+    sess = rt.session(on_permission=_Defer())
+    try:
+        await sess.execute("hi")
+    finally:
+        await sess.close()
+
+    from claude_agent_sdk import PermissionResultAllow
+
+    can_use_tool = mock_sdk["options_kwargs"][0]["can_use_tool"]
+    with caplog.at_level(logging.DEBUG, logger="airframe.adapters.claude_code"):
+        result = await can_use_tool("read_file", {}, _FakePermissionContext())
+    assert isinstance(result, PermissionResultAllow)
+    assert any("defer" in rec.message and "read_file" in rec.message for rec in caplog.records)
+
+
+async def test_no_permission_callback_omits_can_use_tool_kwarg(
+    mock_sdk: dict[str, Any],
+) -> None:
+    """Sessions opened without on_permission= don't set can_use_tool on options."""
+    final = _FakeResultMessage(result="ok")
+
+    async def fake_receive() -> Any:
+        yield final
+
+    mock_sdk["client"].receive_response = fake_receive
+
+    rt = ClaudeCodeRuntime()
+    sess = rt.session()
+    try:
+        await sess.execute("hi")
+    finally:
+        await sess.close()
+
+    assert "can_use_tool" not in mock_sdk["options_kwargs"][0]
+
+
+async def test_permission_callback_change_between_sessions_reconnects(
+    mock_sdk: dict[str, Any],
+) -> None:
+    """Switching ``on_permission=`` invalidates the cached client.
+
+    Callback identity joins the ``_ensure_client`` cache key —
+    ``can_use_tool`` is baked at connect time, so a callback swap
+    must force reconnect.
+    """
+    from airframe import PermissionDecision, PermissionRequest
+
+    class _Cb1:
+        async def handle(self, request: PermissionRequest) -> PermissionDecision:
+            return "allow"
+
+    class _Cb2:
+        async def handle(self, request: PermissionRequest) -> PermissionDecision:
+            return "deny"
+
+    final = _FakeResultMessage(result="r")
+
+    async def fake_receive() -> Any:
+        yield final
+
+    mock_sdk["client"].receive_response = fake_receive
+
+    rt = ClaudeCodeRuntime()
+    sess1 = rt.session(on_permission=_Cb1())
+    try:
+        await sess1.execute("turn 1")
+    finally:
+        await sess1.close()
+    factory_after_first = mock_sdk["factory"].call_count
+
+    sess2 = rt.session(on_permission=_Cb2())
+    try:
+        await sess2.execute("turn 2")
+    finally:
+        await sess2.close()
+
+    assert mock_sdk["factory"].call_count > factory_after_first
+
+
+def test_permission_fingerprint_distinguishes_callback_identity() -> None:
+    """Different callback objects produce different fingerprints; same
+    object is stable; None collapses to a sentinel."""
+    from airframe import PermissionDecision, PermissionRequest
+    from airframe.adapters.claude_code import _permission_fingerprint
+
+    class _Cb:
+        async def handle(self, request: PermissionRequest) -> PermissionDecision:
+            return "allow"
+
+    a, b = _Cb(), _Cb()
+    assert _permission_fingerprint(None) == "__no_permission__"
+    assert _permission_fingerprint(a) != _permission_fingerprint(b)
+    assert _permission_fingerprint(a) == _permission_fingerprint(a)
+
+
+# ---------------------------------------------------------------------------
+# Lifecycle hooks (Phase 5 Iteration C)
+# ---------------------------------------------------------------------------
+
+
+async def test_on_event_wires_hooks_into_claude_agent_options(
+    mock_sdk: dict[str, Any],
+) -> None:
+    """on_event= becomes a hooks= dict on ClaudeAgentOptions covering
+    every native event the SDK exposes."""
+    from airframe import HookEvent
+
+    received: list[HookEvent] = []
+
+    final = _FakeResultMessage(result="ok")
+
+    async def fake_receive() -> Any:
+        yield final
+
+    mock_sdk["client"].receive_response = fake_receive
+
+    rt = ClaudeCodeRuntime()
+    sess = rt.session(on_event=received.append)
+    try:
+        await sess.execute("hi")
+    finally:
+        await sess.close()
+
+    opts = mock_sdk["options_kwargs"][0]
+    assert "hooks" in opts
+    # The hooks dict carries one entry per native event name we map.
+    from airframe.adapters.claude_code import _CLAUDE_HOOK_NAME_TO_KIND
+
+    for sdk_name in _CLAUDE_HOOK_NAME_TO_KIND:
+        assert sdk_name in opts["hooks"]
+
+
+async def test_on_event_synthesises_session_start_at_connect(
+    mock_sdk: dict[str, Any],
+) -> None:
+    """session_start fires on first execute() — Claude has no native event."""
+    from airframe import HookEvent
+
+    received: list[HookEvent] = []
+    final = _FakeResultMessage(result="ok")
+
+    async def fake_receive() -> Any:
+        yield final
+
+    mock_sdk["client"].receive_response = fake_receive
+
+    rt = ClaudeCodeRuntime()
+    sess = rt.session(on_event=received.append)
+    try:
+        await sess.execute("hi")
+    finally:
+        await sess.close()
+
+    kinds = [e.kind for e in received]
+    # session_start fires first, session_end fires last.
+    assert kinds[0] == "session_start"
+    assert kinds[-1] == "session_end"
+    # session_start payload carries model + resumed flag.
+    assert received[0].payload["model"] == "claude-haiku-4-5"
+    assert received[0].payload["resumed"] is False
+
+
+async def test_on_event_native_pre_tool_use_translates_to_hook_event(
+    mock_sdk: dict[str, Any],
+) -> None:
+    """Invoking the SDK's PreToolUse hook fires a pre_tool_use HookEvent.
+
+    The mock fixture captures the registered hooks-dict callable;
+    we invoke it directly to verify the translation without
+    needing the SDK's CLI subprocess to actually fire a hook.
+    """
+    from airframe import HookEvent
+
+    received: list[HookEvent] = []
+    final = _FakeResultMessage(result="ok")
+
+    async def fake_receive() -> Any:
+        yield final
+
+    mock_sdk["client"].receive_response = fake_receive
+
+    rt = ClaudeCodeRuntime()
+    sess = rt.session(on_event=received.append)
+    try:
+        await sess.execute("hi")
+    finally:
+        await sess.close()
+
+    # Pull the PreToolUse callback out of the registered hooks-dict
+    # and invoke it directly. (The mocked SDK doesn't dispatch
+    # automatically.)
+    hooks_dict = mock_sdk["options_kwargs"][0]["hooks"]
+    pre_tool_matcher = hooks_dict["PreToolUse"][0]
+    pre_tool_cb = pre_tool_matcher.hooks[0]
+    fake_input = {
+        "hook_event_name": "PreToolUse",
+        "session_id": "sess-XYZ",
+        "tool_name": "Write",
+        "tool_input": {"path": "/tmp/x", "content": "..."},
+        "tool_use_id": "toolu_42",
+    }
+    result = await pre_tool_cb(fake_input, "toolu_42", None)
+    assert result == {}  # pure observation — no continue=/decision=/etc.
+
+    # Filter to pre_tool_use events.
+    pre_events = [e for e in received if e.kind == "pre_tool_use"]
+    assert len(pre_events) == 1
+    payload = pre_events[0].payload
+    assert payload["tool_name"] == "Write"
+    assert payload["tool_use_id"] == "toolu_42"
+    assert payload["tool_input"] == {"path": "/tmp/x", "content": "..."}
+
+
+async def test_no_on_event_omits_hooks_kwarg(mock_sdk: dict[str, Any]) -> None:
+    """Sessions opened without on_event= don't set hooks on options."""
+    final = _FakeResultMessage(result="ok")
+
+    async def fake_receive() -> Any:
+        yield final
+
+    mock_sdk["client"].receive_response = fake_receive
+
+    rt = ClaudeCodeRuntime()
+    sess = rt.session()
+    try:
+        await sess.execute("hi")
+    finally:
+        await sess.close()
+
+    assert "hooks" not in mock_sdk["options_kwargs"][0]
+
+
+async def test_close_session_end_idempotent(mock_sdk: dict[str, Any]) -> None:
+    """Repeat close() calls don't re-fire session_end."""
+    from airframe import HookEvent
+
+    received: list[HookEvent] = []
+    final = _FakeResultMessage(result="ok")
+
+    async def fake_receive() -> Any:
+        yield final
+
+    mock_sdk["client"].receive_response = fake_receive
+
+    rt = ClaudeCodeRuntime()
+    sess = rt.session(on_event=received.append)
+    await sess.execute("hi")
+    await sess.close()
+    await sess.close()
+    await sess.close()
+
+    end_events = [e for e in received if e.kind == "session_end"]
+    assert len(end_events) == 1
+
+
+async def test_observer_raises_does_not_break_session(
+    mock_sdk: dict[str, Any],
+) -> None:
+    """A raising observer is debug-logged and swallowed."""
+    from airframe import HookEvent
+
+    def raising_observer(_event: HookEvent) -> None:
+        raise RuntimeError("observer boom")
+
+    final = _FakeResultMessage(result="ok")
+
+    async def fake_receive() -> Any:
+        yield final
+
+    mock_sdk["client"].receive_response = fake_receive
+
+    rt = ClaudeCodeRuntime()
+    sess = rt.session(on_event=raising_observer)
+    try:
+        # Should not propagate the observer's exception.
+        result = await sess.execute("hi")
+    finally:
+        await sess.close()
+    assert result.text == "ok"
+
+
+def test_claude_runtime_declares_lifecycle_hooks() -> None:
+    """Claude declares LIFECYCLE_HOOKS + the full 8-kind emittable set."""
+    rt = ClaudeCodeRuntime()
+    assert rt.supports(Feature.LIFECYCLE_HOOKS)
+    assert (
+        frozenset(
+            {
+                "session_start",
+                "session_end",
+                "user_prompt_submit",
+                "pre_tool_use",
+                "post_tool_use",
+                "tool_failure",
+                "pre_compact",
+                "rate_limit",
+            }
+        )
+        == ClaudeCodeRuntime.EMITTABLE_HOOK_KINDS
+    )
+
+
+# ---------------------------------------------------------------------------
+# Budget caps (Phase 5 Iteration D)
+# ---------------------------------------------------------------------------
+
+
+def test_claude_runtime_declares_budget_caps() -> None:
+    """Claude declares both BUDGET_USD_CAP and BUDGET_TURN_CAP after Iteration D."""
+    rt = ClaudeCodeRuntime()
+    assert rt.supports(Feature.BUDGET_USD_CAP)
+    assert rt.supports(Feature.BUDGET_TURN_CAP)
+
+
+async def test_max_turns_overrides_runtime_default_in_options(
+    mock_sdk: dict[str, Any],
+) -> None:
+    """``max_turns=`` on execute() lands as ``ClaudeAgentOptions.max_turns``,
+    overriding the runtime-default DEFAULT_MAX_TURNS at connect time."""
+    final = _FakeResultMessage(result="ok", total_cost_usd=0.0)
+
+    async def fake_receive() -> Any:
+        yield final
+
+    mock_sdk["client"].receive_response = fake_receive
+    rt = ClaudeCodeRuntime()
+    sess = rt.session()
+    try:
+        await sess.execute("hi", max_turns=7)
+    finally:
+        await sess.close()
+
+    opts = mock_sdk["options_kwargs"][0]
+    assert opts["max_turns"] == 7
+
+
+async def test_max_turns_omitted_uses_runtime_default(mock_sdk: dict[str, Any]) -> None:
+    """No ``max_turns=`` → ClaudeAgentOptions.max_turns falls back to
+    the runtime's DEFAULT_MAX_TURNS (60)."""
+    final = _FakeResultMessage(result="ok", total_cost_usd=0.0)
+
+    async def fake_receive() -> Any:
+        yield final
+
+    mock_sdk["client"].receive_response = fake_receive
+    rt = ClaudeCodeRuntime()
+    sess = rt.session()
+    try:
+        await sess.execute("hi")
+    finally:
+        await sess.close()
+    opts = mock_sdk["options_kwargs"][0]
+    assert opts["max_turns"] == 60
+
+
+async def test_max_turns_change_between_turns_forces_reconnect(
+    mock_sdk: dict[str, Any],
+) -> None:
+    """A different ``max_turns=`` value joins the cache key and forces
+    a reconnect — the SDK bakes max_turns at connect time."""
+    final = _FakeResultMessage(result="r", total_cost_usd=0.0)
+
+    async def fake_receive() -> Any:
+        yield final
+
+    mock_sdk["client"].receive_response = fake_receive
+    rt = ClaudeCodeRuntime()
+    sess = rt.session()
+    try:
+        await sess.execute("a", max_turns=5)
+        await sess.execute("b", max_turns=15)
+    finally:
+        await sess.close()
+    assert mock_sdk["client"].connect.await_count == 2
+
+
+async def test_max_turns_cap_raises_when_cumulative_count_reached(
+    mock_sdk: dict[str, Any],
+) -> None:
+    """After running max_turns turns, the next execute() raises
+    RuntimeBudgetExceededError(kind='turns')."""
+    from airframe.errors import RuntimeBudgetExceededError
+
+    final = _FakeResultMessage(result="ok", total_cost_usd=0.0)
+
+    async def fake_receive() -> Any:
+        yield final
+
+    mock_sdk["client"].receive_response = fake_receive
+    rt = ClaudeCodeRuntime()
+    sess = rt.session()
+    try:
+        # Two turns succeed under the cap.
+        await sess.execute("turn 1", max_turns=2)
+        await sess.execute("turn 2", max_turns=2)
+        # Third turn trips the cap.
+        with pytest.raises(RuntimeBudgetExceededError) as exc_info:
+            await sess.execute("turn 3", max_turns=2)
+    finally:
+        await sess.close()
+    err = exc_info.value
+    assert err.kind == "turns"
+    assert err.cap == 2.0
+    assert err.current == 2.0
+
+
+async def test_max_budget_usd_cap_raises_when_cumulative_cost_reached(
+    mock_sdk: dict[str, Any],
+) -> None:
+    """Per-turn cost accumulates on the session; once cumulative
+    exceeds max_budget_usd, the next execute() raises
+    RuntimeBudgetExceededError(kind='usd')."""
+    from airframe.errors import RuntimeBudgetExceededError
+
+    final = _FakeResultMessage(result="ok", total_cost_usd=0.03)
+
+    async def fake_receive() -> Any:
+        yield final
+
+    mock_sdk["client"].receive_response = fake_receive
+    rt = ClaudeCodeRuntime()
+    sess = rt.session()
+    try:
+        # Two turns at $0.03 each → cumulative $0.06 > cap $0.05.
+        await sess.execute("turn 1", max_budget_usd=0.05)
+        await sess.execute("turn 2", max_budget_usd=0.05)
+        with pytest.raises(RuntimeBudgetExceededError) as exc_info:
+            await sess.execute("turn 3", max_budget_usd=0.05)
+    finally:
+        await sess.close()
+    err = exc_info.value
+    assert err.kind == "usd"
+    assert err.cap == 0.05
+    assert err.current >= 0.05
+
+
+async def test_budget_caps_none_open_cleanly_and_dont_track(
+    mock_sdk: dict[str, Any],
+) -> None:
+    """Sessions without caps still accumulate counters (they're
+    cheap), but no enforcement fires."""
+    final = _FakeResultMessage(result="ok", total_cost_usd=1.0)
+
+    async def fake_receive() -> Any:
+        yield final
+
+    mock_sdk["client"].receive_response = fake_receive
+    rt = ClaudeCodeRuntime()
+    sess = rt.session()
+    try:
+        await sess.execute("a")
+        await sess.execute("b")
+        await sess.execute("c")
+    finally:
+        await sess.close()
+    # Three turns ran to completion despite the high $1 per-turn
+    # cost; without max_budget_usd= the cap never fires.
+
+
+async def test_stream_honours_budget_caps(mock_sdk: dict[str, Any]) -> None:
+    """The streaming path runs the same pre-turn enforce — exhausted
+    cap raises before yielding any events."""
+    from airframe.errors import RuntimeBudgetExceededError
+
+    final = _FakeResultMessage(result="ok", total_cost_usd=0.02)
+
+    async def fake_receive() -> Any:
+        yield final
+
+    mock_sdk["client"].receive_response = fake_receive
+    rt = ClaudeCodeRuntime()
+    sess = rt.session()
+    try:
+        # First stream turn succeeds and pushes cumulative cost.
+        async for _ in sess.stream("a", max_budget_usd=0.01):
+            pass
+        # Cumulative is now $0.02 > cap $0.01 — next stream raises.
+        with pytest.raises(RuntimeBudgetExceededError) as exc_info:
+            async for _ in sess.stream("b", max_budget_usd=0.01):
+                pass
+    finally:
+        await sess.close()
+    assert exc_info.value.kind == "usd"

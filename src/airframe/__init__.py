@@ -44,6 +44,7 @@ from airframe.discovery import list_providers, runtime_for
 from airframe.errors import (
     AgentRuntimeError,
     RuntimeAuthError,
+    RuntimeBudgetExceededError,
     RuntimeCancelledError,
     RuntimeContextOverflowError,
     RuntimeModelNotFoundError,
@@ -62,6 +63,7 @@ from airframe.events import (
     TurnComplete,
 )
 from airframe.features import Feature
+from airframe.hooks import HookEvent, HookEventKind
 from airframe.inputs import FileInput, ImageInput, Prompt, PromptPart
 from airframe.models import (
     CAPABILITY_REASONING_EFFORT,
@@ -78,6 +80,7 @@ from airframe.options import (
     OpenAICompatOptions,
     ProviderOptions,
 )
+from airframe.permission import PermissionCallback, PermissionDecision, PermissionRequest
 from airframe.protocol import (
     AgentRuntime,
     AgentSession,
@@ -118,11 +121,16 @@ __all__ = [
     "Feature",
     "FileInput",
     "FunctionTool",
+    "HookEvent",
+    "HookEventKind",
     "ImageInput",
     "McpServerRef",
     "ModelInfo",
     "OpenAICompatOptions",
     "OpenCodeZenRuntime",
+    "PermissionCallback",
+    "PermissionDecision",
+    "PermissionRequest",
     "Prompt",
     "PromptPart",
     "ProviderModel",
@@ -130,6 +138,7 @@ __all__ = [
     "ReasoningDelta",
     "ReasoningEffort",
     "RuntimeAuthError",
+    "RuntimeBudgetExceededError",
     "RuntimeCancelledError",
     "RuntimeContextOverflowError",
     "RuntimeEvent",

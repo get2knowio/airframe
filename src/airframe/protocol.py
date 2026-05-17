@@ -39,10 +39,14 @@ from pydantic import BaseModel
 from airframe.cost import CostRecord
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from airframe.events import RuntimeEvent
     from airframe.features import Feature
+    from airframe.hooks import HookEvent
     from airframe.inputs import Prompt
     from airframe.models import ModelInfo
+    from airframe.permission import PermissionCallback
     from airframe.thinking import ThinkingMode
     from airframe.tools import FunctionTool, McpServerRef
 
@@ -343,6 +347,8 @@ class AgentRuntime(Protocol):
         model: ProviderModel | None = None,
         tools: list[FunctionTool] | None = None,
         mcp_servers: list[McpServerRef] | None = None,
+        on_permission: PermissionCallback | None = None,
+        on_event: Callable[[HookEvent], None] | None = None,
         provider_options: Any | None = None,
     ) -> AgentSession:
         """Open a multi-turn session against this runtime.
@@ -402,6 +408,30 @@ class AgentRuntime(Protocol):
                 a ref of that transport. ``tools=`` and
                 ``mcp_servers=`` coexist — both end up routed through
                 the same vendor MCP slot.
+            on_permission: Optional
+                :class:`~airframe.permission.PermissionCallback`
+                that gates tool execution. The adapter awaits the
+                callback with a
+                :class:`~airframe.permission.PermissionRequest` for
+                each tool the model wants to call and forwards the
+                returned :class:`~airframe.permission.PermissionDecision`
+                to the vendor's permission channel. Phase 5 flips
+                :data:`~airframe.features.Feature.PERMISSION_CALLBACK`
+                True on Claude / Copilot / Codex; OpenAI-compat
+                declines permanently (Chat Completions has no
+                permission wire shape).
+            on_event: Optional ``Callable[[HookEvent], None]`` that
+                observes session lifecycle events. The adapter
+                translates its vendor SDK's native event stream into
+                :class:`~airframe.hooks.HookEvent` instances and
+                fans them out to the callback. Synchronous on
+                purpose — observers should not block; await work
+                belongs in :class:`on_permission`. Phase 5 flips
+                :data:`~airframe.features.Feature.LIFECYCLE_HOOKS`
+                True on every adapter, with the *emittable kinds
+                set* documented per adapter (Chat-completions
+                synthesis can't fire ``pre_compact`` /
+                ``rate_limit`` honestly, for example).
             provider_options: Vendor-specific extension namespace
                 (see :mod:`airframe.options`). Accepted in Phase 1
                 but unused — each :class:`ProviderOptions` dataclass
@@ -455,6 +485,8 @@ class AgentSession(Protocol):
         *,
         schema: type[BaseModel] | None = None,
         thinking: ThinkingMode = None,
+        max_turns: int | None = None,
+        max_budget_usd: float | None = None,
         timeout: float = 600.0,
     ) -> RuntimeResult:
         """Run one turn, return the canonical :class:`RuntimeResult`.
@@ -482,6 +514,21 @@ class AgentSession(Protocol):
                 addition; adapters declaring
                 :data:`~airframe.features.Feature.REASONING_EFFORT`
                 forward to the vendor's native field.
+            max_turns: Phase 5 budget cap — abort if the model takes
+                more than this many internal sub-turns (tool
+                round-trips, agent steps) before producing the final
+                answer. Adapters declaring
+                :data:`~airframe.features.Feature.BUDGET_TURN_CAP`
+                enforce; others raise
+                :class:`~airframe.errors.UnsupportedFeatureError`.
+                ``None`` (default) imposes no cap beyond the
+                adapter's runaway guards.
+            max_budget_usd: Phase 5 budget cap — abort at the next
+                turn boundary if the running cost on the session
+                exceeds this threshold. Enforced client-side by
+                every adapter declaring
+                :data:`~airframe.features.Feature.BUDGET_USD_CAP`.
+                ``None`` (default) imposes no cap.
             timeout: Hard wall-clock budget for the turn.
         """
         ...
@@ -492,6 +539,8 @@ class AgentSession(Protocol):
         *,
         schema: type[BaseModel] | None = None,
         thinking: ThinkingMode = None,
+        max_turns: int | None = None,
+        max_budget_usd: float | None = None,
         timeout: float = 600.0,
     ) -> AsyncIterator[RuntimeEvent]:
         """Run one turn, yielding :class:`RuntimeEvent` deltas live.

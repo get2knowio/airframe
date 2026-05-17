@@ -1089,7 +1089,7 @@ or to roll straight into Phase 5 (permission, hooks, budget).
 
 ---
 
-## Phase 5 — Permission, hooks, budget
+## Phase 5 — Permission, hooks, budget ✅
 
 **Goal.** Roadmap §3 P3 items. Independent of Phase 3/4 — could land
 in parallel.
@@ -1185,6 +1185,217 @@ callbacks behave identically.
 2. **`PermissionDecision = Literal["allow", "deny", "defer"]`.**
    Adding new decisions later is fine; renaming existing ones is
    breaking.
+
+### Iteration breakdown
+
+Phase 5 lands in four iterations, mirroring Phase 3/4's A–D shape.
+The plan's three feature buckets (permission, hooks, budget) are
+independent; each gets its own wiring iteration. Status: pending;
+work begins on a fresh `phase-5-permission-hooks-budget` branch.
+
+Coverage matrix (target after Iteration D):
+
+| Adapter | PERMISSION | HOOKS | BUDGET_USD | BUDGET_TURN | Notes |
+| --- | --- | --- | --- | --- | --- |
+| `ClaudeCodeRuntime` | ✓ | ✓ | ✓ | ✓ | All native via SDK channels. |
+| `CopilotRuntime` | ✓ | ✓ | ✓ | ✗ | Vendor enforces turn caps internally; `max_turns` no-op. |
+| `CodexRuntime` | ✓ | ✓ | ✓ | ✓ | Permission mapping is coarser (session-wide `approval_policy`). |
+| `OpenAICompatibleRuntime` | ✗ | ✓ | ✓ | ✓ | Chat Completions has no permission concept; declines permanently. |
+
+#### Iteration A — Protocol scaffolding (no behaviour) ✅
+
+Lock the public surface; defer the wiring.
+
+- New `airframe/permission.py` — `PermissionRequest` (frozen+slots:
+  `tool_name`, `tool_args: dict[str, Any]`, `reason: str | None`),
+  `PermissionDecision = Literal["allow", "deny", "defer"]`,
+  `PermissionCallback` Protocol with
+  `async def handle(request) -> PermissionDecision`.
+- New `airframe/hooks.py` — `HookEvent` (frozen+slots: `kind`
+  literal of the 8 strings, `session_id: str | None`,
+  `payload: dict[str, Any]`).
+- Extend `AgentRuntime.session(...)` Protocol and every adapter's
+  `session()` with:
+  - `on_permission: PermissionCallback | None = None`
+  - `on_event: Callable[[HookEvent], None] | None = None`
+- Extend `AgentSession.execute()` / `.stream()` (Protocol and every
+  bespoke session) with:
+  - `max_turns: int | None = None`
+  - `max_budget_usd: float | None = None`
+- Shared helpers in `airframe.sessions`:
+  - `_check_permission_supported(cb, *, adapter_label, supports)` —
+    raises `UnsupportedFeatureError(feature=Feature.PERMISSION_CALLBACK)`
+    when `cb is not None` and the flag is False.
+  - `_check_hooks_supported(cb, *, adapter_label, supports)` — same
+    shape for `Feature.LIFECYCLE_HOOKS`.
+  - `_check_budget_supported(*, max_turns, max_budget_usd,
+    adapter_label, supports)` — raises with the matching feature
+    (`BUDGET_TURN_CAP` / `BUDGET_USD_CAP`) on the first non-None
+    kwarg whose flag is False.
+- Every adapter's `session()` / `execute()` / `stream()` calls the
+  helpers at the top.
+- Top-level exports: `PermissionRequest`, `PermissionDecision`,
+  `PermissionCallback`, `HookEvent`.
+- Tests:
+  - `tests/test_permission.py` — shape lock on the new dataclasses
+    + protocol; `PermissionDecision` literal snapshot.
+  - `tests/test_hooks.py` — shape lock on `HookEvent`; the 8
+    `kind` strings snapshotted in `test_hook_event_kind_strings_are_stable`
+    so a rename is caught at PR time (same discipline as
+    `test_feature_string_values_are_stable` for `Feature`).
+  - `tests/test_features.py` extended: cross-adapter matrix
+    confirming `PERMISSION_CALLBACK` / `LIFECYCLE_HOOKS` /
+    `BUDGET_USD_CAP` / `BUDGET_TURN_CAP` False everywhere; the
+    four new kwargs raise on every adapter with the right
+    `feature=` attribute.
+
+**Stopping point.** New kwargs accepted by every adapter's
+`session()` / `execute()` / `stream()` signature; non-None values
+raise immediately. No per-adapter behaviour yet.
+
+#### Iteration B — Permission callback (3 wire, 1 declines) ✅
+
+Sets the per-vendor permission-channel pattern. Same "wire the
+hardest one first" cadence as Phase 4 Iteration B (Claude).
+
+- **Claude:** `_translate_permission_for_claude(cb)` →
+  `ClaudeAgentOptions.can_use_tool=<adapter>`. The adapter builds
+  a :class:`PermissionRequest` from the SDK's tool-call dict, awaits
+  the user's callback, maps `"allow"`/`"deny"` to the SDK's boolean
+  return; `"defer"` falls through to the SDK's default policy with
+  a debug log. Callback identity joins the existing
+  `_ensure_client` cache key — changing the callback forces
+  reconnect (same pattern as `tools=`).
+- **Copilot:** translate to `on_permission_request=` (mandatory at
+  `create_session`). Map airframe's `PermissionDecision` literal to
+  Copilot's `PermissionDecision` enum
+  (`approve_once`/`approve_for_session`/`reject`). Callback joins
+  the existing session cache key.
+- **Codex:** translate to `approval_policy=` (session-wide enum:
+  `never`/`untrusted`/`on-request`/`on-failure`). The user's
+  callback runs **once** at session creation to derive the policy
+  enum — per-call interception isn't possible through the SDK.
+  Document the limitation loudly so consumers aren't surprised.
+- **OpenAI-compat:** inline decline with a permanent message —
+  chat-completions has no tool-permission wire shape. Same shape
+  as Phase 4 Iteration D's `mcp_servers=` decline.
+- Flip `Feature.PERMISSION_CALLBACK` True on Claude / Copilot /
+  Codex.
+- `examples/probe_permission.py` — multi-provider live probe with
+  a callback that logs every request and approves. OpenAI-compat
+  branch surfaces the decline verbatim (probe-as-docs).
+- Tests: round-trip on each accepting adapter (mock callback fired
+  with the expected `PermissionRequest`, decision honoured);
+  OpenAI-compat decline (`.feature == PERMISSION_CALLBACK` +
+  actionable message); cache invalidation when callback identity
+  changes between turns on Claude + Copilot; Codex per-session-only
+  semantics documented in test docstring.
+
+**Stopping point.** Three of four adapters wire permission;
+OpenAI-compat declines. Hooks and budget still raise.
+
+#### Iteration C — Lifecycle hooks (4 wire, mixed mechanisms) ✅
+
+The most surface-area iteration; each adapter takes a different
+route to emit the 8 `HookEvent.kind` literals.
+
+- **Claude:** pass `hooks=<adapter>` to `ClaudeAgentOptions` plus
+  `include_hook_events=True`. Translate the SDK's native hook
+  stream into `HookEvent` and fan out to `on_event`.
+- **Copilot:** install a `session.on(...)` subscriber at session
+  creation that translates the SDK's typed `*Data` events into the
+  8 `kind` literals.
+- **Codex:** synthesize from `ItemStartedEvent` /
+  `ItemCompletedEvent` on the thread event stream. Emits
+  `session_start`/`session_end`/`user_prompt_submit`/
+  `pre_tool_use`/`post_tool_use`.
+- **OpenAI-compat:** synthesize from the existing client-side
+  tool-loop in `OpenAICompatibleSession._do_execute` / `stream`.
+  Emits the same five kinds Codex does, plus `tool_failure`.
+  Cannot emit `pre_compact` or `rate_limit` honestly — document.
+- Per-adapter docstring: the *emittable kinds set* for that
+  adapter so consumers know what to expect.
+- Flip `Feature.LIFECYCLE_HOOKS` True on all four.
+- `examples/probe_hooks.py` — multi-provider live probe printing
+  every observed `HookEvent` in order.
+- Tests: ordered-event matcher on each adapter for a deterministic
+  prompt (one that triggers `user_prompt_submit` → `pre_tool_use`
+  → `post_tool_use` → `session_end`); per-adapter
+  emittable-kinds-set test pinned (so a regression where Codex
+  stops emitting `post_tool_use` is caught at PR time).
+
+**Stopping point.** All four adapters fire hooks; emittable-kinds
+sets are documented and tested.
+
+#### Iteration D — Budget caps + probe + wrap-up ✅
+
+- **Claude:** `max_turns` → `ClaudeAgentOptions.max_turns`
+  (overrides the hard-coded `DEFAULT_MAX_TURNS=60` when set);
+  `max_budget_usd` via vendor field if available, else client-side
+  accumulation against `RuntimeResult.cost.cost_usd` (same pattern
+  the other three adapters use).
+- **Copilot / Codex / OpenAI-compat:** client-side accumulation in
+  the session. `max_turns` is a per-`execute()` turn counter
+  (Copilot: no-op since vendor caps internally; Codex /
+  OpenAI-compat: real counter). `max_budget_usd` aborts the next
+  turn when the running total exceeds the cap.
+- New error: `RuntimeBudgetExceededError(AgentRuntimeError)` with
+  `cap: float`, `current: float`,
+  `kind: Literal["usd","turns"]` attributes. Raised at turn
+  boundary in v0 — no mid-turn interrupts (additive later via the
+  existing `cancel()` plumbing).
+- Flip `Feature.BUDGET_USD_CAP` True on all four (client-side
+  enforcement counts as honest support).
+  `Feature.BUDGET_TURN_CAP` True on Claude (native) + Codex +
+  OpenAI-compat (client-side); False on Copilot.
+- `examples/probe_budget.py` — multi-provider live probe with a
+  deliberately tiny cap; verifies the error fires and prints the
+  matrix table at the end.
+- `tests/test_features.py::test_phase_5_final_matrix` pins the
+  endgame (Permission / Hooks / Budget_USD / Budget_Turn columns
+  per the coverage table above).
+- CHANGELOG Iteration D entry; trim the "Deferred (Phase 5)"
+  block; mark Phase 5 ✅ in this doc.
+
+**Stopping point.** Phase 5 complete. Ready for release as
+`v0.8.0` or to roll into Phase 6 (middleware, sandbox, subagents)
+— or the `v1.0` cut per the "When to cut v1.0" section above.
+
+### Risks and decisions to flag during execution
+
+1. **`HookEvent.kind` literal lock (8 strings).** Phase-0-style
+   shape lock; snapshot the wire values in `tests/test_hooks.py`
+   from Iteration A onwards. Once consumer code branches on
+   `event.kind == "pre_tool_use"`, renaming is a major bump.
+2. **`PermissionDecision = "defer"` semantics.** Plan doesn't
+   define cross-vendor. Decision in Iteration B: fall through to
+   the vendor's default policy with a debug log. Lock the
+   semantics in the per-adapter docstrings.
+3. **Codex permission fidelity.** Codex's `approval_policy` is
+   *session-wide*, not per-call. The user's `PermissionCallback`
+   fires once (to derive the policy enum); per-call interception
+   isn't possible through the SDK. Document loudly so consumers
+   aren't surprised.
+4. **`max_budget_usd` granularity.** Turn-boundary abort vs
+   mid-turn interrupt. Recommend turn-boundary in v0 (simpler,
+   predictable cost shape); mid-turn cancellation is additive
+   later via the existing `cancel()` plumbing.
+5. **`max_turns` vs `MAX_TOOL_ITERATIONS` on OpenAI-compat.** Keep
+   distinct: `max_turns` is a user-facing budget; `MAX_TOOL_ITERATIONS=20`
+   stays as the runaway guard. Document the relationship in the
+   adapter docstring.
+6. **`RuntimeBudgetExceededError` as new error class** vs reusing
+   `RuntimeProtocolError`. Recommend new class with
+   `cap`/`current`/`kind` attributes so consumers can
+   retry-with-larger-cap without parsing strings.
+7. **`HookEvent.payload: dict[str, Any]`** — lowest-common-
+   denominator shape. Per-`kind` typed payloads would be more
+   rigorous but additive later. Recommend dict for v0.
+8. **Cache-key churn from `on_permission` / `on_event`.** Both
+   bake at session-creation on Claude / Copilot, so
+   callable-identity changes force a session rebuild. Document so
+   consumers don't pass freshly-constructed lambdas per call by
+   accident.
 
 ---
 

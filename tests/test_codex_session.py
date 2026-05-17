@@ -966,3 +966,630 @@ def test_codex_runtime_declines_every_mcp_transport() -> None:
     assert rt.supports(Feature.TOOLS_MCP_HTTP) is False
     assert rt.supports(Feature.TOOLS_MCP_SSE) is False
     assert rt.supports(Feature.TOOLS_MCP_IN_PROCESS) is False
+
+
+# ---------------------------------------------------------------------------
+# Permission callback (Phase 5 Iteration B — session-wide approval_policy)
+# ---------------------------------------------------------------------------
+
+
+async def test_permission_callback_allow_maps_to_never_policy(
+    mock_sdk: dict[str, Any],
+) -> None:
+    """``"allow"`` derives ``approval_policy="never"`` — auto-approve everything.
+
+    Codex's approval channel is session-wide, not per-call. airframe
+    calls the user's callback **once** at first execute() with a
+    sentinel PermissionRequest and translates the decision into the
+    ApprovalMode enum baked into start_thread().
+    """
+    from airframe import PermissionDecision, PermissionRequest
+
+    captured: list[PermissionRequest] = []
+
+    class _Allow:
+        async def handle(self, request: PermissionRequest) -> PermissionDecision:
+            captured.append(request)
+            return "allow"
+
+    rt = CodexRuntime()
+    sess = rt.session(on_permission=_Allow())
+    try:
+        await sess.execute("hi")
+    finally:
+        await sess.close()
+
+    options = mock_sdk["client"].start_thread.call_args.args[0]
+    assert options["approval_policy"] == "never"
+    # The callback fired exactly once with the sentinel request.
+    assert len(captured) == 1
+    from airframe.adapters.codex import CODEX_SESSION_PERMISSION_TOOL
+
+    assert captured[0].tool_name == CODEX_SESSION_PERMISSION_TOOL
+    assert captured[0].tool_args == {}
+    # The reason explains the session-wide-only limitation.
+    assert "session-wide" in (captured[0].reason or "")
+
+
+async def test_permission_callback_deny_maps_to_untrusted_policy(
+    mock_sdk: dict[str, Any],
+) -> None:
+    """``"deny"`` derives ``approval_policy="untrusted"`` — strictest mode."""
+    from airframe import PermissionDecision, PermissionRequest
+
+    class _Deny:
+        async def handle(self, request: PermissionRequest) -> PermissionDecision:
+            return "deny"
+
+    rt = CodexRuntime()
+    sess = rt.session(on_permission=_Deny())
+    try:
+        await sess.execute("hi")
+    finally:
+        await sess.close()
+
+    options = mock_sdk["client"].start_thread.call_args.args[0]
+    assert options["approval_policy"] == "untrusted"
+
+
+async def test_permission_callback_defer_maps_to_on_request_policy(
+    mock_sdk: dict[str, Any],
+) -> None:
+    """``"defer"`` derives ``approval_policy="on-request"`` — Codex's default
+    per-call prompting."""
+    from airframe import PermissionDecision, PermissionRequest
+
+    class _Defer:
+        async def handle(self, request: PermissionRequest) -> PermissionDecision:
+            return "defer"
+
+    rt = CodexRuntime()
+    sess = rt.session(on_permission=_Defer())
+    try:
+        await sess.execute("hi")
+    finally:
+        await sess.close()
+
+    options = mock_sdk["client"].start_thread.call_args.args[0]
+    assert options["approval_policy"] == "on-request"
+
+
+async def test_permission_callback_fires_only_once_per_session(
+    mock_sdk: dict[str, Any],
+) -> None:
+    """The callback is invoked at most once per session — Codex's
+    approval_policy is baked at Thread creation, not re-evaluated
+    per turn. This is the loud limitation the docstring calls out.
+    """
+    from airframe import PermissionDecision, PermissionRequest
+
+    call_count = 0
+
+    class _CountingCallback:
+        async def handle(self, request: PermissionRequest) -> PermissionDecision:
+            nonlocal call_count
+            call_count += 1
+            return "allow"
+
+    rt = CodexRuntime()
+    sess = rt.session(on_permission=_CountingCallback())
+    try:
+        await sess.execute("turn 1")
+        await sess.execute("turn 2")
+        await sess.execute("turn 3")
+    finally:
+        await sess.close()
+
+    assert call_count == 1, (
+        "Codex's approval_policy is session-wide; the callback must "
+        f"fire exactly once at first execute(), not per turn. Got {call_count}."
+    )
+
+
+async def test_no_permission_callback_omits_approval_policy(
+    mock_sdk: dict[str, Any],
+) -> None:
+    """Sessions opened without on_permission= leave approval_policy off
+    — Codex uses its own default."""
+    rt = CodexRuntime()
+    sess = rt.session()
+    try:
+        await sess.execute("hi")
+    finally:
+        await sess.close()
+
+    options = mock_sdk["client"].start_thread.call_args.args[0]
+    assert "approval_policy" not in options
+
+
+def test_codex_runtime_declares_permission_callback() -> None:
+    """Codex flips PERMISSION_CALLBACK True after Phase 5 Iteration B."""
+    rt = CodexRuntime()
+    assert rt.supports(Feature.PERMISSION_CALLBACK) is True
+
+
+# ---------------------------------------------------------------------------
+# Lifecycle hooks (Phase 5 Iteration C)
+# ---------------------------------------------------------------------------
+
+
+class _FakeCommandExecutionItem:
+    def __init__(
+        self,
+        *,
+        id: str,
+        command: str = "echo hi",
+        status: str = "completed",
+        exit_code: int | None = 0,
+        aggregated_output: str = "hi\n",
+    ) -> None:
+        self.id = id
+        self.type = "command_execution"
+        self.command = command
+        self.status = status
+        self.exit_code = exit_code
+        self.aggregated_output = aggregated_output
+
+
+class _FakeMcpToolCallItem:
+    def __init__(
+        self,
+        *,
+        id: str,
+        server: str = "everything",
+        tool: str = "ping",
+        status: str = "completed",
+        arguments: Any = None,
+        result: Any = None,
+        error: Any = None,
+    ) -> None:
+        self.id = id
+        self.type = "mcp_tool_call"
+        self.server = server
+        self.tool = tool
+        self.status = status
+        self.arguments = arguments
+        self.result = result
+        self.error = error
+
+
+class _FakeItemStarted:
+    def __init__(self, item: Any) -> None:
+        self.type = "item.started"
+        self.item = item
+
+
+def _patch_codex_item_types(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Substitute fake CommandExecution/McpToolCall types + ItemStartedEvent
+    so isinstance() dispatch in stream() picks them up."""
+    from openai_codex_sdk import types as types_mod
+
+    monkeypatch.setattr(types_mod, "CommandExecutionItem", _FakeCommandExecutionItem)
+    monkeypatch.setattr(types_mod, "McpToolCallItem", _FakeMcpToolCallItem)
+    monkeypatch.setattr(types_mod, "ItemStartedEvent", _FakeItemStarted)
+
+
+def test_codex_runtime_declares_lifecycle_hooks() -> None:
+    """LIFECYCLE_HOOKS is True at the runtime level."""
+    rt = CodexRuntime()
+    assert rt.supports(Feature.LIFECYCLE_HOOKS)
+
+
+def test_codex_emittable_hook_kinds_matches_plan() -> None:
+    """Codex emits six kinds — no pre_compact (no native compaction
+    event) and no rate_limit (SDK has no explicit rate-limit signal)."""
+    assert (
+        frozenset(
+            {
+                "session_start",
+                "session_end",
+                "user_prompt_submit",
+                "pre_tool_use",
+                "post_tool_use",
+                "tool_failure",
+            }
+        )
+        == CodexRuntime.EMITTABLE_HOOK_KINDS
+    )
+
+
+async def test_on_event_execute_emits_session_start_and_user_prompt_submit(
+    mock_sdk: dict[str, Any],
+) -> None:
+    """First execute() fires session_start exactly once, plus
+    user_prompt_submit per turn."""
+    from airframe.hooks import HookEvent
+
+    events: list[HookEvent] = []
+
+    rt = CodexRuntime()
+    sess = rt.session(on_event=events.append)
+    try:
+        await sess.execute("first")
+        await sess.execute("second")
+    finally:
+        await sess.close()
+
+    starts = [e for e in events if e.kind == "session_start"]
+    prompts = [e for e in events if e.kind == "user_prompt_submit"]
+    assert len(starts) == 1
+    assert starts[0].payload["model"] == "gpt-5-codex"
+    assert starts[0].payload["resumed"] is False
+    assert len(prompts) == 2
+    assert prompts[0].payload["prompt"] == "first"
+    assert prompts[0].payload["length"] == len("first")
+
+
+async def test_on_event_resume_flag_propagates_to_session_start(
+    mock_sdk: dict[str, Any],
+) -> None:
+    """resume=<id> → session_start payload carries resumed=True."""
+    from airframe.hooks import HookEvent
+
+    events: list[HookEvent] = []
+    mock_sdk["thread"].id = "thread-resumed"
+
+    rt = CodexRuntime()
+    sess = rt.session(resume="thread-resumed", on_event=events.append)
+    try:
+        await sess.execute("hi")
+    finally:
+        await sess.close()
+
+    starts = [e for e in events if e.kind == "session_start"]
+    assert len(starts) == 1
+    assert starts[0].payload["resumed"] is True
+
+
+async def test_on_event_execute_replays_tool_items_post_turn(
+    mock_sdk: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """execute() returns a Turn after completion — the adapter replays
+    its items at end-of-turn to emit pre/post_tool_use hooks."""
+    from airframe.hooks import HookEvent
+
+    _patch_codex_item_types(monkeypatch)
+
+    cmd_item = _FakeCommandExecutionItem(
+        id="cmd-1",
+        command="ls -la",
+        status="completed",
+        exit_code=0,
+        aggregated_output="total 0\n",
+    )
+    mcp_item = _FakeMcpToolCallItem(
+        id="mcp-1",
+        server="everything",
+        tool="ping",
+        status="completed",
+        result={"ok": True},
+    )
+
+    async def fake_run(prompt: str, options: dict[str, Any]) -> Any:
+        return _FakeTurn(final_response="done", items=[cmd_item, mcp_item])
+
+    mock_sdk["thread"].run = AsyncMock(side_effect=fake_run)
+
+    events: list[HookEvent] = []
+    rt = CodexRuntime()
+    sess = rt.session(on_event=events.append)
+    try:
+        await sess.execute("run stuff")
+    finally:
+        await sess.close()
+
+    # Each item produced exactly one pre + one post hook, in per-item order.
+    kinds = [e.kind for e in events if e.kind in {"pre_tool_use", "post_tool_use"}]
+    assert kinds == ["pre_tool_use", "post_tool_use", "pre_tool_use", "post_tool_use"]
+    pres = [e for e in events if e.kind == "pre_tool_use"]
+    posts = [e for e in events if e.kind == "post_tool_use"]
+    assert pres[0].payload["tool_name"] == "ls -la"
+    assert pres[0].payload["tool_call_id"] == "cmd-1"
+    assert pres[1].payload["tool_name"] == "everything/ping"
+    assert posts[0].payload["exit_code"] == 0
+    assert posts[1].payload["output"] == {"ok": True}
+
+
+async def test_on_event_execute_replays_failed_command_as_tool_failure(
+    mock_sdk: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """status='failed' → tool_failure, not post_tool_use."""
+    from airframe.hooks import HookEvent
+
+    _patch_codex_item_types(monkeypatch)
+
+    cmd_item = _FakeCommandExecutionItem(
+        id="cmd-1",
+        command="false",
+        status="failed",
+        exit_code=1,
+        aggregated_output="",
+    )
+
+    async def fake_run(prompt: str, options: dict[str, Any]) -> Any:
+        return _FakeTurn(final_response="apologies", items=[cmd_item])
+
+    mock_sdk["thread"].run = AsyncMock(side_effect=fake_run)
+
+    events: list[HookEvent] = []
+    rt = CodexRuntime()
+    sess = rt.session(on_event=events.append)
+    try:
+        await sess.execute("run failing")
+    finally:
+        await sess.close()
+
+    kinds = [e.kind for e in events if e.kind in {"post_tool_use", "tool_failure"}]
+    assert kinds == ["tool_failure"]
+
+
+async def test_on_event_stream_emits_pre_then_post_tool_use_per_item(
+    mock_sdk: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Streaming path: pre_tool_use on first ItemStarted/Updated for a
+    command item; post_tool_use on ItemCompleted with status=completed."""
+    from airframe.hooks import HookEvent
+
+    _patch_codex_item_types(monkeypatch)
+
+    cmd_running = _FakeCommandExecutionItem(
+        id="cmd-1",
+        command="echo hi",
+        status="in_progress",
+        exit_code=None,
+        aggregated_output="",
+    )
+    cmd_done = _FakeCommandExecutionItem(
+        id="cmd-1",
+        command="echo hi",
+        status="completed",
+        exit_code=0,
+        aggregated_output="hi\n",
+    )
+    msg_done = _FakeAgentMessageItem(id="m-1", text="done")
+    events_stream = [
+        _FakeItemStarted(cmd_running),
+        _FakeItemCompleted(cmd_done),
+        _FakeItemCompleted(msg_done),
+        _FakeTurnCompleted(_FakeUsage()),
+    ]
+    mock_sdk["thread"].run_streamed = AsyncMock(return_value=_FakeStreamedTurn(events_stream))
+
+    captured: list[HookEvent] = []
+    rt = CodexRuntime()
+    sess = rt.session(on_event=captured.append)
+    try:
+        async for _ in sess.stream("run echo"):
+            pass
+    finally:
+        await sess.close()
+
+    kinds = [e.kind for e in captured if e.kind in {"pre_tool_use", "post_tool_use"}]
+    # pre fires on the ItemStartedEvent (running), post fires on the
+    # ItemCompletedEvent (completed) — one of each per item id.
+    assert kinds == ["pre_tool_use", "post_tool_use"]
+
+
+async def test_on_event_stream_pre_tool_use_fires_once_per_item_id(
+    mock_sdk: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Multiple ItemUpdatedEvents for the same item id → still only one
+    pre_tool_use HookEvent."""
+    from airframe.hooks import HookEvent
+
+    _patch_codex_item_types(monkeypatch)
+
+    cmd_a = _FakeCommandExecutionItem(id="cmd-1", status="in_progress", exit_code=None)
+    cmd_b = _FakeCommandExecutionItem(id="cmd-1", status="in_progress", exit_code=None)
+    cmd_done = _FakeCommandExecutionItem(id="cmd-1", status="completed", exit_code=0)
+    events_stream = [
+        _FakeItemUpdated(cmd_a),
+        _FakeItemUpdated(cmd_b),
+        _FakeItemCompleted(cmd_done),
+        _FakeItemCompleted(_FakeAgentMessageItem(id="m-1", text="ok")),
+        _FakeTurnCompleted(_FakeUsage()),
+    ]
+    mock_sdk["thread"].run_streamed = AsyncMock(return_value=_FakeStreamedTurn(events_stream))
+
+    captured: list[HookEvent] = []
+    rt = CodexRuntime()
+    sess = rt.session(on_event=captured.append)
+    try:
+        async for _ in sess.stream("hi"):
+            pass
+    finally:
+        await sess.close()
+
+    pres = [e for e in captured if e.kind == "pre_tool_use"]
+    assert len(pres) == 1
+
+
+async def test_close_synthesises_session_end_when_session_start_fired(
+    mock_sdk: dict[str, Any],
+) -> None:
+    """close() after at least one turn emits session_end exactly once."""
+    from airframe.hooks import HookEvent
+
+    events: list[HookEvent] = []
+    rt = CodexRuntime()
+    sess = rt.session(on_event=events.append)
+    await sess.execute("hi")
+    # No session_end yet before close.
+    assert [e for e in events if e.kind == "session_end"] == []
+    await sess.close()
+    ends = [e for e in events if e.kind == "session_end"]
+    assert len(ends) == 1
+    assert ends[0].payload["model"] == "gpt-5-codex"
+
+
+async def test_close_session_end_is_idempotent(mock_sdk: dict[str, Any]) -> None:
+    """Multiple close() calls emit session_end at most once."""
+    from airframe.hooks import HookEvent
+
+    events: list[HookEvent] = []
+    rt = CodexRuntime()
+    sess = rt.session(on_event=events.append)
+    await sess.execute("hi")
+    await sess.close()
+    await sess.close()
+    await sess.close()
+    ends = [e for e in events if e.kind == "session_end"]
+    assert len(ends) == 1
+
+
+async def test_close_without_execute_omits_session_end(
+    mock_sdk: dict[str, Any],
+) -> None:
+    """If session_start never fired (no execute() ever ran), close()
+    must NOT fire a phantom session_end."""
+    from airframe.hooks import HookEvent
+
+    events: list[HookEvent] = []
+    rt = CodexRuntime()
+    sess = rt.session(on_event=events.append)
+    await sess.close()
+    assert [e for e in events if e.kind == "session_end"] == []
+
+
+async def test_no_on_event_skips_all_hook_emission(
+    mock_sdk: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Without on_event= the adapter doesn't construct HookEvents (the
+    fast path stays fast). Verified indirectly: the session completes
+    normally even when no observer is wired."""
+    _patch_codex_item_types(monkeypatch)
+
+    cmd_item = _FakeCommandExecutionItem(id="c", status="completed", exit_code=0)
+
+    async def fake_run(prompt: str, options: dict[str, Any]) -> Any:
+        return _FakeTurn(final_response="ok", items=[cmd_item])
+
+    mock_sdk["thread"].run = AsyncMock(side_effect=fake_run)
+
+    rt = CodexRuntime()
+    sess = rt.session()
+    try:
+        result = await sess.execute("hi")
+    finally:
+        await sess.close()
+    assert result.text == "ok"
+
+
+async def test_on_event_observer_that_raises_does_not_break_session(
+    mock_sdk: dict[str, Any],
+) -> None:
+    """A raising observer is caught by _fire_hook_event; the session
+    continues to completion."""
+    from airframe.hooks import HookEvent
+
+    calls = {"n": 0}
+
+    def boom(event: HookEvent) -> None:
+        calls["n"] += 1
+        raise RuntimeError("observer broke")
+
+    rt = CodexRuntime()
+    sess = rt.session(on_event=boom)
+    try:
+        result = await sess.execute("hi")
+    finally:
+        await sess.close()
+
+    # Session ran to completion despite the raising observer.
+    assert calls["n"] >= 1
+    # _FakeTurn().final_response is a JSON string; without schema= the
+    # adapter surfaces it as-is in result.text.
+    assert result.text == '{"summary": "ok", "count": 42}'
+
+
+# ---------------------------------------------------------------------------
+# Budget caps (Phase 5 Iteration D)
+# ---------------------------------------------------------------------------
+
+
+def test_codex_runtime_declares_budget_caps() -> None:
+    """Codex declares both BUDGET_USD_CAP and BUDGET_TURN_CAP."""
+    rt = CodexRuntime()
+    assert rt.supports(Feature.BUDGET_USD_CAP)
+    assert rt.supports(Feature.BUDGET_TURN_CAP)
+
+
+async def test_max_turns_cap_raises_when_count_reached(
+    mock_sdk: dict[str, Any],
+) -> None:
+    """After running max_turns turns, the next execute() raises
+    RuntimeBudgetExceededError(kind='turns')."""
+    from airframe.errors import RuntimeBudgetExceededError
+
+    rt = CodexRuntime()
+    sess = rt.session()
+    try:
+        await sess.execute("turn 1", max_turns=2)
+        await sess.execute("turn 2", max_turns=2)
+        with pytest.raises(RuntimeBudgetExceededError) as exc_info:
+            await sess.execute("turn 3", max_turns=2)
+    finally:
+        await sess.close()
+    err = exc_info.value
+    assert err.kind == "turns"
+    assert err.cap == 2.0
+    assert err.current == 2.0
+
+
+async def test_max_budget_usd_cap_raises_when_cumulative_cost_reached(
+    mock_sdk: dict[str, Any],
+) -> None:
+    """Cumulative cost from `_FakeUsage` defaults adds up across
+    turns; once it crosses the cap the next execute() raises."""
+    from airframe.errors import RuntimeBudgetExceededError
+
+    # Default _FakeUsage gives ~$0.000225/turn on gpt-5-codex.
+    # Cap at $0.0003 → first turn succeeds ($0.000225),
+    # second turn raises (cumulative $0.000225 < $0.0003 still
+    # OK, but after second succeeds $0.00045 > $0.0003 → third raises).
+    # Use a tighter cap so the trip happens immediately.
+    rt = CodexRuntime()
+    sess = rt.session()
+    try:
+        # First turn succeeds → cumulative ~$0.000225.
+        await sess.execute("turn 1", max_budget_usd=0.0002)
+        # Next turn's pre-enforce trips: $0.000225 >= $0.0002.
+        with pytest.raises(RuntimeBudgetExceededError) as exc_info:
+            await sess.execute("turn 2", max_budget_usd=0.0002)
+    finally:
+        await sess.close()
+    err = exc_info.value
+    assert err.kind == "usd"
+    assert err.cap == 0.0002
+
+
+async def test_stream_honours_budget_caps(mock_sdk: dict[str, Any]) -> None:
+    """Stream path uses the same enforce — exhausted cap raises."""
+    from airframe.errors import RuntimeBudgetExceededError
+
+    events_stream = [
+        _FakeItemCompleted(_FakeAgentMessageItem(id="m-1", text="hi")),
+        _FakeTurnCompleted(_FakeUsage()),
+    ]
+    mock_sdk["thread"].run_streamed = AsyncMock(return_value=_FakeStreamedTurn(events_stream))
+    rt = CodexRuntime()
+    sess = rt.session()
+    try:
+        async for _ in sess.stream("a", max_budget_usd=0.0002):
+            pass
+        with pytest.raises(RuntimeBudgetExceededError):
+            async for _ in sess.stream("b", max_budget_usd=0.0002):
+                pass
+    finally:
+        await sess.close()
+
+
+async def test_budget_caps_none_open_cleanly(mock_sdk: dict[str, Any]) -> None:
+    """Without caps, turns run indefinitely."""
+    rt = CodexRuntime()
+    sess = rt.session()
+    try:
+        for i in range(5):
+            await sess.execute(f"turn {i}")
+    finally:
+        await sess.close()
