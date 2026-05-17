@@ -15,6 +15,7 @@ production (explicit constructor argument).
 | **CodexRuntime** | `api_key=` constructor arg → `OPENAI_API_KEY` env → `CODEX_API_KEY` env → `~/.local/share/opencode/auth.json::openai.key` → implicit `~/.codex/auth.json` (CLI-managed) | `airframe-agents[codex]` |
 | **OpenCodeZenRuntime** | `api_key=` constructor arg → `OPENCODE_API_KEY` env → `~/.local/share/opencode/auth.json::opencode.key` | `airframe-agents[openai-compat]` |
 | **OpenCodeGoRuntime** | `api_key=` constructor arg → `OPENCODE_API_KEY` env → `~/.local/share/opencode/auth.json::opencode-go.key` | `airframe-agents[openai-compat]` |
+| **OpenRouterRuntime** | `api_key=` constructor arg → `OPENROUTER_API_KEY` env | `airframe-agents[openai-compat]` |
 
 `list_models()` calls always require a credential — the vendor's
 models endpoint won't honour an anonymous request. Tests / scripts
@@ -172,6 +173,29 @@ Three sources, checked in order:
 - `base_url=` overrides the gateway URL; honours `OPENCODE_GO_BASE_URL`
   env var.
 - HTTP-only — no subprocess, credential stays in-process.
+
+## OpenRouterRuntime
+
+```python
+from airframe import OpenRouterRuntime
+runtime = OpenRouterRuntime()  # picks up OPENROUTER_API_KEY
+runtime_explicit = OpenRouterRuntime(api_key="sk-or-...")
+```
+
+Two sources, checked in order:
+
+1. **`api_key=` constructor arg** — explicit OpenRouter key.
+2. **`OPENROUTER_API_KEY` env var** — mint at
+   [https://openrouter.ai/keys](https://openrouter.ai/keys).
+
+### Notes
+
+- **No on-disk auth-file convention.** OpenRouter doesn't have an
+  equivalent of `~/.local/share/opencode/auth.json`. The auth chain
+  ends at the env var; no filesystem fallback.
+- `base_url=` overrides the gateway URL; honours `OPENROUTER_BASE_URL`
+  env var (e.g. for self-hosted proxies).
+- HTTP-only — no subprocess; credential stays in-process.
 - The same `OpenAICompatibleRuntime` base class powers any future
   compat-vendor adapter (Together / Groq / Fireworks). Each
   subclass overrides `_resolve_api_key()` with its own env-var and

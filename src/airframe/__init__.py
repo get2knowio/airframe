@@ -102,6 +102,7 @@ from airframe.adapters.codex import CodexRuntime
 from airframe.adapters.copilot import CopilotRuntime
 from airframe.adapters.opencode_go import OpenCodeGoRuntime
 from airframe.adapters.opencode_zen import OpenCodeZenRuntime
+from airframe.adapters.openrouter import OpenRouterRuntime
 
 __all__ = [
     "AgentRuntime",
@@ -130,6 +131,7 @@ __all__ = [
     "OpenAICompatOptions",
     "OpenCodeGoRuntime",
     "OpenCodeZenRuntime",
+    "OpenRouterRuntime",
     "PermissionCallback",
     "PermissionDecision",
     "PermissionRequest",

@@ -86,6 +86,7 @@ _PROVIDER_AUTH: dict[str, list[str]] = {
     "codex": ["OPENAI_API_KEY", "CODEX_API_KEY"],
     "opencode-zen": ["OPENCODE_API_KEY"],
     "opencode-go": ["OPENCODE_API_KEY"],
+    "openrouter": ["OPENROUTER_API_KEY"],
 }
 
 

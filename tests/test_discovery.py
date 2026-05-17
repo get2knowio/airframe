@@ -51,6 +51,7 @@ def test_list_providers_returns_all_when_installed_only_false() -> None:
         "codex",
         "opencode-zen",
         "opencode-go",
+        "openrouter",
     }
 
 
@@ -84,11 +85,11 @@ def test_list_providers_filters_when_only_codex_installed(
 def test_list_providers_filters_when_only_openai_compat_installed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The ``[openai-compat]`` extra brings ``openai`` — gates both
-    OpenAI-compatible adapters (per-token ``opencode-zen`` and
-    subscription ``opencode-go``)."""
+    """The ``[openai-compat]`` extra brings ``openai`` — gates every
+    OpenAI-compatible adapter (``opencode-zen``, ``opencode-go``,
+    ``openrouter``)."""
     _stub_find_spec(monkeypatch, available={"openai"})
-    assert list_providers() == ["opencode-go", "opencode-zen"]
+    assert list_providers() == ["opencode-go", "opencode-zen", "openrouter"]
 
 
 def test_list_providers_when_nothing_installed_is_empty(
@@ -264,7 +265,14 @@ def test_entry_point_adapter_appears_in_list_providers(
     providers = list_providers(installed_only=False)
     assert "fake-third-party" in providers
     # Built-ins still surface unchanged.
-    assert {"claude", "github-copilot", "codex", "opencode-zen", "opencode-go"} <= set(providers)
+    assert {
+        "claude",
+        "github-copilot",
+        "codex",
+        "opencode-zen",
+        "opencode-go",
+        "openrouter",
+    } <= set(providers)
 
 
 def test_entry_point_adapter_routed_by_runtime_for(

@@ -744,6 +744,7 @@ def test_session_rejects_wrong_provider_options_namespace(adapter_runtime: Any) 
         "codex": CodexOptions,
         "opencode-zen": OpenAICompatOptions,
         "opencode-go": OpenAICompatOptions,
+        "openrouter": OpenAICompatOptions,
     }
     own = matching.get(adapter_runtime.PROVIDER_ID)
     # Pick any namespace that isn't ours.

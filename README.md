@@ -25,7 +25,7 @@ class Brief(BaseModel):
     risks: list[str]
 
 # Provider ID comes from config — YAML, env, CLI flag, whatever.
-provider_id = "claude"  # or "github-copilot", "codex", "opencode-zen", "opencode-go"
+provider_id = "claude"  # or github-copilot / codex / opencode-zen / opencode-go / openrouter
 
 cls = runtime_for(provider_id)       # discovery lookup by ID
 runtime = cls()                      # auth resolves from env / credential files
@@ -70,11 +70,12 @@ is `airframe`.
 | [`CodexRuntime`](docs/adapters/codex.md) | `codex` | `openai-codex-sdk` | `OPENAI_API_KEY` → opencode `auth.json` → `~/.codex/auth.json` | yes, per-turn |
 | [`OpenCodeZenRuntime`](docs/adapters/opencode-zen.md) | `opencode-zen` | `openai` (HTTP) | `OPENCODE_API_KEY` → opencode `auth.json::opencode.key` | no (direct HTTP) |
 | [`OpenCodeGoRuntime`](docs/adapters/opencode-go.md) | `opencode-go` | `openai` (HTTP) | `OPENCODE_API_KEY` → opencode `auth.json::opencode-go.key` | no (direct HTTP) |
+| [`OpenRouterRuntime`](docs/adapters/openrouter.md) | `openrouter` | `openai` (HTTP) | `OPENROUTER_API_KEY` | no (direct HTTP) |
 
-The OpenAI-compatible family (`OpenCodeZenRuntime` per-token and
-`OpenCodeGoRuntime` subscription today; Together / Groq / Fireworks /
-OpenRouter as future siblings) shares the `OpenAICompatibleRuntime`
-base — subclasses are ~30 lines. See
+The OpenAI-compatible family (`OpenCodeZenRuntime` per-token,
+`OpenCodeGoRuntime` subscription, `OpenRouterRuntime` multi-vendor
+gateway today; Together / Groq / Fireworks as future siblings) shares
+the `OpenAICompatibleRuntime` base — subclasses are ~30 lines. See
 [`docs/adapters/third-party.md`](docs/adapters/third-party.md).
 
 Each adapter has one canonical provider ID. `"anthropic"` is
@@ -156,7 +157,7 @@ absorbs its vendor's quirks.
 pip install airframe-agents[claude]         # ClaudeCodeRuntime
 pip install airframe-agents[copilot]        # CopilotRuntime
 pip install airframe-agents[codex]          # CodexRuntime
-pip install airframe-agents[openai-compat]  # OpenCodeZenRuntime + OpenCodeGoRuntime (+ future siblings)
+pip install airframe-agents[openai-compat]  # OpenCodeZenRuntime + OpenCodeGoRuntime + OpenRouterRuntime (+ future siblings)
 pip install airframe-agents[all]            # Everything
 pip install airframe-agents[testing]        # Conformance contract suite (pytest)
 ```
@@ -294,7 +295,8 @@ Full list with one-line descriptions in
   [Copilot](docs/adapters/copilot.md) ·
   [Codex](docs/adapters/codex.md) ·
   [OpenCode Zen](docs/adapters/opencode-zen.md) ·
-  [OpenCode Go](docs/adapters/opencode-go.md).
+  [OpenCode Go](docs/adapters/opencode-go.md) ·
+  [OpenRouter](docs/adapters/openrouter.md).
 - **[Writing your own adapter](docs/adapters/third-party.md)** —
   the `airframe.adapters` entry-point group + conformance
   contracts.
