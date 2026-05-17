@@ -17,34 +17,45 @@ pip install airframe-agents[claude]   # or [copilot] / [codex] / [openai-compat]
 ```
 
 ```python
-from airframe import ClaudeCodeRuntime, ProviderModel
+from airframe import runtime_for, ProviderModel
 from pydantic import BaseModel
 
 class Brief(BaseModel):
     summary: str
     risks: list[str]
 
-runtime = ClaudeCodeRuntime()
+# Provider ID comes from config — YAML, env, CLI flag, whatever.
+provider_id = "claude"  # or "github-copilot", "codex", "opencode"
+
+cls = runtime_for(provider_id)       # JDBC-style driver lookup
+runtime = cls()                      # auth resolves from env / credential files
 result = await runtime.execute(
     "Brief me on the project structure.",
     schema=Brief,
-    model=ProviderModel("claude", "claude-haiku-4-5"),
+    model=ProviderModel(provider_id, "claude-haiku-4-5"),
 )
 print(result.structured)     # {"summary": "...", "risks": [...]}
 print(result.cost.cost_usd)  # 0.0042
 await runtime.close()
 ```
 
-Swap the adapter, keep the schema — that's the point:
+The same agent code now serves any installed adapter — swap
+`provider_id` (and `model`) in config, no import or instantiation
+changes. That's the JDBC analogy at work.
+
+Direct imports still work when you only ever need one adapter:
 
 ```python
-from airframe import CopilotRuntime, ProviderModel
-runtime = CopilotRuntime()
-result = await runtime.execute(
-    "Brief me on the project structure.",
-    schema=Brief,
-    model=ProviderModel("github-copilot", "gpt-5-mini"),
-)
+from airframe import ClaudeCodeRuntime
+runtime = ClaudeCodeRuntime()
+```
+
+Use `list_providers()` to enumerate installed adapters at startup
+(handy for validating YAML config):
+
+```python
+from airframe import list_providers
+list_providers()  # ["claude", "codex"]  — whichever extras are installed
 ```
 
 The PyPI distribution name is `airframe-agents`. The import name
