@@ -20,6 +20,7 @@ Verifies:
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import os
 import sys
@@ -33,6 +34,7 @@ if str(REPO_ROOT / "src") not in sys.path:
 from pydantic import BaseModel  # noqa: E402
 
 from airframe.adapters.codex import CodexRuntime  # noqa: E402
+from airframe.errors import RuntimeModelNotFoundError  # noqa: E402
 from airframe.protocol import ProviderModel  # noqa: E402
 
 
@@ -57,7 +59,19 @@ def _auth_available() -> bool:
 
 
 async def main() -> int:
-    model_id = "gpt-5-codex"
+    parser = argparse.ArgumentParser(description="CodexRuntime smoke probe")
+    parser.add_argument(
+        "--model",
+        default=os.environ.get("CODEX_PROBE_MODEL", "gpt-5-codex"),
+        help=(
+            "Model ID to probe. Default 'gpt-5-codex' requires API-billed auth "
+            "(OPENAI_API_KEY). ChatGPT-account auth (via `codex login`) needs "
+            "'gpt-5' or another base GPT-5 model — set via --model or "
+            "CODEX_PROBE_MODEL env var."
+        ),
+    )
+    args = parser.parse_args()
+    model_id = args.model
     runtime = CodexRuntime(model=model_id)
 
     print(f"CodexRuntime probe — model={model_id}")
@@ -101,6 +115,22 @@ async def main() -> int:
         print(f"    payload: {structured}")
         for k, v in result.cost.to_dict().items():
             print(f"    cost.{k}: {v}")
+    except RuntimeModelNotFoundError as exc:
+        err = f"{type(exc).__name__}: {exc}"
+        print(
+            f"\nFAIL: {err}\n\n"
+            "  Hint: this auth path doesn't serve this model. If you "
+            "authenticated via\n  `codex login` (ChatGPT account), the "
+            "openai-codex-sdk routes calls\n  through OpenAI's "
+            "ChatGPT-account-restricted endpoint, which rejects most\n"
+            "  model IDs that the interactive `codex` CLI itself accepts.\n"
+            "  The reliable path is API-billed auth:\n"
+            "    export OPENAI_API_KEY=sk-...\n"
+            "    uv run python examples/probe_codex.py\n"
+            "  Or try a different model via --model / CODEX_PROBE_MODEL."
+        )
+        await runtime.close()
+        return 1
     except Exception as exc:  # noqa: BLE001
         err = f"{type(exc).__name__}: {exc}"
         import traceback

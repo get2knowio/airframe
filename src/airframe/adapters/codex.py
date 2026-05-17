@@ -68,6 +68,7 @@ from airframe.errors import (
     AgentRuntimeError,
     RuntimeAuthError,
     RuntimeCancelledError,
+    RuntimeModelNotFoundError,
     RuntimeServerStartError,
     RuntimeStructuredOutputError,
     RuntimeTransientError,
@@ -867,6 +868,13 @@ class CodexRuntime(AgentRuntime):
                 return RuntimeAuthError(f"codex: auth: {exc}")
             if "rate" in msg or "429" in msg or "503" in msg or "timeout" in msg:
                 return RuntimeTransientError(f"codex: transient: {exc}")
+            if "model" in msg and (
+                "not supported" in msg
+                or "not available" in msg
+                or "not found" in msg
+                or "does not exist" in msg
+            ):
+                return RuntimeModelNotFoundError(f"codex: model unavailable on this binding: {exc}")
             if "schema" in msg or "json" in msg:
                 return RuntimeStructuredOutputError(
                     f"codex: structured output failed: {exc}", body=None
