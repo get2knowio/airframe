@@ -432,3 +432,141 @@ files.
    functionally close but auth-distinct. When `AnthropicRuntime`
    lands, document the choice matrix clearly (IAM vs API key,
    regional availability, billing path).
+
+## Implementation wiring checklist
+
+Beyond `src/airframe/adapters/bedrock.py` itself, every new
+adapter needs to touch these files to be fully wired. Easy to
+forget; easy to verify by grepping for the closest sibling
+(`opencode_go.py` for OpenAI-compat shape, `claude_code.py` for
+full-bespoke shape).
+
+### Source wiring
+
+- [ ] `src/airframe/discovery.py` — add `BedrockRuntime` to
+      `_builtin_runtime_classes()` (currently 6 entries).
+- [ ] `src/airframe/__init__.py` — `from airframe.adapters.bedrock
+      import BedrockRuntime` at module level + `"BedrockRuntime"`
+      entry in `__all__` (alphabetical).
+- [ ] `src/airframe/testing/contracts.py` — add `"bedrock":
+      BedrockOptions` to the `matching` dict inside
+      `_check_provider_options` (the test that asserts every
+      adapter rejects foreign provider-options namespaces).
+- [ ] `src/airframe/testing/integration.py` — add `"bedrock":
+      ["AWS_ACCESS_KEY_ID", "AWS_PROFILE"]` to `_PROVIDER_AUTH`.
+      The integration suite uses this map to self-skip when no
+      credentials are present.
+
+### Probe + examples wiring
+
+- [ ] `examples/probe_budget.py` — add `"bedrock"` to the for-loop
+      provider tuple inside the capability matrix print (the line
+      that iterates over `("claude", "github-copilot", "codex",
+      "opencode-zen", "opencode-go", "openrouter")`).
+- [ ] `examples/probe_parity.py` — picks up the new adapter
+      automatically via `list_providers()`. No source change needed.
+      Consider adding an `AIRFRAME_PROBE_MODEL_BEDROCK` env-var
+      hook in `_model_override` if the default model is
+      region-sensitive (look at the codex `_codex_subscription_model`
+      auto-detection pattern for precedent).
+
+### Packaging
+
+- [ ] `pyproject.toml` — new `bedrock = ["aioboto3>=13"]` extra
+      under `[project.optional-dependencies]`, AND add
+      `"aioboto3>=13"` to the `all = [...]` list, AND add
+      `"aioboto3>=13"` to the `[dependency-groups].test` list (the
+      unit suite imports `aioboto3` for mocking even though calls
+      are stubbed).
+
+### Documentation
+
+- [ ] `README.md` — provider table row (between the OpenRouter
+      and any future row); update the `pip install
+      airframe-agents[openai-compat]` adjacent example to mention
+      `[bedrock]`; add `bedrock` to the comma-separated provider
+      ID example in the quickstart.
+- [ ] `docs/auth.md` — quick-reference table row + a full
+      `## BedrockRuntime` section covering the boto3 chain and
+      region resolution. Cross-link from the adapter page.
+- [ ] `docs/reference.md` — adapter table row + add
+      `BedrockRuntime` to the `__all__` snippet near the end.
+- [ ] `docs/adapters/bedrock.md` — new page (mirror
+      `docs/adapters/opencode-go.md` structure: identity table,
+      quickstart, model catalog, supported features, options,
+      cost reporting, vendor quirks, escape hatches, see-also).
+- [ ] `docs/capabilities.md` — the existing matrix uses
+      `OpenAI-compat` as a single column header for the OpenAI-
+      compatible family. Bedrock needs its own column.
+- [ ] `CLAUDE.md` — add `"bedrock"` to the canonical provider IDs
+      list in the "Provider IDs are strict" paragraph.
+
+### Test wiring
+
+- [ ] `tests/test_bedrock.py` — unit tests. Mirror
+      `tests/test_claude_code.py` for structure (it's the closest
+      full-bespoke template, ~600 LOC) rather than
+      `tests/test_opencode_go.py` (which is a ~150-LOC test for a
+      ~30-LOC subclass of the OpenAI-compat base). Bedrock owns
+      its own session class so the test surface is larger.
+- [ ] `tests/test_bedrock_integration.py` — pytest-marker-gated
+      behavioural tests against live AWS. Mirror
+      `tests/test_opencode_zen_integration.py` for shape.
+- [ ] `tests/test_discovery.py` — update the
+      `test_list_providers_returns_all_when_installed_only_false`
+      expected set + the filtered `test_list_providers_filters_...`
+      tests + the third-party-discovery test that lists builtins.
+
+### Issue + project housekeeping
+
+- [ ] Update [Issue #8](https://github.com/get2knowio/airframe/issues/8)
+      — move Bedrock from Tier 1 to the "Recently shipped" section
+      with commit/PR references.
+- [ ] CHANGELOG entry with the iteration summary.
+
+## Closest in-tree templates to read first
+
+Open these side-by-side with the plan before writing any code.
+
+| File | What to learn from it |
+|---|---|
+| `src/airframe/adapters/claude_code.py` | The full-bespoke shape — `BedrockRuntime` mirrors this structurally (subclasses `AgentRuntime` directly, owns its own `AgentSession` subclass). Roughly 800 LOC; the Bedrock target ~600 is lower because Converse abstracts what Claude Code does at the SDK level. |
+| `src/airframe/adapters/copilot.py` | The forced-tool-for-structured-output pattern. Bedrock's `toolConfig` + `submit_result` tool works identically. Pay attention to the schema-fingerprint caching pattern — Bedrock may want similar to avoid rebuilding `toolConfig` when the schema doesn't change. |
+| `src/airframe/adapters/codex.py` (lines ~140-170) | The `_strictify_schema` helper. Anthropic-on-Bedrock will almost certainly require `additionalProperties: false` on every object node in the tool `inputSchema` — same as Codex's Responses-backed endpoints. Either move the helper to a shared module (`src/airframe/_schema.py`?) or copy into `bedrock.py`. Recommend the move during Iteration B. |
+| `src/airframe/adapters/opencode_go.py` | The discovery / `__init__.py` / docs cross-reference pattern (smaller surface, easier to scan). |
+| `src/airframe/sessions.py` | The shared helpers: `_enforce_budget_pre_turn`, `_check_provider_options`. Bedrock's `BedrockSession` calls into both. |
+
+## Naming reservations
+
+Established during the OpenCode rename:
+
+- `"bedrock"` — this adapter (Converse API, model invocation).
+- `"bedrock-agents"` — **reserved** for the future
+  `BedrockAgentsRuntime` wrapping `bedrock-agent-runtime`
+  (Knowledge Bases, action groups, server-side orchestration).
+  Do **not** fold Agents into `"bedrock"`. Same vendor with
+  distinct billing / capability surface = distinct provider ID,
+  per the lesson from
+  `OpenCodeZenRuntime` (`"opencode-zen"`) vs
+  `OpenCodeGoRuntime` (`"opencode-go"`).
+- `"aws-bedrock"`, `"amazon-bedrock"` — **not** used. The
+  `"bedrock"` namespace is unambiguous and matches AWS's own
+  service-name shorthand.
+
+## First commit in a fresh session
+
+A reasonable Iteration A first commit (the scaffolding-only slice):
+
+```
+src/airframe/adapters/bedrock.py        # new — Iteration A surface
+src/airframe/discovery.py               # +BedrockRuntime in builtins
+src/airframe/__init__.py                # +export +__all__
+pyproject.toml                          # +[bedrock] extra
+tests/test_bedrock.py                   # new — identity, validate_binding, auth-chain unit tests
+tests/test_discovery.py                 # +bedrock in expected sets
+```
+
+That should pass `make ci` cleanly with `Feature` flags all False
+(no behaviour wired yet). After review, Iteration B adds
+`execute()` + `stream()` + `cancel()` and flips the first three
+`Feature` flags True.
