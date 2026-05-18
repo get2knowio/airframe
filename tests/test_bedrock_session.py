@@ -818,3 +818,362 @@ def test_submit_result_tool_config_is_json_serialisable() -> None:
     """Bedrock expects pure JSON in ``toolConfig`` — no Pydantic objects."""
     cfg = _build_submit_result_tool_config(_Schema)
     json.dumps(cfg)
+
+
+# ---------------------------------------------------------------------------
+# Iteration D — function tools + permission gating
+# ---------------------------------------------------------------------------
+
+
+class _AddParams(BaseModel):
+    a: int
+    b: int
+
+
+def _make_calc_tool(handler=None):
+    from airframe.tools import FunctionTool
+
+    async def default_handler(p: _AddParams) -> int:
+        return p.a + p.b
+
+    return FunctionTool(
+        name="calculator",
+        description="Add two integers.",
+        params=_AddParams,
+        handler=handler or default_handler,
+    )
+
+
+def _tool_use_response(
+    tool_use_id: str, name: str, args: dict[str, Any], stop_reason: str = "tool_use"
+) -> dict[str, Any]:
+    """Build a converse response where the model only calls a tool."""
+    return {
+        "output": {
+            "message": {
+                "role": "assistant",
+                "content": [{"toolUse": {"toolUseId": tool_use_id, "name": name, "input": args}}],
+            }
+        },
+        "usage": {"inputTokens": 50, "outputTokens": 20},
+        "stopReason": stop_reason,
+    }
+
+
+@pytest.mark.asyncio
+async def test_execute_with_tool_dispatches_handler_and_appends_result(
+    runtime_with_mock_client: tuple[BedrockRuntime, MagicMock],
+) -> None:
+    rt, client = runtime_with_mock_client
+    tool = _make_calc_tool()
+    # First call: model invokes calculator(a=17, b=25). Second: final text.
+    client.converse = AsyncMock(
+        side_effect=[
+            _tool_use_response("tc_1", "calculator", {"a": 17, "b": 25}),
+            _converse_response(text="The answer is 42"),
+        ]
+    )
+    sess = rt.session(tools=[tool])
+    result = await sess.execute("what is 17 + 25?")
+    assert result.text == "The answer is 42"
+    # Two converse() calls were made.
+    assert client.converse.await_count == 2
+    # Second call sees the user message + assistant toolUse + toolResult.
+    second_msgs = client.converse.await_args_list[1].kwargs["messages"]
+    assert [m["role"] for m in second_msgs] == ["user", "assistant", "user"]
+    assert second_msgs[1]["content"][0]["toolUse"]["name"] == "calculator"
+    tool_result = second_msgs[2]["content"][0]["toolResult"]
+    assert tool_result["toolUseId"] == "tc_1"
+    assert tool_result["status"] == "success"
+    assert tool_result["content"][0] == {"text": "42"}
+
+
+@pytest.mark.asyncio
+async def test_execute_with_tool_propagates_handler_error_to_model(
+    runtime_with_mock_client: tuple[BedrockRuntime, MagicMock],
+) -> None:
+    rt, client = runtime_with_mock_client
+
+    async def boom(_p: _AddParams) -> int:
+        raise ValueError("intentional")
+
+    tool = _make_calc_tool(handler=boom)
+    client.converse = AsyncMock(
+        side_effect=[
+            _tool_use_response("tc_2", "calculator", {"a": 1, "b": 2}),
+            _converse_response(text="Sorry, retried."),
+        ]
+    )
+    sess = rt.session(tools=[tool])
+    result = await sess.execute("compute")
+    assert result.text == "Sorry, retried."
+    tool_result = client.converse.await_args_list[1].kwargs["messages"][2]["content"][0][
+        "toolResult"
+    ]
+    assert tool_result["status"] == "error"
+    assert "intentional" in tool_result["content"][0]["text"]
+
+
+@pytest.mark.asyncio
+async def test_execute_with_tool_arg_parse_failure_is_error(
+    runtime_with_mock_client: tuple[BedrockRuntime, MagicMock],
+) -> None:
+    rt, client = runtime_with_mock_client
+    tool = _make_calc_tool()
+    client.converse = AsyncMock(
+        side_effect=[
+            # Wrong arg shape — params validation fails.
+            _tool_use_response("tc_3", "calculator", {"a": "not-int", "b": 2}),
+            _converse_response(text="Try again."),
+        ]
+    )
+    sess = rt.session(tools=[tool])
+    await sess.execute("compute")
+    tool_result = client.converse.await_args_list[1].kwargs["messages"][2]["content"][0][
+        "toolResult"
+    ]
+    assert tool_result["status"] == "error"
+    assert "schema" in tool_result["content"][0]["text"].lower()
+
+
+@pytest.mark.asyncio
+async def test_execute_with_unknown_tool_name_returns_error(
+    runtime_with_mock_client: tuple[BedrockRuntime, MagicMock],
+) -> None:
+    rt, client = runtime_with_mock_client
+    # No tools registered, but model invents one anyway.
+    client.converse = AsyncMock(
+        side_effect=[
+            _tool_use_response("tc_4", "phantom", {}),
+            _converse_response(text="OK."),
+        ]
+    )
+    sess = rt.session()
+    await sess.execute("hi")
+    tool_result = client.converse.await_args_list[1].kwargs["messages"][2]["content"][0][
+        "toolResult"
+    ]
+    assert tool_result["status"] == "error"
+    assert "not registered" in tool_result["content"][0]["text"]
+
+
+@pytest.mark.asyncio
+async def test_execute_tool_loop_caps_at_max_iterations(
+    runtime_with_mock_client: tuple[BedrockRuntime, MagicMock],
+) -> None:
+    from airframe.adapters.bedrock import MAX_TOOL_ITERATIONS
+    from airframe.errors import RuntimeProtocolError
+
+    rt, client = runtime_with_mock_client
+    tool = _make_calc_tool()
+    # Always invoke the tool; never produce final text.
+    client.converse = AsyncMock(
+        return_value=_tool_use_response("tc_loop", "calculator", {"a": 1, "b": 1})
+    )
+    sess = rt.session(tools=[tool])
+    with pytest.raises(RuntimeProtocolError) as exc:
+        await sess.execute("forever")
+    assert str(MAX_TOOL_ITERATIONS) in str(exc.value)
+    assert client.converse.await_count == MAX_TOOL_ITERATIONS
+
+
+@pytest.mark.asyncio
+async def test_execute_toolconfig_carries_user_tools_with_schema(
+    runtime_with_mock_client: tuple[BedrockRuntime, MagicMock],
+) -> None:
+    """schema= and tools= coexist: both ride toolConfig.tools."""
+    rt, client = runtime_with_mock_client
+    tool = _make_calc_tool()
+    client.converse = AsyncMock(
+        return_value=_converse_response(
+            text="", tool_input={"summary": "ok", "count": 3}, stop_reason="tool_use"
+        )
+    )
+    sess = rt.session(tools=[tool])
+    await sess.execute("answer", schema=_Schema)
+    tool_config = client.converse.await_args.kwargs["toolConfig"]
+    names = [t["toolSpec"]["name"] for t in tool_config["tools"]]
+    assert SUBMIT_RESULT_TOOL in names
+    assert "calculator" in names
+    # toolChoice still pins submit_result.
+    assert tool_config["toolChoice"]["tool"]["name"] == SUBMIT_RESULT_TOOL
+
+
+# --- Permission callback ----------------------------------------------------
+
+
+class _RecordingCallback:
+    """Async callback that records every request + returns a fixed decision."""
+
+    def __init__(self, decision: str = "allow") -> None:
+        self.requests: list[Any] = []
+        self.decision = decision
+
+    async def handle(self, request: Any) -> str:
+        self.requests.append(request)
+        return self.decision
+
+
+@pytest.mark.asyncio
+async def test_permission_allow_invokes_handler(
+    runtime_with_mock_client: tuple[BedrockRuntime, MagicMock],
+) -> None:
+    rt, client = runtime_with_mock_client
+    tool = _make_calc_tool()
+    cb = _RecordingCallback("allow")
+    client.converse = AsyncMock(
+        side_effect=[
+            _tool_use_response("tc_a", "calculator", {"a": 5, "b": 7}),
+            _converse_response(text="12"),
+        ]
+    )
+    sess = rt.session(tools=[tool], on_permission=cb)
+    result = await sess.execute("add")
+    assert result.text == "12"
+    assert len(cb.requests) == 1
+    assert cb.requests[0].tool_name == "calculator"
+    assert cb.requests[0].tool_args == {"a": 5, "b": 7}
+    # The handler ran — second-call toolResult should be success with "12".
+    tool_result = client.converse.await_args_list[1].kwargs["messages"][2]["content"][0][
+        "toolResult"
+    ]
+    assert tool_result["status"] == "success"
+
+
+@pytest.mark.asyncio
+async def test_permission_deny_skips_handler_returns_error(
+    runtime_with_mock_client: tuple[BedrockRuntime, MagicMock],
+) -> None:
+    rt, client = runtime_with_mock_client
+    invoked = []
+
+    async def tracked(_p: _AddParams) -> int:
+        invoked.append(True)
+        return -1
+
+    tool = _make_calc_tool(handler=tracked)
+    cb = _RecordingCallback("deny")
+    client.converse = AsyncMock(
+        side_effect=[
+            _tool_use_response("tc_d", "calculator", {"a": 1, "b": 2}),
+            _converse_response(text="OK, abandoning."),
+        ]
+    )
+    sess = rt.session(tools=[tool], on_permission=cb)
+    await sess.execute("compute")
+    assert invoked == []
+    tool_result = client.converse.await_args_list[1].kwargs["messages"][2]["content"][0][
+        "toolResult"
+    ]
+    assert tool_result["status"] == "error"
+    assert "denied" in tool_result["content"][0]["text"].lower()
+
+
+@pytest.mark.asyncio
+async def test_permission_defer_falls_through_to_allow(
+    runtime_with_mock_client: tuple[BedrockRuntime, MagicMock],
+) -> None:
+    rt, client = runtime_with_mock_client
+    tool = _make_calc_tool()
+    cb = _RecordingCallback("defer")
+    client.converse = AsyncMock(
+        side_effect=[
+            _tool_use_response("tc_def", "calculator", {"a": 2, "b": 3}),
+            _converse_response(text="5"),
+        ]
+    )
+    sess = rt.session(tools=[tool], on_permission=cb)
+    result = await sess.execute("compute")
+    assert result.text == "5"
+
+
+@pytest.mark.asyncio
+async def test_permission_callback_raise_returns_error_to_model(
+    runtime_with_mock_client: tuple[BedrockRuntime, MagicMock],
+) -> None:
+    rt, client = runtime_with_mock_client
+    tool = _make_calc_tool()
+
+    class _BoomCallback:
+        async def handle(self, _request: Any) -> str:
+            raise RuntimeError("permission system broke")
+
+    client.converse = AsyncMock(
+        side_effect=[
+            _tool_use_response("tc_boom", "calculator", {"a": 1, "b": 1}),
+            _converse_response(text="Got it"),
+        ]
+    )
+    sess = rt.session(tools=[tool], on_permission=_BoomCallback())
+    await sess.execute("compute")
+    tool_result = client.converse.await_args_list[1].kwargs["messages"][2]["content"][0][
+        "toolResult"
+    ]
+    assert tool_result["status"] == "error"
+
+
+# --- Streaming tool events ---------------------------------------------------
+
+
+def _tool_use_stream_chunks(
+    tool_use_id: str, name: str, args_json: str, stop_reason: str = "tool_use"
+) -> list[dict[str, Any]]:
+    """Build a streaming sequence where the model fires a single tool call."""
+    return [
+        {
+            "contentBlockStart": {
+                "start": {"toolUse": {"toolUseId": tool_use_id, "name": name}},
+                "contentBlockIndex": 0,
+            }
+        },
+        {
+            "contentBlockDelta": {
+                "delta": {"toolUse": {"input": args_json}},
+                "contentBlockIndex": 0,
+            }
+        },
+        {"contentBlockStop": {"contentBlockIndex": 0}},
+        {"messageStop": {"stopReason": stop_reason}},
+    ]
+
+
+def _final_text_stream_chunks(text: str) -> list[dict[str, Any]]:
+    return [
+        {"contentBlockStart": {"start": {}, "contentBlockIndex": 0}},
+        {"contentBlockDelta": {"delta": {"text": text}, "contentBlockIndex": 0}},
+        {"contentBlockStop": {"contentBlockIndex": 0}},
+        {"messageStop": {"stopReason": "end_turn"}},
+        {"metadata": {"usage": {"inputTokens": 30, "outputTokens": 5}}},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_stream_emits_tool_call_events_and_loops_to_final(
+    runtime_with_mock_client: tuple[BedrockRuntime, MagicMock],
+) -> None:
+    from airframe.events import ToolCallResult, ToolCallStart
+
+    rt, client = runtime_with_mock_client
+    tool = _make_calc_tool()
+    first = _converse_stream_response(
+        _tool_use_stream_chunks("tc_s", "calculator", '{"a": 9, "b": 1}')
+    )
+    second = _converse_stream_response(_final_text_stream_chunks("10"))
+    client.converse_stream = AsyncMock(side_effect=[first, second])
+    sess = rt.session(tools=[tool])
+    events = []
+    async for event in sess.stream("9 + 1?"):
+        events.append(event)
+
+    starts = [e for e in events if isinstance(e, ToolCallStart)]
+    results = [e for e in events if isinstance(e, ToolCallResult)]
+    completes = [e for e in events if isinstance(e, TurnComplete)]
+    assert len(starts) == 1
+    assert starts[0].tool_name == "calculator"
+    assert starts[0].tool_call_id == "tc_s"
+    assert len(results) == 1
+    assert results[0].tool_call_id == "tc_s"
+    assert results[0].is_error is False
+    assert len(completes) == 1
+    assert completes[0].result.text == "10"
+    assert completes[0].result.finish == "end_turn"

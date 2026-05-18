@@ -68,17 +68,18 @@ def test_constructor_model_overrides_env(monkeypatch: pytest.MonkeyPatch) -> Non
 
 
 # ---------------------------------------------------------------------------
-# SUPPORTED_FEATURES — Iteration C adds reasoning + vision + file
+# SUPPORTED_FEATURES — Iteration D adds tools + permission
 # ---------------------------------------------------------------------------
 
 
-def test_supported_features_iteration_c_set() -> None:
-    """Iteration C adds REASONING_EFFORT / REASONING_BUDGET_TOKENS /
-    VISION_INPUT / FILE_INPUT on top of Iteration B's three flags.
+def test_supported_features_iteration_d_set() -> None:
+    """Iteration D adds TOOLS_FUNCTION + PERMISSION_CALLBACK on top of
+    Iteration C's seven flags.
 
-    Tools + permission land in Iteration D; hooks + budget in E.
+    Hooks + budget land in Iteration E. MCP transports stay False
+    permanently — Bedrock Converse has no MCP slot.
     """
-    iteration_b_and_c = {
+    iteration_b_through_d = {
         Feature.STRUCTURED_OUTPUT_JSON_SCHEMA,
         Feature.STREAMING,
         Feature.CANCEL,
@@ -86,29 +87,27 @@ def test_supported_features_iteration_c_set() -> None:
         Feature.REASONING_BUDGET_TOKENS,
         Feature.VISION_INPUT,
         Feature.FILE_INPUT,
+        Feature.TOOLS_FUNCTION,
+        Feature.PERMISSION_CALLBACK,
     }
-    for feature in iteration_b_and_c:
+    for feature in iteration_b_through_d:
         assert feature in BedrockRuntime.SUPPORTED_FEATURES
-    assert len(BedrockRuntime.SUPPORTED_FEATURES) == 7
+    assert len(BedrockRuntime.SUPPORTED_FEATURES) == 9
 
 
-def test_supports_iteration_c_flags_true() -> None:
+def test_supports_iteration_d_flags_true() -> None:
     rt = BedrockRuntime()
-    assert rt.supports(Feature.REASONING_EFFORT) is True
-    assert rt.supports(Feature.REASONING_BUDGET_TOKENS) is True
-    assert rt.supports(Feature.VISION_INPUT) is True
-    assert rt.supports(Feature.FILE_INPUT) is True
+    assert rt.supports(Feature.TOOLS_FUNCTION) is True
+    assert rt.supports(Feature.PERMISSION_CALLBACK) is True
 
 
 def test_supports_returns_false_for_later_iteration_features() -> None:
     rt = BedrockRuntime()
     later = {
         Feature.SESSION_RESUME,
-        Feature.TOOLS_FUNCTION,
         Feature.TOOLS_MCP_STDIO,
         Feature.TOOLS_MCP_HTTP,
         Feature.TOOLS_MCP_SSE,
-        Feature.PERMISSION_CALLBACK,
         Feature.LIFECYCLE_HOOKS,
         Feature.BUDGET_USD_CAP,
         Feature.BUDGET_TURN_CAP,
@@ -116,6 +115,19 @@ def test_supports_returns_false_for_later_iteration_features() -> None:
     }
     for feature in later:
         assert rt.supports(feature) is False, f"unexpected True for {feature.name}"
+
+
+def test_supports_mcp_transports_permanent_decline() -> None:
+    """Bedrock Converse has no MCP slot — these three stay False forever.
+
+    Pinned with their own test because future iterations must NOT
+    flip them True silently. Consumers wanting MCP-via-Bedrock should
+    use ``unwrap(BedrockRuntimeClient)`` and hand-craft a shim.
+    """
+    rt = BedrockRuntime()
+    assert rt.supports(Feature.TOOLS_MCP_STDIO) is False
+    assert rt.supports(Feature.TOOLS_MCP_HTTP) is False
+    assert rt.supports(Feature.TOOLS_MCP_SSE) is False
 
 
 def test_supports_accepts_model_kwarg() -> None:
@@ -243,10 +255,12 @@ def test_session_resume_raises_unsupported_feature() -> None:
         rt.session(resume="some-session-id")
 
 
-def test_session_tools_raises_unsupported_feature_iteration_b() -> None:
+def test_session_with_tools_returns_bedrock_session() -> None:
+    """Iteration D — tools= is wired; the session takes the list and
+    translates each entry to a Converse toolSpec on each call."""
     from pydantic import BaseModel
 
-    from airframe.errors import UnsupportedFeatureError
+    from airframe.adapters.bedrock import BedrockSession
     from airframe.tools import FunctionTool
 
     class _P(BaseModel):
@@ -256,8 +270,22 @@ def test_session_tools_raises_unsupported_feature_iteration_b() -> None:
         return 1
 
     rt = BedrockRuntime()
-    with pytest.raises(UnsupportedFeatureError):
-        rt.session(tools=[FunctionTool(name="t", description="d", params=_P, handler=_h)])
+    tool = FunctionTool(name="t", description="d", params=_P, handler=_h)
+    sess = rt.session(tools=[tool])
+    assert isinstance(sess, BedrockSession)
+
+
+def test_session_with_mcp_servers_raises_permanent_decline() -> None:
+    """MCP transports stay False permanently — opt-in to a permanent
+    decline, with a message pointing users at the unwrap escape hatch."""
+    from airframe.errors import UnsupportedFeatureError
+    from airframe.tools import McpServerRef
+
+    rt = BedrockRuntime()
+    ref = McpServerRef(name="probe", transport="stdio", command=["echo"])
+    with pytest.raises(UnsupportedFeatureError) as exc:
+        rt.session(mcp_servers=[ref])
+    assert "unwrap" in str(exc.value).lower() or "permanent" in str(exc.value).lower()
 
 
 # ---------------------------------------------------------------------------

@@ -8,8 +8,34 @@ Anthropic Claude, Meta Llama, Mistral, Cohere, Amazon Nova, and
 AI21 Jamba behind one AWS-billed endpoint with IAM-rooted auth and
 region pinning.
 
-**Iteration C scope** (the current commit). Layers polymorphic
-prompts + extended thinking onto the Iteration B baseline:
+**Iteration D scope** (the current commit). Layers function tools
++ permission gating onto the Iteration C baseline. The forced
+``submit_result`` tool used for ``schema=`` coexists with
+user-registered :class:`~airframe.tools.FunctionTool` entries —
+Converse's ``toolConfig`` slot accepts both — so structured output
+and function-calling are not mutually exclusive. ``Feature.TOOLS_FUNCTION``
+and ``Feature.PERMISSION_CALLBACK`` flip True.
+
+The client-side tool loop in :meth:`BedrockSession.execute` /
+:meth:`BedrockSession.stream` parses ``toolUse`` content blocks
+from each ``converse()`` response, dispatches the registered
+handlers (with a :class:`~airframe.permission.PermissionCallback`
+gate when set), appends ``toolResult`` blocks back to the
+conversation, and re-calls ``converse()`` until the model emits a
+final text response or the ``MAX_TOOL_ITERATIONS`` cap fires.
+Mirrors the OpenAI-compatible base's loop shape.
+
+**MCP non-goal.** Bedrock Converse has no MCP slot.
+``TOOLS_MCP_STDIO`` / ``TOOLS_MCP_HTTP`` / ``TOOLS_MCP_SSE`` stay
+False permanently; ``session(mcp_servers=...)`` raises a decline
+that points users at ``runtime.unwrap(BedrockRuntimeClient)`` if
+they want to hand-craft an MCP shim themselves.
+
+**Earlier-iteration scope.** Polymorphic prompts + thinking landed
+in Iteration C; structured output + streaming + cancel in B;
+discovery + auth in A. Hooks + budget land in E.
+
+Layered onto Iteration C's surface:
 
 * :class:`~airframe.inputs.ImageInput` parts translate into
   Converse ``{"image": {"format": "...", "source": {"bytes": ...}}}``
@@ -97,6 +123,8 @@ from airframe.events import (
     ReasoningDelta,
     RuntimeEvent,
     TextDelta,
+    ToolCallResult,
+    ToolCallStart,
     TurnComplete,
 )
 from airframe.features import Feature
@@ -108,6 +136,7 @@ from airframe.models import (
     CAPABILITY_VISION,
     ModelInfo,
 )
+from airframe.permission import PermissionRequest
 from airframe.protocol import (
     AgentRuntime,
     AgentSession,
@@ -142,6 +171,32 @@ DEFAULT_BEDROCK_MODEL = "anthropic.claude-3-5-haiku-20241022-v1:0"
 #: shape as :class:`CopilotRuntime`'s ``SUBMIT_RESULT_TOOL`` — Bedrock
 #: Converse's ``toolConfig`` slot honours the same forced-tool pattern.
 SUBMIT_RESULT_TOOL = "submit_result"
+
+
+#: Hard cap on client-side tool-loop iterations within one user turn.
+#: A model that keeps requesting tool calls indefinitely is a real
+#: failure mode; matches :data:`MAX_TOOL_ITERATIONS` in the
+#: OpenAI-compatible base so the portable bound is the same regardless
+#: of which adapter happens to drive the loop.
+MAX_TOOL_ITERATIONS = 20
+
+
+@dataclass(slots=True)
+class _StreamTurnState:
+    """Mutable accumulator for one ``converse_stream`` turn.
+
+    Replaces what would otherwise be a clutch of nonlocal vars across
+    the streaming generator and its outer driver.
+    :class:`BedrockSession.stream` reads each field after each turn
+    to decide whether to loop or terminate.
+    """
+
+    text_parts: list[str] = field(default_factory=list)
+    assistant_blocks: list[dict[str, Any]] = field(default_factory=list)
+    user_tool_uses: list[tuple[str, str, dict[str, Any]]] = field(default_factory=list)
+    submit_input: dict[str, Any] | None = None
+    stop_reason: str | None = None
+    usage: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -260,10 +315,23 @@ class BedrockRuntime(AgentRuntime):
     #: * ``FILE_INPUT`` — wired via Converse ``{"document": ...}``
     #:   content blocks. Anthropic-only today; other vendors silently
     #:   ignore (Iteration C).
+    #: * ``TOOLS_FUNCTION`` — wired via Converse ``toolConfig`` +
+    #:   client-side tool loop in :meth:`BedrockSession._do_execute`
+    #:   / :meth:`BedrockSession._stream_one_turn`. The forced
+    #:   ``submit_result`` tool used for ``schema=`` coexists with
+    #:   user tools — both ride the same ``toolConfig.tools`` list
+    #:   (Iteration D).
+    #: * ``PERMISSION_CALLBACK`` — wired by firing
+    #:   :class:`~airframe.permission.PermissionCallback` around each
+    #:   tool handler invocation. ``"allow"`` → run handler;
+    #:   ``"deny"`` → return an error message the model sees on its
+    #:   next turn; ``"defer"`` → treat as allow with a debug log
+    #:   (Bedrock has no native fallback policy to defer to)
+    #:   (Iteration D).
     #:
     #: ``SESSION_RESUME`` stays False — Converse is stateless from the
-    #: client's perspective. Tools + permission land in Iteration D;
-    #: hooks + budget in E.
+    #: client's perspective. ``TOOLS_MCP_*`` stay False permanently —
+    #: Bedrock Converse has no MCP slot. Hooks + budget land in E.
     SUPPORTED_FEATURES: ClassVar[frozenset[Feature]] = frozenset(
         {
             Feature.STRUCTURED_OUTPUT_JSON_SCHEMA,
@@ -273,6 +341,8 @@ class BedrockRuntime(AgentRuntime):
             Feature.REASONING_BUDGET_TOKENS,
             Feature.VISION_INPUT,
             Feature.FILE_INPUT,
+            Feature.TOOLS_FUNCTION,
+            Feature.PERMISSION_CALLBACK,
         }
     )
 
@@ -395,21 +465,14 @@ class BedrockRuntime(AgentRuntime):
                 "doesn't survive process restart.",
                 feature=Feature.SESSION_RESUME,
             )
-        if tools is not None and tools:
-            raise UnsupportedFeatureError(
-                "BedrockSession: TOOLS_FUNCTION lands in Iteration D of the bedrock-adapter plan.",
-                feature=Feature.TOOLS_FUNCTION,
-            )
         if mcp_servers is not None and mcp_servers:
             raise UnsupportedFeatureError(
                 "BedrockSession: Bedrock Converse has no MCP slot — "
-                "TOOLS_MCP_* are permanent declines.",
+                "TOOLS_MCP_* are permanent declines on this adapter. If you "
+                "need to bridge to an MCP server, reach the live aioboto3 "
+                "client via runtime.unwrap(BedrockRuntimeClient) and "
+                "hand-craft the shim.",
                 feature=Feature.TOOLS_MCP_STDIO,
-            )
-        if on_permission is not None:
-            raise UnsupportedFeatureError(
-                "BedrockSession: PERMISSION_CALLBACK lands in Iteration D.",
-                feature=Feature.PERMISSION_CALLBACK,
             )
         if on_event is not None:
             raise UnsupportedFeatureError(
@@ -422,7 +485,13 @@ class BedrockRuntime(AgentRuntime):
                 "Pass provider_options=None for now."
             )
         model_id = self._resolve_model(model) if model is not None else self._default_model
-        return BedrockSession(self, system=system, model_id=model_id)
+        return BedrockSession(
+            self,
+            system=system,
+            model_id=model_id,
+            tools=tools,
+            on_permission=on_permission,
+        )
 
     async def list_models(self) -> list[ModelInfo]:
         """Return text-output models the resolved AWS identity can see.
@@ -636,6 +705,8 @@ class BedrockSession:
         *,
         system: str | None = None,
         model_id: str,
+        tools: list[FunctionTool] | None = None,
+        on_permission: PermissionCallback | None = None,
     ) -> None:
         self._runtime = runtime
         self._model_id = model_id
@@ -645,6 +716,14 @@ class BedrockSession:
         self._in_flight_task: asyncio.Task[Any] | None = None
         self._active_stream: Any | None = None
         self._stream_cancelled = False
+        # Tools are fixed for the session's lifetime. ``None`` / ``[]``
+        # both mean "no user tools"; the schema= forced submit_result
+        # tool is added per-call in _build_call_kwargs.
+        self._tools_by_name: dict[str, FunctionTool] = {t.name: t for t in (tools or [])}
+        self._tools_wire: list[dict[str, Any]] = (
+            [_translate_one_tool_for_bedrock(t) for t in tools] if tools else []
+        )
+        self._on_permission = on_permission
 
     # --- AgentSession interface --------------------------------------------
 
@@ -691,19 +770,143 @@ class BedrockSession:
         thinking_field: dict[str, Any] | None,
         timeout: float,
     ) -> RuntimeResult:
+        """Drive the client-side tool-loop for one user turn.
+
+        Sends the current ``messages`` buffer to ``client.converse``;
+        if the response carries user-tool ``toolUse`` blocks, dispatch
+        each handler (under the permission gate if one is set),
+        append the assistant message + the matching
+        ``{"role": "user", "content": [{"toolResult": ...}]}`` block,
+        then re-call. Loops until the model emits a final text
+        response (no user-tool calls) or :data:`MAX_TOOL_ITERATIONS`
+        round-trips elapse. The forced ``submit_result`` tool used
+        for ``schema=`` is captured along the way; the loop only
+        terminates when no more *user* tools fire.
+        """
         client = await self._runtime._get_runtime_client()
-        call_kwargs = self._build_call_kwargs(schema=schema, thinking_field=thinking_field)
+        captured_submit_input: dict[str, Any] | None = None
+        for _ in range(MAX_TOOL_ITERATIONS):
+            call_kwargs = self._build_call_kwargs(schema=schema, thinking_field=thinking_field)
+            try:
+                response = await asyncio.wait_for(client.converse(**call_kwargs), timeout=timeout)
+            except TimeoutError as exc:
+                raise RuntimeTransientError(
+                    f"{self._runtime.label}: timeout after {timeout}s"
+                ) from exc
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                raise _classify_bedrock_error(exc) from exc
+
+            output_msg = _require_output_message(response, label=self._runtime.label)
+            self._messages.append(output_msg)
+            text_parts, user_tool_uses, submit_input = _split_assistant_blocks(
+                output_msg, user_tool_names=set(self._tools_by_name)
+            )
+            if submit_input is not None:
+                captured_submit_input = submit_input
+
+            if not user_tool_uses:
+                stop_reason = response.get("stopReason")
+                structured = None
+                if schema is not None:
+                    structured = _validate_tool_payload(
+                        captured_submit_input,
+                        schema=schema,
+                        label=self._runtime.label,
+                    )
+                cost = _build_cost_record(
+                    self._runtime.PROVIDER_ID,
+                    self._model_id,
+                    response.get("usage", {}) or {},
+                    finish=stop_reason,
+                )
+                return RuntimeResult(
+                    text="".join(text_parts),
+                    structured=structured,
+                    cost=cost,
+                    finish=stop_reason,
+                    raw=response,
+                )
+
+            # Dispatch user-tool calls, append toolResult blocks, loop.
+            result_blocks: list[dict[str, Any]] = []
+            for tool_use_id, name, args in user_tool_uses:
+                output, is_error = await self._invoke_tool_with_permission(
+                    tool_name=name, tool_args=args
+                )
+                result_blocks.append(
+                    _build_tool_result_block(
+                        tool_use_id=tool_use_id, output=output, is_error=is_error
+                    )
+                )
+            self._messages.append({"role": "user", "content": result_blocks})
+
+        raise RuntimeProtocolError(
+            f"{self._runtime.label}: tool loop exceeded {MAX_TOOL_ITERATIONS} iterations — "
+            f"the model kept requesting tools without producing a final response. This "
+            f"usually points to a tool handler returning an output the model can't act on, "
+            f"or a system prompt that doesn't tell the model how to stop."
+        )
+
+    async def _invoke_tool_with_permission(
+        self, *, tool_name: str, tool_args: dict[str, Any]
+    ) -> tuple[Any, bool]:
+        """Run one tool handler under the optional permission gate.
+
+        Returns ``(output, is_error)``. Permission-deny, unknown tool,
+        argument-parse failure, and handler exceptions all surface as
+        ``is_error=True`` with a human-readable string output so the
+        model can see what happened and recover on its next turn.
+
+        Permission semantics:
+
+        * ``"allow"`` → invoke the handler.
+        * ``"deny"`` → skip the handler; return a denial message.
+        * ``"defer"`` → log at debug and fall through to allow.
+          Bedrock has no native permission fallback policy to defer
+          to (unlike Claude / Codex), so silently allowing keeps the
+          contract symmetric with the OpenAI-compat path.
+        """
+        if self._on_permission is not None:
+            try:
+                decision = await self._on_permission.handle(
+                    PermissionRequest(tool_name=tool_name, tool_args=tool_args)
+                )
+            except Exception as exc:  # noqa: BLE001 — surface to model
+                return (
+                    f"Permission callback raised {type(exc).__name__}: {exc}; refusing tool call.",
+                    True,
+                )
+            if decision == "deny":
+                return (
+                    f"Tool {tool_name!r} call was denied by the permission callback.",
+                    True,
+                )
+            if decision == "defer":
+                logger.debug(
+                    "%s: permission='defer' on tool=%s; Bedrock has no native "
+                    "fallback policy — treating as allow.",
+                    self._runtime.label,
+                    tool_name,
+                )
+            # "allow" + "defer" → fall through to handler invocation.
+
+        tool = self._tools_by_name.get(tool_name)
+        if tool is None:
+            return f"Tool {tool_name!r} is not registered on this session.", True
         try:
-            response = await asyncio.wait_for(client.converse(**call_kwargs), timeout=timeout)
-        except TimeoutError as exc:
-            raise RuntimeTransientError(
-                f"{self._runtime.label}: timeout after {timeout}s"
-            ) from exc
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            raise _classify_bedrock_error(exc) from exc
-        return self._parse_converse_response(response, schema=schema)
+            params = tool.params.model_validate(tool_args)
+        except Exception as exc:  # noqa: BLE001 — Pydantic errors flow back
+            return (
+                f"Tool arguments did not match the {tool.params.__name__} schema: {exc}",
+                True,
+            )
+        try:
+            output = await tool.handler(params)
+        except Exception as exc:  # noqa: BLE001 — handler errors flow back
+            return f"{type(exc).__name__}: {exc}", True
+        return output, False
 
     async def stream(
         self,
@@ -728,120 +931,213 @@ class BedrockSession:
         self._stream_cancelled = False
 
         client = await self._runtime._get_runtime_client()
+        full_text: list[str] = []
+        captured_submit: dict[str, Any] | None = None
+        final_stop: str | None = None
+        final_usage: dict[str, Any] = {}
+
+        try:
+            for _ in range(MAX_TOOL_ITERATIONS):
+                state = _StreamTurnState()
+                async for event in self._stream_one_turn(
+                    client=client,
+                    schema=schema,
+                    thinking_field=thinking_field,
+                    state=state,
+                ):
+                    yield event
+                if self._stream_cancelled:
+                    raise RuntimeCancelledError(f"{self._runtime.label}: cancelled")
+
+                # Snapshot the turn's outputs.
+                full_text.extend(state.text_parts)
+                if state.submit_input is not None:
+                    captured_submit = state.submit_input
+                if state.stop_reason is not None:
+                    final_stop = state.stop_reason
+                if state.usage:
+                    final_usage = state.usage
+
+                # Build the assistant message exactly as Converse would
+                # have returned it (text + every toolUse) so subsequent
+                # turns see history that round-trips back to the API.
+                if state.assistant_blocks:
+                    self._messages.append({"role": "assistant", "content": state.assistant_blocks})
+
+                if not state.user_tool_uses:
+                    # No user tools requested — final turn.
+                    structured = None
+                    if schema is not None:
+                        structured = _validate_tool_payload(
+                            captured_submit,
+                            schema=schema,
+                            label=self._runtime.label,
+                        )
+                    cost = _build_cost_record(
+                        self._runtime.PROVIDER_ID,
+                        self._model_id,
+                        final_usage,
+                        finish=final_stop,
+                    )
+                    result = RuntimeResult(
+                        text="".join(full_text),
+                        structured=structured,
+                        cost=cost,
+                        finish=final_stop,
+                    )
+                    yield TurnComplete(result=result)
+                    return
+
+                # Dispatch user-tool calls, emit events, append toolResult.
+                result_blocks: list[dict[str, Any]] = []
+                for tool_use_id, name, args in state.user_tool_uses:
+                    yield ToolCallStart(
+                        tool_name=name,
+                        tool_call_id=tool_use_id,
+                        arguments_preview=_arguments_preview(args),
+                    )
+                    output, is_error = await self._invoke_tool_with_permission(
+                        tool_name=name, tool_args=args
+                    )
+                    yield ToolCallResult(
+                        tool_call_id=tool_use_id,
+                        output=output,
+                        is_error=is_error,
+                    )
+                    result_blocks.append(
+                        _build_tool_result_block(
+                            tool_use_id=tool_use_id, output=output, is_error=is_error
+                        )
+                    )
+                self._messages.append({"role": "user", "content": result_blocks})
+            raise RuntimeProtocolError(
+                f"{self._runtime.label}: tool loop exceeded {MAX_TOOL_ITERATIONS} "
+                f"iterations during stream() — the model kept requesting tools "
+                f"without producing a final response."
+            )
+        except BaseException:
+            # Pop *all* turn-related messages on any failure path so a
+            # retry sends a clean history.
+            del self._messages[pre_len:]
+            raise
+
+    async def _stream_one_turn(
+        self,
+        *,
+        client: Any,
+        schema: type[BaseModel] | None,
+        thinking_field: dict[str, Any] | None,
+        state: _StreamTurnState,
+    ) -> AsyncIterator[RuntimeEvent]:
+        """Drive one ``converse_stream()`` call and yield deltas.
+
+        Mutates ``state`` with the accumulated text, user-tool uses,
+        captured submit_result input, stop reason, and usage. The
+        outer :meth:`stream` reads state after each call to decide
+        whether to loop or terminate.
+        """
         call_kwargs = self._build_call_kwargs(schema=schema, thinking_field=thinking_field)
         try:
             response = await client.converse_stream(**call_kwargs)
+        except asyncio.CancelledError:
+            raise
         except Exception as exc:
-            del self._messages[pre_len:]
             raise _classify_bedrock_error(exc) from exc
-
         stream_iter = response.get("stream") if isinstance(response, dict) else None
         if stream_iter is None:
-            del self._messages[pre_len:]
             raise RuntimeProtocolError(
                 f"{self._runtime.label}: converse_stream returned no 'stream' field"
             )
-
         self._active_stream = stream_iter
-        text_buf: list[str] = []
-        tool_input_buf = ""
-        tool_use_id: str | None = None
-        tool_use_name: str | None = None
-        captured_tool_input: dict[str, Any] | None = None
-        stop_reason: str | None = None
-        usage_info: dict[str, Any] = {}
+
+        # Per-block-index buffers — Converse interleaves block deltas
+        # but each block carries an explicit index so we can demux.
+        text_block_buf: dict[int, list[str]] = {}
+        tool_block_buf: dict[int, dict[str, Any]] = {}
+        # The most recent block index we saw — used as the fallback
+        # when a delta chunk doesn't carry an explicit index.
+        current_idx: int = -1
         try:
             async for chunk in stream_iter:
                 if not isinstance(chunk, dict):
                     continue
                 if "contentBlockStart" in chunk:
-                    start = chunk["contentBlockStart"].get("start", {})
+                    cbs = chunk["contentBlockStart"]
+                    idx = int(cbs.get("contentBlockIndex", -1))
+                    current_idx = idx
+                    start = cbs.get("start", {}) or {}
                     if "toolUse" in start:
                         tu = start["toolUse"]
-                        tool_use_id = tu.get("toolUseId")
-                        tool_use_name = tu.get("name")
-                        tool_input_buf = ""
+                        tool_block_buf[idx] = {
+                            "id": tu.get("toolUseId") or "",
+                            "name": tu.get("name") or "",
+                            "input": "",
+                        }
+                    else:
+                        text_block_buf[idx] = []
                 elif "contentBlockDelta" in chunk:
-                    delta = chunk["contentBlockDelta"].get("delta", {})
+                    cbd = chunk["contentBlockDelta"]
+                    idx = int(cbd.get("contentBlockIndex", current_idx))
+                    current_idx = idx
+                    delta = cbd.get("delta", {}) or {}
                     if "text" in delta:
                         piece = delta["text"]
-                        text_buf.append(piece)
+                        text_block_buf.setdefault(idx, []).append(piece)
+                        state.text_parts.append(piece)
                         yield TextDelta(text=piece)
                     elif "reasoningContent" in delta:
                         rc = delta["reasoningContent"]
-                        # ``redactedContent`` chunks have no ``text`` field;
-                        # skip rather than crash (Anthropic-on-Bedrock
-                        # emits these for safety-redacted thinking).
+                        # Skip ``redactedContent`` chunks (no text).
                         if "text" in rc:
                             yield ReasoningDelta(text=rc["text"])
                     elif "toolUse" in delta:
                         td = delta["toolUse"]
-                        if "input" in td:
-                            tool_input_buf += td["input"]
+                        if "input" in td and idx in tool_block_buf:
+                            tool_block_buf[idx]["input"] += td["input"]
                 elif "contentBlockStop" in chunk:
-                    if tool_use_name == SUBMIT_RESULT_TOOL and tool_input_buf:
+                    idx = int(chunk["contentBlockStop"].get("contentBlockIndex", current_idx))
+                    if idx in text_block_buf:
+                        state.assistant_blocks.append({"text": "".join(text_block_buf.pop(idx))})
+                    elif idx in tool_block_buf:
+                        tb = tool_block_buf.pop(idx)
                         try:
-                            captured_tool_input = json.loads(tool_input_buf)
+                            args = json.loads(tb["input"]) if tb["input"] else {}
                         except json.JSONDecodeError:
-                            captured_tool_input = None
-                    tool_input_buf = ""
-                    tool_use_name = None
+                            args = {}
+                        state.assistant_blocks.append(
+                            {
+                                "toolUse": {
+                                    "toolUseId": tb["id"],
+                                    "name": tb["name"],
+                                    "input": args,
+                                }
+                            }
+                        )
+                        if tb["name"] == SUBMIT_RESULT_TOOL:
+                            state.submit_input = args if isinstance(args, dict) else None
+                        else:
+                            args_dict = args if isinstance(args, dict) else {}
+                            state.user_tool_uses.append((tb["id"], tb["name"], args_dict))
                 elif "messageStop" in chunk:
-                    stop_reason = chunk["messageStop"].get("stopReason")
+                    state.stop_reason = chunk["messageStop"].get("stopReason")
+                    # Flush any open text blocks — some Bedrock vendors
+                    # omit contentBlockStart/Stop on simple text turns
+                    # and only emit deltas. Treat that as one logical
+                    # block per accumulated index.
+                    for idx in sorted(text_block_buf):
+                        chunks_text = text_block_buf.pop(idx)
+                        if chunks_text:
+                            state.assistant_blocks.append({"text": "".join(chunks_text)})
                 elif "metadata" in chunk:
                     metadata = chunk.get("metadata", {})
                     if isinstance(metadata, dict):
-                        usage_info = metadata.get("usage", {}) or {}
+                        state.usage = metadata.get("usage", {}) or {}
         except asyncio.CancelledError:
-            del self._messages[pre_len:]
             raise RuntimeCancelledError(f"{self._runtime.label}: cancelled") from None
         except Exception as exc:
-            del self._messages[pre_len:]
             raise _classify_bedrock_error(exc) from exc
         finally:
             self._active_stream = None
-
-        if self._stream_cancelled:
-            del self._messages[pre_len:]
-            raise RuntimeCancelledError(f"{self._runtime.label}: cancelled")
-
-        # Append the assistant turn so subsequent execute()/stream()
-        # calls see history. Mirror Converse's response shape.
-        assistant_content: list[dict[str, Any]] = []
-        if text_buf:
-            assistant_content.append({"text": "".join(text_buf)})
-        if captured_tool_input is not None and tool_use_id is not None:
-            assistant_content.append(
-                {
-                    "toolUse": {
-                        "toolUseId": tool_use_id,
-                        "name": SUBMIT_RESULT_TOOL,
-                        "input": captured_tool_input,
-                    }
-                }
-            )
-        if assistant_content:
-            self._messages.append({"role": "assistant", "content": assistant_content})
-
-        structured = None
-        if schema is not None:
-            structured = _validate_tool_payload(
-                captured_tool_input, schema=schema, label=self._runtime.label
-            )
-
-        cost = _build_cost_record(
-            self._runtime.PROVIDER_ID,
-            self._model_id,
-            usage_info,
-            finish=stop_reason,
-        )
-        result = RuntimeResult(
-            text="".join(text_buf),
-            structured=structured,
-            cost=cost,
-            finish=stop_reason,
-        )
-        yield TurnComplete(result=result)
 
     async def cancel(self) -> None:
         # Cooperative cancellation: cancel the in-flight execute task if
@@ -894,56 +1190,24 @@ class BedrockSession:
         }
         if self._system:
             call_kwargs["system"] = [{"text": self._system}]
+        # toolConfig.tools merges the forced submit_result tool (when
+        # schema= is set) with the user-registered FunctionTool entries.
+        # Either bucket may be empty.
+        tool_specs: list[dict[str, Any]] = []
         if schema is not None:
-            call_kwargs["toolConfig"] = _build_submit_result_tool_config(schema)
+            tool_specs.append(_submit_result_tool_spec(schema))
+        tool_specs.extend(self._tools_wire)
+        if tool_specs:
+            tool_config: dict[str, Any] = {"tools": tool_specs}
+            if schema is not None:
+                # Pin toolChoice so the model can't skip submit_result.
+                # User tools still surface via the same loop because
+                # the model is allowed to call both within one turn.
+                tool_config["toolChoice"] = {"tool": {"name": SUBMIT_RESULT_TOOL}}
+            call_kwargs["toolConfig"] = tool_config
         if thinking_field is not None:
             call_kwargs["additionalModelRequestFields"] = {"thinking": thinking_field}
         return call_kwargs
-
-    def _parse_converse_response(
-        self, response: dict[str, Any], *, schema: type[BaseModel] | None
-    ) -> RuntimeResult:
-        if not isinstance(response, dict):
-            raise RuntimeProtocolError(f"{self._runtime.label}: converse response is not a dict")
-        output_msg = response.get("output", {}).get("message")
-        if not isinstance(output_msg, dict):
-            raise RuntimeProtocolError(
-                f"{self._runtime.label}: converse response missing output.message"
-            )
-        # Append assistant response so subsequent turns see history.
-        self._messages.append(output_msg)
-
-        text_parts: list[str] = []
-        tool_use_input: dict[str, Any] | None = None
-        for block in output_msg.get("content", []) or []:
-            if not isinstance(block, dict):
-                continue
-            if "text" in block:
-                text_parts.append(block["text"])
-            elif "toolUse" in block:
-                tu = block["toolUse"]
-                if isinstance(tu, dict) and tu.get("name") == SUBMIT_RESULT_TOOL:
-                    tool_use_input = tu.get("input")
-
-        structured = None
-        if schema is not None:
-            structured = _validate_tool_payload(
-                tool_use_input, schema=schema, label=self._runtime.label
-            )
-
-        cost = _build_cost_record(
-            self._runtime.PROVIDER_ID,
-            self._model_id,
-            response.get("usage", {}) or {},
-            finish=response.get("stopReason"),
-        )
-        return RuntimeResult(
-            text="".join(text_parts),
-            structured=structured,
-            cost=cost,
-            finish=response.get("stopReason"),
-            raw=response,
-        )
 
 
 # ---------------------------------------------------------------------------
@@ -1223,28 +1487,159 @@ def _translate_thinking_for_bedrock(
     return {"type": "enabled", "budget_tokens": budget}
 
 
-def _build_submit_result_tool_config(schema: type[BaseModel]) -> dict[str, Any]:
-    """Build the forced-tool Converse ``toolConfig`` for structured output.
+def _submit_result_tool_spec(schema: type[BaseModel]) -> dict[str, Any]:
+    """Build the single ``toolSpec`` entry that gates structured output.
 
-    Same pattern as :class:`CopilotRuntime` — a hidden tool whose
-    ``inputSchema`` is the user's JSON Schema, with ``toolChoice``
-    pinned so the model must call exactly that tool.
+    Returned dict shape: ``{"toolSpec": {"name", "description",
+    "inputSchema": {"json": ...}}}`` — ready to drop into the
+    ``toolConfig.tools`` list. The :class:`BedrockSession` caller
+    pins ``toolChoice`` to force this tool when ``schema=`` is set.
     """
-    json_schema = schema.model_json_schema()
     return {
-        "tools": [
-            {
-                "toolSpec": {
-                    "name": SUBMIT_RESULT_TOOL,
-                    "description": (
-                        f"Submit the final typed payload as a {schema.__name__}. "
-                        "Call this exactly once with all required fields filled in."
-                    ),
-                    "inputSchema": {"json": json_schema},
-                }
-            }
-        ],
+        "toolSpec": {
+            "name": SUBMIT_RESULT_TOOL,
+            "description": (
+                f"Submit the final typed payload as a {schema.__name__}. "
+                "Call this exactly once with all required fields filled in."
+            ),
+            "inputSchema": {"json": schema.model_json_schema()},
+        }
+    }
+
+
+def _build_submit_result_tool_config(schema: type[BaseModel]) -> dict[str, Any]:
+    """Build a stand-alone ``toolConfig`` carrying only the forced submit_result tool.
+
+    Retained as a convenience for tests / consumers that want the
+    structured-output ``toolConfig`` without going through a
+    :class:`BedrockSession`. The session itself uses
+    :func:`_submit_result_tool_spec` directly so user tools can ride
+    in the same ``toolConfig.tools`` list.
+    """
+    return {
+        "tools": [_submit_result_tool_spec(schema)],
         "toolChoice": {"tool": {"name": SUBMIT_RESULT_TOOL}},
+    }
+
+
+def _translate_one_tool_for_bedrock(tool: FunctionTool) -> dict[str, Any]:
+    """Translate one :class:`FunctionTool` into a Converse ``toolSpec`` entry.
+
+    Bedrock's tool API mirrors Anthropic's: name, description, and a
+    JSON Schema describing the call arguments. The Pydantic schema
+    serialised via ``model_json_schema()`` round-trips cleanly.
+    """
+    return {
+        "toolSpec": {
+            "name": tool.name,
+            "description": tool.description,
+            "inputSchema": {"json": tool.params.model_json_schema()},
+        }
+    }
+
+
+def _require_output_message(response: Any, *, label: str) -> dict[str, Any]:
+    """Defensive accessor for ``response.output.message`` shape.
+
+    Bedrock's wire shape is stable, but defending here means a
+    malformed response surfaces as :class:`RuntimeProtocolError`
+    rather than a confusing :class:`AttributeError`.
+    """
+    if not isinstance(response, dict):
+        raise RuntimeProtocolError(f"{label}: converse response is not a dict")
+    output_msg = response.get("output", {}).get("message")
+    if not isinstance(output_msg, dict):
+        raise RuntimeProtocolError(f"{label}: converse response missing output.message")
+    return output_msg
+
+
+def _split_assistant_blocks(
+    output_msg: dict[str, Any],
+    *,
+    user_tool_names: set[str],
+) -> tuple[list[str], list[tuple[str, str, dict[str, Any]]], dict[str, Any] | None]:
+    """Pull text + tool uses out of a Converse assistant message.
+
+    Returns ``(text_parts, user_tool_uses, submit_input)``:
+
+    * ``text_parts`` — every ``{"text": ...}`` block's content, in
+      order. Caller ``"".join``-s for the final text.
+    * ``user_tool_uses`` — list of ``(toolUseId, name, input)`` for
+      every ``{"toolUse": ...}`` block whose name appears in
+      ``user_tool_names``. Unknown tools surface here too (with the
+      same shape) so the loop can return a tool-not-registered
+      error message back to the model rather than silently dropping
+      the request.
+    * ``submit_input`` — the ``input`` dict from the
+      ``submit_result`` ``toolUse`` block when present, else
+      ``None``.
+    """
+    text_parts: list[str] = []
+    user_uses: list[tuple[str, str, dict[str, Any]]] = []
+    submit_input: dict[str, Any] | None = None
+    for block in output_msg.get("content", []) or []:
+        if not isinstance(block, dict):
+            continue
+        if "text" in block:
+            text_parts.append(block["text"])
+        elif "toolUse" in block:
+            tu = block["toolUse"]
+            if not isinstance(tu, dict):
+                continue
+            name = tu.get("name")
+            if name == SUBMIT_RESULT_TOOL:
+                submit_input = tu.get("input")
+            else:
+                use_id = tu.get("toolUseId") or ""
+                args = tu.get("input") or {}
+                if not isinstance(args, dict):
+                    args = {}
+                user_uses.append((use_id, str(name or ""), args))
+                # ``user_tool_names`` is not used to filter — unknown
+                # tool calls still flow through so the loop can return
+                # a "tool not registered" error to the model. The
+                # parameter is reserved for future per-call routing
+                # decisions (e.g. emitting different events for known
+                # vs unknown tools).
+    del user_tool_names  # accepted in the signature for future use
+    return text_parts, user_uses, submit_input
+
+
+def _arguments_preview(args: dict[str, Any], *, max_len: int = 200) -> str:
+    """Render ``args`` as a short JSON string for :class:`ToolCallStart`.
+
+    Bedrock streams tool input as JSON chunks; we surface the parsed
+    dict back as a compact JSON snippet so consumers see a readable
+    preview. Truncated at ``max_len`` to keep event payloads tight.
+    """
+    try:
+        text = json.dumps(args, default=str)
+    except (TypeError, ValueError):
+        text = str(args)
+    return text if len(text) <= max_len else text[: max_len - 1] + "…"
+
+
+def _build_tool_result_block(*, tool_use_id: str, output: Any, is_error: bool) -> dict[str, Any]:
+    """Build one Converse ``{"toolResult": {...}}`` content block.
+
+    ``output`` becomes a single content entry under the toolResult:
+    dict / list outputs ride a ``{"json": ...}`` slot; everything
+    else is coerced to a string under ``{"text": ...}``. ``status``
+    is ``"error"`` when ``is_error`` is True so the model sees the
+    error semantics rather than treating the message as a
+    successful result.
+    """
+    entry: dict[str, Any]
+    if isinstance(output, dict | list):
+        entry = {"json": output}
+    else:
+        entry = {"text": str(output)}
+    return {
+        "toolResult": {
+            "toolUseId": tool_use_id,
+            "content": [entry],
+            "status": "error" if is_error else "success",
+        }
     }
 
 
