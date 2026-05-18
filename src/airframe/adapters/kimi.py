@@ -712,6 +712,22 @@ class KimiRuntime(AgentRuntime):
             adapter_label=self.label,
         )
         kimi_options = provider_options if isinstance(provider_options, KimiOptions) else None
+        # Iteration F: ``yolo=True`` and ``on_permission=callback`` mean
+        # opposite things ("auto-approve everything" vs "ask the
+        # callback"). Forbid the combination explicitly at session
+        # construction so a misconfigured session doesn't silently
+        # ignore one of them. ``yolo=False`` + ``on_permission=None`` is
+        # also valid: the adapter still passes ``yolo=True`` to the SDK
+        # (otherwise the prompt stream stalls waiting for human input
+        # via the un-airframed approval channel).
+        if kimi_options is not None and kimi_options.yolo and on_permission is not None:
+            raise UnsupportedFeatureError(
+                f"{self.label}: KimiOptions(yolo=True) and on_permission=callback "
+                f"are mutually exclusive — yolo=True auto-approves every tool "
+                f"call at the SDK boundary, while on_permission=callback routes "
+                f"each ApprovalRequest through your callback. Pick one.",
+                feature=Feature.PERMISSION_CALLBACK,
+            )
         return KimiSession(
             self,
             resume=resume,
@@ -908,15 +924,49 @@ class KimiSession(AgentSession):
         # when ``on_permission`` is None; yolo=False causes the SDK to
         # surface :class:`ApprovalRequest` messages on the wire stream
         # which the adapter dispatches to the user's callback.
+        #
+        # Iteration F: an explicit ``KimiOptions(yolo=True)`` also wins
+        # over the callback gate (the mutual-exclusion check at
+        # ``runtime.session()`` already rejects yolo=True paired with a
+        # callback, so reaching here with yolo=True means no callback
+        # was registered).
+        po = self._provider_options
         yolo = self._on_permission is None
+        if po is not None and po.yolo:
+            yolo = True
         kwargs: dict[str, Any] = {
             "work_dir": work_dir,
             "model": model_id,
             "yolo": yolo,
             "thinking": thinking,
         }
-        if self._mcp_configs is not None:
-            kwargs["mcp_configs"] = self._mcp_configs
+        # Iteration F: bundle the airframe-synthesised mcp_configs (from
+        # mcp_servers=) with ``additional_mcp_servers`` from
+        # KimiOptions (the documented escape hatch for vendor-specific
+        # MCP-config knobs airframe doesn't surface portably). Either or
+        # both may be empty.
+        mcp_configs: list[dict[str, Any]] = list(self._mcp_configs or [])
+        if po is not None and po.additional_mcp_servers:
+            mcp_configs.extend(po.additional_mcp_servers)
+        if mcp_configs:
+            kwargs["mcp_configs"] = mcp_configs
+        # Iteration F: skill_directories[0] threads into
+        # Session.create(skills_dir=...). The SDK accepts a single
+        # KaosPath today; airframe surfaces a tuple so a future SDK
+        # version widening the surface requires no airframe-side change.
+        # When two or more entries are supplied we honour the first and
+        # debug-log the rest so the configuration is visible.
+        if po is not None and po.skill_directories:
+            first_skills_dir = po.skill_directories[0]
+            kwargs["skills_dir"] = KaosPath(first_skills_dir)
+            if len(po.skill_directories) > 1:
+                logger.debug(
+                    "kimi: KimiOptions.skill_directories has %d entries; "
+                    "the SDK accepts only one — honouring %r, ignoring %r",
+                    len(po.skill_directories),
+                    first_skills_dir,
+                    po.skill_directories[1:],
+                )
 
         try:
             if self._resume_id is not None:

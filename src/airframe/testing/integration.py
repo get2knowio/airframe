@@ -84,6 +84,7 @@ _PROVIDER_AUTH: dict[str, list[str]] = {
     "claude": ["CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY"],
     "github-copilot": ["GITHUB_TOKEN", "GH_TOKEN"],
     "codex": ["OPENAI_API_KEY", "CODEX_API_KEY"],
+    "kimi": ["KIMI_API_KEY"],
     "opencode-zen": ["OPENCODE_API_KEY"],
     "opencode-go": ["OPENCODE_API_KEY"],
     "openrouter": ["OPENROUTER_API_KEY"],

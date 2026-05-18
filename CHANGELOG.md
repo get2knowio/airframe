@@ -6,7 +6,73 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-_Nothing yet — work toward v0.7.0 begins after the v0.6.3 cut._
+### Added
+
+- **`KimiRuntime`** — new adapter wrapping Moonshot AI's
+  `kimi-agent-sdk`, the official Python surface over the `kimi-cli`
+  subprocess. Architecturally the closest sibling to
+  `ClaudeCodeRuntime`: subprocess-class agent SDK with native
+  streaming, per-call `ApprovalRequest` dispatch, MCP server
+  registration, and session resume by id. Lands fully wired across
+  six iterations:
+  - **A**. Protocol scaffolding (discovery, capability predicates,
+    `validate_binding`, lazy SDK import, fallback model catalogue).
+  - **B**. SDK-backed `KimiSession` — `execute` / `stream` /
+    `cancel` / `Session.resume`; `WireMessage` → airframe event
+    translation; SDK exception classification.
+  - **C**. Polymorphic prompts (`ImageInput` URL / bytes / path →
+    `ImageURLPart`) and reasoning (`thinking=` → SDK's boolean
+    `thinking` kwarg, session rebuild on toggle).
+  - **D**. `PermissionCallback` → `ApprovalRequest.resolve`
+    dispatch (`allow → approve`, `deny → reject`, `defer → reject`
+    with feedback explaining the SDK's synchronous channel).
+    `McpServerRef` → fastmcp `MCPConfig` dict translation for
+    stdio / http / sse transports. `tools=` declined permanently
+    pointing at `mcp_servers=` (no Python-callable channel in the
+    SDK).
+  - **E**. Lifecycle hooks (7 of 8 kinds — all but `rate_limit`,
+    which Moonshot raises as exceptions rather than wire events),
+    pre-turn budget enforcement via the shared
+    `_enforce_budget_pre_turn` helper, in-tree `_KIMI_PRICING`
+    table populating `CostRecord.cost_usd`.
+  - **F**. `KimiOptions` final surface (`working_directory`,
+    `yolo`, `additional_mcp_servers`, `skill_directories`,
+    `additional_config_fields`) with the `yolo` ↔ `on_permission`
+    mutual-exclusion gate. Integration test wrapper at
+    `tests/test_kimi_integration.py`. Per-adapter docs page,
+    `## KimiRuntime` section in `docs/auth.md`, Kimi column in
+    `docs/capabilities.md`, README row.
+- **`[kimi]` pip extra** — `airframe-agents[kimi]` installs
+  `kimi-agent-sdk>=0.0.5,<0.1`. **Co-installation conflict with
+  `[claude]`** — `kimi-agent-sdk` 0.0.5 → `kimi-cli` 1.12 →
+  `fastmcp` 2.12.5 → `mcp<1.17`, but `claude-agent-sdk` 0.2
+  requires `mcp>=1.23`. Until upstream resolves the two cannot
+  co-install. Declared in `[tool.uv.conflicts]`; `[all]` excludes
+  `[kimi]` for the same reason; users wanting both must split into
+  separate venvs.
+- **`KimiOptions` provider-options namespace** — five fields per
+  the surface above. Mutually-exclusive `yolo` + `on_permission`
+  gate at `runtime.session()` time.
+- **`_PROVIDER_AUTH["kimi"]`** in `airframe.testing.integration`
+  for the integration suite's env-var check.
+
+### Changed
+
+- **`docs/auth.md` § CodexRuntime** — refreshed for v0.6.3's
+  opencode-leak fix. The Codex chain is now three steps (explicit
+  → env → `~/.codex/auth.json`), and the OAuth-vs-static-key shape
+  distinction is documented.
+- **README provider table** — Codex row no longer mentions
+  opencode's auth.json (post-v0.6.3); new Kimi row alphabetised
+  between Copilot and OpenCode Go.
+- **README capability matrix** — new Kimi column.
+- **`docs/capabilities.md`** — new Kimi column in the matrix.
+
+### Reserved
+
+- `"moonshot"` as a future OpenAI-compat sibling that would front
+  Moonshot's `api.moonshot.ai/v1` chat-completions surface — distinct
+  from `KimiRuntime`, which wraps the Kimi Agent SDK subprocess.
 
 ---
 
