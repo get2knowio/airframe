@@ -12,19 +12,30 @@ ChatGPT Plus subscription instead of GitHub Copilot. Useful as a
 secondary binding when Copilot is rate-limited or the user only has
 a ChatGPT Plus seat.
 
-**Auth.** Three options, checked in order:
+**Auth.** Four options, checked in order:
 
-1. Explicit ``api_key=`` constructor argument — exported as
-   ``CODEX_API_KEY`` for the subprocess.
+1. Explicit ``api_key=`` constructor argument — passed through to
+   ``Codex({"apiKey": ...})``.
 2. ``OPENAI_API_KEY`` / ``CODEX_API_KEY`` env vars (the SDK
    inherits ``os.environ`` for the subprocess by default, so these
    "just work" if set).
-3. ``~/.local/share/opencode/auth.json::openai.key`` — the API key
-   minted by ``opencode auth login openai`` when the user already
-   has opencode auth configured.
+3. ``~/.codex/auth.json::OPENAI_API_KEY`` — the static API key
+   minted by ``codex login --api-key=…``. Override the path with
+   ``CODEX_AUTH_PATH`` for tests / non-standard installs.
 4. Implicit fallback: the ``codex`` CLI reads
-   ``~/.codex/auth.json`` directly when present (created by
-   ``codex login``). No work for us — the subprocess just uses it.
+   ``~/.codex/auth.json`` directly when present, including the
+   ChatGPT-OAuth bundle (``{"OPENAI_API_KEY": null, "tokens":
+   {...}}``) that ``codex login`` writes for ChatGPT Plus users.
+   We deliberately *don't* lift the OAuth ``access_token`` into
+   ``apiKey`` — the CLI knows how to refresh those tokens; we just
+   stay out of its way.
+
+We don't read ``~/.local/share/opencode/auth.json`` from this
+adapter: those credentials belong to the opencode CLI, not to
+Codex. Cross-product credential reads were a 0.6.x footgun
+(``CodexRuntime`` would silently surface an opencode key when the
+user hadn't run ``codex login``); 0.6.3 confines each adapter to
+its own vendor's auth file.
 
 **Structured output.** First-class: the Codex CLI accepts an
 ``--output-schema`` flag that constrains the final response to a
@@ -115,8 +126,12 @@ T = TypeVar("T")
 #: via ``ProviderModel.model_id``.
 DEFAULT_CODEX_MODEL = "gpt-5-codex"
 
-#: Path to the opencode auth file when present.
-DEFAULT_AUTH_PATH = Path.home() / ".local" / "share" / "opencode" / "auth.json"
+#: Path to the Codex CLI's auth file. Populated by ``codex login``,
+#: either with a static API key (``{"OPENAI_API_KEY": "sk-..."}``) or a
+#: ChatGPT-OAuth bundle (``{"OPENAI_API_KEY": null, "auth_mode": "...",
+#: "tokens": {"access_token": "...", "refresh_token": "...", ...}}``).
+#: Override via ``CODEX_AUTH_PATH`` for tests / non-standard installs.
+DEFAULT_CODEX_AUTH_PATH = Path.home() / ".codex" / "auth.json"
 
 #: Canonical provider ID this adapter serves. Distinguished from a
 #: hypothetical ``openai`` provider (direct OpenAI API) — the codex
@@ -166,34 +181,67 @@ def _strictify_schema(node: Any) -> Any:
     return node
 
 
-def _resolve_api_key(api_key: str | None) -> str | None:
-    """Resolve the OpenAI API key from explicit arg → env → opencode auth.json.
+def _read_codex_credentials(auth_path: Path) -> tuple[str | None, bool]:
+    """Read the Codex CLI's auth.json and report what's available.
 
-    Returns ``None`` when no API key is found in any of the explicit
-    sources. That's a valid state: the codex CLI itself reads
-    ``~/.codex/auth.json`` (populated by ``codex login``) when no env
-    var is set. We only raise :class:`RuntimeAuthError` when the
-    subprocess actually fails for auth reasons.
+    The Codex CLI persists two flavours of credentials:
+
+    * Static API key: ``{"OPENAI_API_KEY": "sk-..."}`` (from
+      ``codex login --api-key=…``).
+    * ChatGPT OAuth bundle: ``{"OPENAI_API_KEY": null, "auth_mode":
+      "<str>", "tokens": {"access_token": "...", "refresh_token":
+      "...", "id_token": "...", "account_id": "..."}}`` (from
+      ``codex login`` against a ChatGPT Plus / Pro subscription).
+
+    Returns:
+        ``(api_key, has_oauth_tokens)`` — either may be empty.
+        Unreadable / malformed / missing files quietly return
+        ``(None, False)``; this is best-effort discovery, not
+        validation. Callers decide whether the absence is an error:
+        the CLI subprocess handles either shape itself; ``list_models``
+        needs an API key specifically.
+    """
+    if not auth_path.exists():
+        return None, False
+    try:
+        data = json.loads(auth_path.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.debug(
+            "codex_runtime.auth_file_unreadable path=%s error=%s",
+            auth_path,
+            exc,
+        )
+        return None, False
+    if not isinstance(data, dict):
+        return None, False
+    api_key = data.get("OPENAI_API_KEY")
+    if not isinstance(api_key, str) or not api_key:
+        api_key = None
+    tokens = data.get("tokens")
+    has_oauth = isinstance(tokens, dict) and isinstance(tokens.get("access_token"), str)
+    return api_key, has_oauth
+
+
+def _resolve_api_key(api_key: str | None) -> str | None:
+    """Resolve the OpenAI API key from explicit → env → ~/.codex/auth.json.
+
+    Returns ``None`` when no static API key surfaces from any source.
+    That's a valid state for the CLI subprocess: it reads
+    ``~/.codex/auth.json`` itself (including the OAuth token bundle
+    that ``codex login`` writes for ChatGPT Plus users) and refreshes
+    those tokens as needed. ``list_models`` is stricter — it needs a
+    bearer key against ``/v1/models`` and raises if none surfaces.
+
+    Honours ``CODEX_AUTH_PATH`` for tests / non-standard installs.
     """
     if api_key:
         return api_key
     env = os.environ.get("OPENAI_API_KEY") or os.environ.get("CODEX_API_KEY")
     if env:
         return env
-    auth_path = Path(os.environ.get("OPENCODE_AUTH_PATH") or DEFAULT_AUTH_PATH)
-    if auth_path.exists():
-        try:
-            data = json.loads(auth_path.read_text())
-            key = (data.get("openai") or {}).get("key")
-            if isinstance(key, str) and key:
-                return key
-        except (OSError, json.JSONDecodeError) as exc:
-            logger.debug(
-                "codex_runtime.auth_file_unreadable path=%s error=%s",
-                auth_path,
-                exc,
-            )
-    return None
+    auth_path = Path(os.environ.get("CODEX_AUTH_PATH") or DEFAULT_CODEX_AUTH_PATH)
+    found_key, _has_oauth = _read_codex_credentials(auth_path)
+    return found_key
 
 
 def _translate_thinking_for_codex(thinking: ThinkingMode) -> str | None:
@@ -386,8 +434,11 @@ class CodexRuntime(AgentRuntime):
             ``CODEX_MODEL_OVERRIDE`` env var if set for testing.
         api_key: Optional explicit OpenAI API key. When ``None``
             (default), auth resolves via ``OPENAI_API_KEY`` /
-            ``CODEX_API_KEY`` env vars → opencode auth.json → falls
-            back to ``~/.codex/auth.json`` via the CLI subprocess.
+            ``CODEX_API_KEY`` env vars → ``~/.codex/auth.json``'s
+            static-key shape. ChatGPT OAuth bundles in the same file
+            are left untouched — the ``codex`` CLI subprocess reads
+            them directly and refreshes tokens as needed; airframe
+            stays out of that path.
         codex_path: Optional override for the ``codex`` CLI path.
         sandbox_mode: Sandbox mode passed to the codex CLI. Defaults
             to ``read-only`` — typed-output workflows shouldn't be
@@ -748,9 +799,20 @@ class CodexRuntime(AgentRuntime):
 
         api_key = _resolve_api_key(self._api_key_override)
         if api_key is None:
+            auth_path = Path(os.environ.get("CODEX_AUTH_PATH") or DEFAULT_CODEX_AUTH_PATH)
+            _key, has_oauth = _read_codex_credentials(auth_path)
+            if has_oauth:
+                raise RuntimeAuthError(
+                    "CodexRuntime.list_models() needs an OpenAI Platform API key. "
+                    "Your ~/.codex/auth.json holds ChatGPT-OAuth tokens (used by the "
+                    "codex CLI), not a Platform key — those tokens aren't valid against "
+                    "/v1/models. Set OPENAI_API_KEY, pass api_key= explicitly, or "
+                    "re-run `codex login --api-key=…` to persist a static key."
+                )
             raise RuntimeAuthError(
                 "CodexRuntime.list_models() needs an OpenAI API key. "
-                "Set OPENAI_API_KEY or pass api_key= explicitly."
+                "Set OPENAI_API_KEY, pass api_key= explicitly, or run "
+                "`codex login --api-key=…` to populate ~/.codex/auth.json."
             )
         client = AsyncOpenAI(api_key=api_key)
         try:

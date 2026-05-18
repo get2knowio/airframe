@@ -13,8 +13,10 @@ subprocess, no real OpenAI calls. Validates:
 * Cost record populated from ``Turn.usage``.
 * Lifecycle: ``reset()`` drops the thread; ``close()`` drops the client.
 * Thread caching by model.
-* Auth resolution chain: explicit key → env → opencode auth.json →
-  fall-through.
+* Auth resolution chain: explicit key → env → ~/.codex/auth.json →
+  fall-through. Codex's auth.json supports both a static API-key
+  shape and a ChatGPT-OAuth bundle; airframe lifts the static key
+  but leaves OAuth tokens for the CLI subprocess to handle.
 """
 
 from __future__ import annotations
@@ -620,17 +622,69 @@ def test_resolve_api_key_uses_codex_env(monkeypatch: pytest.MonkeyPatch) -> None
     assert _resolve_api_key(None) == "env-codex-key"
 
 
-def test_resolve_api_key_uses_opencode_auth_json(
+def test_resolve_api_key_uses_codex_auth_json_static_key(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    """Static-key shape: ``{"OPENAI_API_KEY": "sk-..."}`` from
+    ``codex login --api-key=…``."""
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.delenv("CODEX_API_KEY", raising=False)
     auth_file = tmp_path / "auth.json"
-    auth_file.write_text(json.dumps({"openai": {"key": "opencode-stored-key"}}))
-    monkeypatch.setenv("OPENCODE_AUTH_PATH", str(auth_file))
+    auth_file.write_text(json.dumps({"OPENAI_API_KEY": "sk-static-codex-key"}))
+    monkeypatch.setenv("CODEX_AUTH_PATH", str(auth_file))
 
-    assert _resolve_api_key(None) == "opencode-stored-key"
+    assert _resolve_api_key(None) == "sk-static-codex-key"
+
+
+def test_resolve_api_key_returns_none_for_oauth_only_auth_json(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """OAuth bundle shape: ``OPENAI_API_KEY`` is null, ``tokens`` is
+    populated. The CLI subprocess handles refresh; airframe must NOT
+    lift the access_token into apiKey."""
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("CODEX_API_KEY", raising=False)
+    auth_file = tmp_path / "auth.json"
+    auth_file.write_text(
+        json.dumps(
+            {
+                "OPENAI_API_KEY": None,
+                "auth_mode": "chatgpt",
+                "tokens": {
+                    "access_token": "oauth-access-token-secret",
+                    "refresh_token": "oauth-refresh-token",
+                    "id_token": "oauth-id-token",
+                    "account_id": "acct_123",
+                },
+            }
+        )
+    )
+    monkeypatch.setenv("CODEX_AUTH_PATH", str(auth_file))
+
+    assert _resolve_api_key(None) is None
+
+
+def test_resolve_api_key_ignores_opencode_auth_json(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Codex must NOT read opencode's auth.json. Cross-product
+    credential reads were a 0.6.x leak fixed in 0.6.3 — guard against
+    regression by writing the legacy opencode shape and asserting
+    we don't pick it up."""
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("CODEX_API_KEY", raising=False)
+    # Even if someone sets CODEX_AUTH_PATH at the opencode file by
+    # mistake, the opencode shape (``{"openai": {"key": "..."}}``)
+    # does NOT have ``OPENAI_API_KEY`` at the top level, so we
+    # correctly ignore it.
+    opencode_shaped = tmp_path / "auth.json"
+    opencode_shaped.write_text(json.dumps({"openai": {"key": "opencode-leaked-key"}}))
+    monkeypatch.setenv("CODEX_AUTH_PATH", str(opencode_shaped))
+
+    assert _resolve_api_key(None) is None
 
 
 def test_resolve_api_key_returns_none_when_nothing_resolves(
@@ -639,7 +693,7 @@ def test_resolve_api_key_returns_none_when_nothing_resolves(
 ) -> None:
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.delenv("CODEX_API_KEY", raising=False)
-    monkeypatch.setenv("OPENCODE_AUTH_PATH", str(tmp_path / "nonexistent.json"))
+    monkeypatch.setenv("CODEX_AUTH_PATH", str(tmp_path / "nonexistent.json"))
 
     assert _resolve_api_key(None) is None
 
@@ -710,7 +764,7 @@ def test_resolve_api_key_ignores_malformed_auth_file(
     monkeypatch.delenv("CODEX_API_KEY", raising=False)
     bad = tmp_path / "auth.json"
     bad.write_text("not valid json {")
-    monkeypatch.setenv("OPENCODE_AUTH_PATH", str(bad))
+    monkeypatch.setenv("CODEX_AUTH_PATH", str(bad))
 
     assert _resolve_api_key(None) is None
 
@@ -722,7 +776,7 @@ async def test_explicit_api_key_threaded_to_codex_options(
 ) -> None:
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.delenv("CODEX_API_KEY", raising=False)
-    monkeypatch.setenv("OPENCODE_AUTH_PATH", "/nonexistent/path")
+    monkeypatch.setenv("CODEX_AUTH_PATH", "/nonexistent/path")
     rt = CodexRuntime(api_key="sk-test-key")
 
     await rt.execute("hi", schema=_Schema)
