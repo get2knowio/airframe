@@ -15,6 +15,8 @@ production (explicit constructor argument).
 | **CodexRuntime** | `api_key=` constructor arg → `OPENAI_API_KEY` env → `CODEX_API_KEY` env → `~/.local/share/opencode/auth.json::openai.key` → implicit `~/.codex/auth.json` (CLI-managed) | `airframe-agents[codex]` |
 | **OpenCodeZenRuntime** | `api_key=` constructor arg → `OPENCODE_API_KEY` env → `~/.local/share/opencode/auth.json::opencode.key` | `airframe-agents[openai-compat]` |
 | **OpenCodeGoRuntime** | `api_key=` constructor arg → `OPENCODE_API_KEY` env → `~/.local/share/opencode/auth.json::opencode-go.key` | `airframe-agents[openai-compat]` |
+| **OpenRouterRuntime** | `api_key=` constructor arg → `OPENROUTER_API_KEY` env | `airframe-agents[openai-compat]` |
+| **BedrockRuntime** | explicit `aws_access_key_id`/`secret`/`session_token` → `AWS_ACCESS_KEY_ID`+`AWS_SECRET_ACCESS_KEY` env → `AWS_PROFILE` env → default boto3 chain (IAM instance / ECS task / Lambda / IRSA) | `airframe-agents[bedrock]` |
 
 `list_models()` calls always require a credential — the vendor's
 models endpoint won't honour an anonymous request. Tests / scripts
@@ -172,10 +174,100 @@ Three sources, checked in order:
 - `base_url=` overrides the gateway URL; honours `OPENCODE_GO_BASE_URL`
   env var.
 - HTTP-only — no subprocess, credential stays in-process.
+
+## OpenRouterRuntime
+
+```python
+from airframe import OpenRouterRuntime
+runtime = OpenRouterRuntime()  # picks up OPENROUTER_API_KEY
+runtime_explicit = OpenRouterRuntime(api_key="sk-or-...")
+```
+
+Two sources, checked in order:
+
+1. **`api_key=` constructor arg** — explicit OpenRouter key.
+2. **`OPENROUTER_API_KEY` env var** — mint at
+   [https://openrouter.ai/keys](https://openrouter.ai/keys).
+
+### Notes
+
+- **No on-disk auth-file convention.** OpenRouter doesn't have an
+  equivalent of `~/.local/share/opencode/auth.json`. The auth chain
+  ends at the env var; no filesystem fallback.
+- `base_url=` overrides the gateway URL; honours `OPENROUTER_BASE_URL`
+  env var (e.g. for self-hosted proxies).
+- HTTP-only — no subprocess; credential stays in-process.
 - The same `OpenAICompatibleRuntime` base class powers any future
   compat-vendor adapter (Together / Groq / Fireworks). Each
   subclass overrides `_resolve_api_key()` with its own env-var and
   credential-file chain — the base class doesn't impose one.
+
+## BedrockRuntime
+
+```python
+from airframe import BedrockRuntime
+# Explicit credentials.
+runtime = BedrockRuntime(
+    region_name="us-east-1",
+    aws_access_key_id="AKIA…",
+    aws_secret_access_key="…",
+    aws_session_token="…",   # optional — for STS-issued creds
+)
+# Or pick everything up from env / profile / instance-role.
+runtime = BedrockRuntime(region_name="us-east-1")
+runtime = BedrockRuntime(profile_name="my-bedrock-profile")
+```
+
+### Credential chain (first match wins)
+
+1. **Explicit constructor args.** `aws_access_key_id` +
+   `aws_secret_access_key` (+ optional `aws_session_token`) win
+   outright. Forwarded to `aioboto3.Session(...)` so boto3 builds
+   the signing context directly from your values.
+2. **`AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` (+ optional
+   `AWS_SESSION_TOKEN`) env vars.** Standard AWS env-var auth.
+   `aioboto3.Session()` picks these up natively when no explicit
+   credentials are passed.
+3. **`AWS_PROFILE` env var** → `~/.aws/credentials` /
+   `~/.aws/config` profile resolution. Equivalent to passing
+   `profile_name=` to the constructor.
+4. **Default credential chain.** IAM instance profile (EC2), ECS
+   task role, Lambda execution role, IRSA (EKS). `botocore` walks
+   this when no explicit credentials or profile are set —
+   airframe doesn't override.
+
+### Region resolution (independent from credentials)
+
+Bedrock is region-pinned and catalogs differ per region, so region
+resolution gets first-class treatment separately from the credential
+chain:
+
+1. **Explicit `region_name=` constructor arg.**
+2. **`AWS_REGION` env var.**
+3. **`AWS_DEFAULT_REGION` env var.**
+4. *(Not honoured by airframe today)* `~/.aws/config` `region` —
+   `aioboto3.Session(...)` would resolve it but airframe raises
+   `RuntimeAuthError` at the first network call rather than fall
+   through, because silent fallback to a default region would route
+   traffic to a different model catalog than the caller expects.
+
+### Notes
+
+- **Region is mandatory.** Missing region surfaces as
+  `RuntimeAuthError` with a clear "set AWS_REGION" message. The
+  honest signal beats a confusing "model not found" later.
+- **Cross-account assume-role.** Not handled in-adapter. Run
+  `aws sts assume-role` (or your SDK equivalent) ahead of time,
+  export the session credentials, then construct `BedrockRuntime()`
+  — it'll pick them up via the env-var path.
+- **KMS-encrypted prompts.** boto3 honours whatever the resolved
+  session's KMS config provides; airframe doesn't intervene.
+- **Provisioned-throughput ARNs.** Pass the PT ARN as a
+  `ProviderModel.model_id` (or via
+  `BedrockOptions(inference_profile_arn=...)`); the adapter doesn't
+  provision or report on PT.
+- **`AIRFRAME_PROBE_MODEL_BEDROCK`** overrides the default model
+  used by `examples/probe_bedrock.py` for region-sensitive testing.
 
 ## Cross-cutting notes
 

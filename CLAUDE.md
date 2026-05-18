@@ -68,8 +68,11 @@ Key invariants when editing:
   entry-point group for third-party adapters.
 - **Provider IDs are strict; no aliases.** `"anthropic"` and
   `"openai"` are reserved for future direct-API adapters; today's
-  subscription-path adapters use `"claude"`, `"github-copilot"`,
-  `"codex"`, `"opencode-zen"`, `"opencode-go"`.
+  subscription / gateway / managed adapters use `"claude"`,
+  `"github-copilot"`, `"codex"`, `"opencode-zen"`, `"opencode-go"`,
+  `"openrouter"`, `"bedrock"`. `"bedrock-agents"` is reserved for a
+  future sibling wrapping `bedrock-agent-runtime` (Knowledge Bases,
+  action groups) and must not be folded into `"bedrock"`.
 - **`CopilotRuntime.validate_binding` deliberately rejects
   `claude-*` model IDs** — Claude via Copilot Chat Completions emits
   markdown-fenced JSON instead of honouring tool calls. Route Claude

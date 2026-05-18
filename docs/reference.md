@@ -18,6 +18,8 @@ import airframe
 | `CodexRuntime` | `codex` | [adapters/codex.md](./adapters/codex.md) |
 | `OpenCodeZenRuntime` | `opencode` | [adapters/opencode-zen.md](./adapters/opencode-zen.md) |
 | `OpenCodeGoRuntime` | `opencode-go` | [adapters/opencode-go.md](./adapters/opencode-go.md) |
+| `OpenRouterRuntime` | `openrouter` | [adapters/openrouter.md](./adapters/openrouter.md) |
+| `BedrockRuntime` | `bedrock` | [adapters/bedrock.md](./adapters/bedrock.md) |
 
 Every runtime implements the `AgentRuntime` protocol.
 
@@ -462,8 +464,8 @@ Everything below is importable from `airframe`:
 ```
 AgentRuntime, AgentSession, AgentRuntimeError
 ClaudeCodeRuntime, CopilotRuntime, CodexRuntime,
-OpenCodeZenRuntime, OpenCodeGoRuntime
-ClaudeOptions, CopilotOptions, CodexOptions, OpenAICompatOptions, ProviderOptions
+OpenCodeZenRuntime, OpenCodeGoRuntime, OpenRouterRuntime, BedrockRuntime
+ClaudeOptions, CopilotOptions, CodexOptions, OpenAICompatOptions, BedrockOptions, ProviderOptions
 ProviderModel, RuntimeResult, ModelInfo, CostRecord
 Feature
 Prompt, PromptPart, ImageInput, FileInput

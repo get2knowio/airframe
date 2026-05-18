@@ -22,6 +22,8 @@ Per-adapter variant support (set by Iteration D):
 * Copilot — path, bytes (URL raises).
 * Codex / Claude Code — path only (bytes / URL raise with a
   "write to disk and pass path=" message).
+* Bedrock — path, bytes (URL raises — Converse needs the bytes
+  locally; per-vendor: Anthropic / Nova / Llama 3.2 honour it).
 
 Usage::
 
@@ -30,6 +32,7 @@ Usage::
     uv run python examples/probe_vision.py --provider github-copilot
     uv run python examples/probe_vision.py --provider codex
     uv run python examples/probe_vision.py --provider opencode
+    uv run python examples/probe_vision.py --provider bedrock
     uv run python examples/probe_vision.py --variant bytes
     uv run python examples/probe_vision.py --variant url \\
         --image-url https://example.com/cat.png
@@ -126,7 +129,8 @@ async def main() -> int:
             file=sys.stderr,
         )
         print(
-            "Install one with: pip install airframe-agents[claude|copilot|codex|openai-compat]",
+            "Install one with: pip install airframe-agents"
+            "[claude|copilot|codex|openai-compat|bedrock]",
             file=sys.stderr,
         )
         return 1

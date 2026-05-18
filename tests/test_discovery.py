@@ -46,11 +46,13 @@ def test_list_providers_returns_all_when_installed_only_false() -> None:
     """``installed_only=False`` surfaces every adapter's PROVIDER_ID."""
     providers = list_providers(installed_only=False)
     assert set(providers) == {
+        "bedrock",
         "claude",
         "github-copilot",
         "codex",
         "opencode-zen",
         "opencode-go",
+        "openrouter",
     }
 
 
@@ -84,11 +86,19 @@ def test_list_providers_filters_when_only_codex_installed(
 def test_list_providers_filters_when_only_openai_compat_installed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The ``[openai-compat]`` extra brings ``openai`` — gates both
-    OpenAI-compatible adapters (per-token ``opencode-zen`` and
-    subscription ``opencode-go``)."""
+    """The ``[openai-compat]`` extra brings ``openai`` — gates every
+    OpenAI-compatible adapter (``opencode-zen``, ``opencode-go``,
+    ``openrouter``)."""
     _stub_find_spec(monkeypatch, available={"openai"})
-    assert list_providers() == ["opencode-go", "opencode-zen"]
+    assert list_providers() == ["opencode-go", "opencode-zen", "openrouter"]
+
+
+def test_list_providers_filters_when_only_bedrock_installed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The ``[bedrock]`` extra brings ``aioboto3`` — gates only ``bedrock``."""
+    _stub_find_spec(monkeypatch, available={"aioboto3"})
+    assert list_providers() == ["bedrock"]
 
 
 def test_list_providers_when_nothing_installed_is_empty(
@@ -187,6 +197,16 @@ def test_runtime_for_uninstalled_opencode_zen_names_the_openai_compat_extra(
     assert "airframe-agents[openai-compat]" in str(excinfo.value)
 
 
+def test_runtime_for_uninstalled_bedrock_names_the_extra(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _stub_find_spec(monkeypatch, available=set())
+    with pytest.raises(ImportError) as excinfo:
+        runtime_for("bedrock")
+    assert "airframe-agents[bedrock]" in str(excinfo.value)
+    assert "BedrockRuntime" in str(excinfo.value)
+
+
 def test_runtime_for_returns_class_not_instance() -> None:
     """``runtime_for`` returns the class so callers control construction."""
     cls = runtime_for("claude")
@@ -264,7 +284,15 @@ def test_entry_point_adapter_appears_in_list_providers(
     providers = list_providers(installed_only=False)
     assert "fake-third-party" in providers
     # Built-ins still surface unchanged.
-    assert {"claude", "github-copilot", "codex", "opencode-zen", "opencode-go"} <= set(providers)
+    assert {
+        "bedrock",
+        "claude",
+        "github-copilot",
+        "codex",
+        "opencode-zen",
+        "opencode-go",
+        "openrouter",
+    } <= set(providers)
 
 
 def test_entry_point_adapter_routed_by_runtime_for(
