@@ -857,6 +857,39 @@ under a different name; canonicalise once.
 Each step is independently shippable. The `AgentSession` step is the
 hinge — most of the later items are easier to model once it exists.
 
+### Adapter expansion candidates
+
+Adapter additions run on a parallel track to the protocol-feature
+phases above. Each one is signal-gated (concrete consumer or
+capability-gap demand triggers prioritisation) and has its own
+dedicated dev-doc; the list here is the index.
+
+* **`OpenCodeServerRuntime`** — *Phase 1 candidate*. Wraps the bespoke
+  OpenCode agent HTTP server (`sst/opencode` — distinct from the
+  `OpenCodeZenRuntime` / `OpenCodeGoRuntime` gateway adapters that
+  share the brand). Lands the lineup's first **model-agnostic agent
+  adapter** — open-weight agentics is otherwise unreachable through
+  airframe today. Server-side sessions, native SSE streaming,
+  permission-callback and lifecycle-hook surfaces fall out near-free
+  from the existing event bus. Risks: pre-1.0 SDK, server-side
+  tool execution = no client-callback transport for caller-defined
+  Python functions (worked around via in-process MCP wrapping).
+  Full plan: [`opencode-adapter-plan.md`](./opencode-adapter-plan.md).
+* **`BedrockRuntime`** — wraps AWS Bedrock's Converse API; the
+  enterprise / IAM-rooted access path. Multi-vendor model catalog
+  (Anthropic / Meta / Mistral / Cohere / Amazon Nova) behind one
+  AWS auth scheme. Full plan:
+  [`bedrock-adapter-plan.md`](./bedrock-adapter-plan.md).
+* **`GeminiRuntime`** — signal-gated post-1.0 work. Direct wrapper
+  around `google-genai` (Developer API + Vertex). Fills the obvious
+  gap in the four-adapter matrix. Full plan:
+  [`google-genai-adapter-plan.md`](./google-genai-adapter-plan.md).
+
+These adapters share a common iteration shape (ABCDEF — scaffold,
+execute/stream/cancel, polymorphic prompt + reasoning, tools +
+permission, hooks + budget, wrap-up) and can land mergeable in
+parallel since they touch disjoint files.
+
 ---
 
 ## 6. Patterns from mature abstraction frameworks

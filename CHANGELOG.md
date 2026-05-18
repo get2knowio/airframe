@@ -6,6 +6,64 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+_Nothing yet — work toward v0.7.0 begins after the v0.6.0 cut._
+
+---
+
+## [0.6.0] — 2026-05-18
+
+A pre-release that captures the **OpenRouter** and **AWS Bedrock**
+adapters landing on top of the v0.5.0 Phase-1/2/3/4/5 surface, plus
+the v1.0-readiness docs sprint. Snapped before work on a sixth
+adapter (`OpenCodeServerRuntime` — the bespoke OpenCode agent server)
+begins, so consumers can pin to a known-good five-adapter baseline.
+
+Headline additions:
+
+- **`BedrockRuntime`** — AWS Bedrock Converse API adapter. Closes the
+  enterprise / managed-cloud bucket. Twelve `Feature` flags True;
+  fronts Anthropic Claude, Meta Llama, Mistral, Cohere, Amazon Nova,
+  AI21 Jamba behind one AWS-billed envelope with IAM-rooted auth and
+  region pinning.
+- **`OpenRouterRuntime`** — OpenAI-compatible adapter for the
+  OpenRouter gateway (300+ models behind one credit pool).
+- **`OpenCodeGoRuntime`** — OpenAI-compatible adapter for the
+  opencode-go subscription endpoint at `https://opencode.ai/zen/go/v1`.
+- **v1.0-readiness docs sprint** — `SECURITY.md`,
+  `docs/auth.md` / `docs/capabilities.md` / `docs/reference.md` /
+  `docs/cookbook.md`, per-adapter pages under `docs/adapters/`, a
+  third-party-adapter guide, PyPI badges + project URLs.
+- **v1.0-readiness pass** — `airframe.testing.integration`
+  pytest-marker-gated behavioural suite, twelve new structural
+  contracts in `airframe.testing.contracts`, populated
+  `ClaudeOptions` / `CopilotOptions` / `CodexOptions` /
+  `OpenAICompatOptions` namespaces.
+- **GitHub Actions release pipeline** — `.github/workflows/release.yml`
+  triggers on `v*` tag pushes: matrix-tested across Python
+  3.11/3.12/3.13, creates a GitHub Release with auto-generated notes,
+  builds via `uv build`, and publishes to PyPI via OIDC Trusted
+  Publishing (`pypi` environment, no long-lived tokens). Mirrors the
+  pattern used by `get2knowio/remo` and `get2knowio/climax`.
+
+Forward-looking dev-docs (not in the published sdist):
+
+- **`dev-docs/opencode-adapter-plan.md`** — full implementation plan
+  for the next adapter: `OpenCodeServerRuntime` wrapping the bespoke
+  `sst/opencode` agent HTTP server. Phase 1 candidate; distinct from
+  the existing `OpenCodeZenRuntime` / `OpenCodeGoRuntime` gateway
+  adapters that share the brand.
+- **`dev-docs/feature-roadmap.md`** — new "Adapter expansion
+  candidates" subsection indexing the three in-flight adapter plans
+  (OpenCode agent server, Bedrock, Gemini).
+
+Iteration-level detail for Bedrock and the v1.0-readiness work
+follows. `OpenRouterRuntime` (commit `52b5240`) and `OpenCodeGoRuntime`
+(commit `7b6ff98`) land as thin `OpenAICompatibleRuntime` subclasses
+in the canonical ~30-LOC shape — see their module docstrings for
+auth chains and the `git log v0.5.0..v0.6.0` range for the full
+diff. Listed in `README.md`'s providers table and
+`docs/capabilities.md`.
+
 ### BedrockRuntime — AWS Bedrock Converse API adapter
 
 New built-in adapter wrapping AWS Bedrock's

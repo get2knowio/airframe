@@ -1,0 +1,145 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  test:
+    name: Test (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - name: Set up Python ${{ matrix.python-version }}
+        run: uv python install ${{ matrix.python-version }}
+      - name: Install
+        run: uv sync --all-extras --group dev --python ${{ matrix.python-version }}
+      - name: Run tests
+        run: uv run --python ${{ matrix.python-version }} pytest --tb=short -q
+
+  release:
+    name: Create GitHub Release
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get tag name
+        id: tag
+        run: echo "tag=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+
+      - name: Check if pre-release
+        id: prerelease
+        run: |
+          TAG="${{ steps.tag.outputs.tag }}"
+          if [[ "$TAG" == *"-rc"* ]] || [[ "$TAG" == *"-beta"* ]] || [[ "$TAG" == *"-alpha"* ]] || [[ "$TAG" == *"-dev"* ]]; then
+            echo "is_prerelease=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "is_prerelease=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Get previous tag
+        id: prev_tag
+        run: |
+          TAG="${{ steps.tag.outputs.tag }}"
+          IS_PRE="${{ steps.prerelease.outputs.is_prerelease }}"
+          if [ "$IS_PRE" == "true" ]; then
+            PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+          else
+            PREV_TAG=$(git tag -l | grep -v -E '(-rc|-beta|-alpha|-dev)' | grep -v "^${TAG}$" | sort -V | tail -1)
+            PREV_TAG="${PREV_TAG:-}"
+          fi
+          echo "prev_tag=$PREV_TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Generate release notes
+        run: |
+          TAG="${{ steps.tag.outputs.tag }}"
+          PREV_TAG="${{ steps.prev_tag.outputs.prev_tag }}"
+          VERSION="${TAG#v}"
+
+          cat > release_notes.md << 'HEADER'
+          ## Installation
+
+          ```bash
+          # Install via pip
+          pip install airframe-agents
+
+          # Or with uv
+          uv add airframe-agents
+          ```
+
+          Each adapter ships behind an optional extra — see the README's
+          install matrix.
+          HEADER
+
+          if [ "${{ steps.prerelease.outputs.is_prerelease }}" == "true" ]; then
+            cat >> release_notes.md << PRERELEASE
+
+          > **Note:** This is a pre-release version. Pin to it explicitly:
+          > \`\`\`bash
+          > pip install airframe-agents==${VERSION}
+          > uv add airframe-agents==${VERSION}
+          > \`\`\`
+          PRERELEASE
+          fi
+
+          echo "" >> release_notes.md
+
+          if [ "${{ steps.prerelease.outputs.is_prerelease }}" == "true" ] && [ -n "$PREV_TAG" ]; then
+            echo "## Changes" >> release_notes.md
+            echo "" >> release_notes.md
+            git log --pretty=format:"- %s" "${PREV_TAG}..HEAD" >> release_notes.md
+            echo "" >> release_notes.md
+            echo "" >> release_notes.md
+            echo "**Full Changelog**: https://github.com/${{ github.repository }}/compare/${PREV_TAG}...${TAG}" >> release_notes.md
+          elif [ "${{ steps.prerelease.outputs.is_prerelease }}" == "false" ]; then
+            TAG_MSG=$(git tag -l --format='%(contents)' "$TAG" | tail -n +2)
+            if [ -n "$TAG_MSG" ]; then
+              echo "$TAG_MSG" >> release_notes.md
+            elif [ -n "$PREV_TAG" ]; then
+              echo "## Changes" >> release_notes.md
+              echo "" >> release_notes.md
+              git log --pretty=format:"- %s" "${PREV_TAG}..HEAD" >> release_notes.md
+            fi
+            echo "" >> release_notes.md
+            if [ -n "$PREV_TAG" ]; then
+              echo "**Full Changelog**: https://github.com/${{ github.repository }}/compare/${PREV_TAG}...${TAG}" >> release_notes.md
+            fi
+          else
+            echo "Initial release" >> release_notes.md
+          fi
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: ${{ steps.tag.outputs.tag }}
+          body_path: release_notes.md
+          prerelease: ${{ steps.prerelease.outputs.is_prerelease == 'true' }}
+          draft: false
+
+  publish:
+    name: Publish to PyPI
+    needs: [test, release]
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - name: Build package
+        run: uv build
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1

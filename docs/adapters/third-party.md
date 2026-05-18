@@ -133,7 +133,7 @@ Once your runtime class exists, expose it via the
 name = "airframe-adapters-together"
 version = "0.1.0"
 dependencies = [
-    "airframe-agents>=0.5.0",
+    "airframe-agents>=0.6.0",
     "openai>=1.0",
 ]
 
