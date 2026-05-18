@@ -35,6 +35,29 @@ prompt-side file slot — files reach Kimi tools via the session's
 between turns rebuilds the SDK session, mirroring how Codex rebuilds
 its :class:`Thread` on a reasoning-effort change.
 
+**Iteration D.** Permission callback + MCP refs. The SDK surfaces
+:class:`ApprovalRequest` objects on the wire-message stream when
+``yolo=False``; the adapter now dispatches each one to the
+registered :class:`~airframe.permission.PermissionCallback` and
+calls :meth:`ApprovalRequest.resolve` with the translated decision
+(``"allow"`` → ``"approve"``, ``"deny"`` / ``"defer"`` → ``"reject"``;
+``"defer"`` carries a "deferred" feedback string explaining that the
+Kimi SDK's permission channel is synchronous and there's no
+"ask-the-human-later" path). When ``on_permission`` is supplied the
+adapter passes ``yolo=False`` to :meth:`Session.create`; otherwise
+it stays ``yolo=True`` (Iterations B+C behaviour).
+:class:`~airframe.tools.McpServerRef` instances translate to the
+fastmcp ``mcp_configs`` dict shape and pass through to
+:meth:`Session.create`. :data:`Feature.PERMISSION_CALLBACK`,
+:data:`Feature.TOOLS_MCP_STDIO`, :data:`Feature.TOOLS_MCP_HTTP`, and
+:data:`Feature.TOOLS_MCP_SSE` flip True;
+:data:`Feature.TOOLS_FUNCTION` stays **permanently** False (the
+``kimi-agent-sdk`` Python surface has no programmatic Python-callable
+tool-registration channel — only config-file agents or MCP servers;
+the decline now points consumers at ``mcp_servers=`` instead);
+:data:`Feature.TOOLS_MCP_IN_PROCESS` stays permanently False (no
+in-process MCP slot in the SDK).
+
 **Auth.** Three options, checked in order:
 
 1. Explicit ``api_key=`` / ``base_url=`` / ``model=`` constructor
@@ -99,7 +122,6 @@ from airframe.sessions import (
     _check_mcp_servers_supported,
     _check_permission_supported,
     _check_provider_options,
-    _check_tools_supported,
     _split_prompt_parts,
 )
 from airframe.thinking import ThinkingMode
@@ -281,6 +303,110 @@ def _build_kimi_user_input(
     return parts
 
 
+#: Translation of airframe's :class:`PermissionDecision` literal to the
+#: kimi-agent-sdk's :class:`ApprovalResponse.Kind`. The third value
+#: ("defer") collapses to "reject" because the SDK's approval channel
+#: is *synchronous*: receiving an :class:`ApprovalRequest` obliges the
+#: caller to answer it before the prompt stream advances. There is no
+#: "ask the human later" path on the SDK boundary. The companion
+#: feedback string explains the situation so the model can react.
+_PERMISSION_DECISION_TO_KIMI: dict[str, tuple[str, str]] = {
+    "allow": ("approve", ""),
+    "deny": ("reject", ""),
+    "defer": (
+        "reject",
+        "deferred by airframe consumer — Kimi has no async permission "
+        "channel, so a deferred decision is treated as a rejection at "
+        "the SDK boundary. The consumer should re-prompt if they need "
+        "the action to retry.",
+    ),
+}
+
+
+def _mcp_ref_to_kimi_config(ref: Any) -> dict[str, Any]:
+    """Translate one :class:`~airframe.tools.McpServerRef` into the
+    fastmcp ``MCPConfig`` server-config shape the Kimi SDK accepts.
+
+    The Kimi Agent SDK's :meth:`Session.create` accepts
+    ``mcp_configs: list[MCPConfig] | list[dict[str, Any]]`` — we pass
+    the dict-shape (``{"mcpServers": {<name>: <server>}}``) so the
+    adapter avoids importing fastmcp's typed classes at module-load
+    time (they live behind the same transitive-dep wall as
+    kimi-agent-sdk itself).
+
+    Args:
+        ref: The :class:`McpServerRef` to translate. Typed as ``Any``
+            to keep the helper importable without the airframe-internal
+            type leaking into the public API surface.
+
+    Returns:
+        A dict matching one entry of :attr:`MCPConfig.mcpServers`:
+
+        * ``transport="stdio"`` → ``{"command": <argv0>, "args": [...],
+          "env": {...}}``. The ``McpServerRef.command`` argv list
+          splits at the first element so ``StdioMCPServer.command`` is a
+          single token (mirrors the canonical MCP-config dialect).
+        * ``transport="http"`` / ``"sse"`` →
+          ``{"url": ..., "transport": ..., "headers": {...}}``. When
+          :attr:`McpServerRef.auth_token` is set, an
+          ``Authorization: Bearer <token>`` header lands in ``headers``
+          (caller-supplied ``headers={"Authorization": ...}`` wins on
+          collision — same precedence as the other adapters).
+
+    Raises:
+        ValueError: ``ref.transport`` is unrecognised. Shouldn't fire —
+        :class:`McpServerRef.__post_init__` validates the literal — but
+        defensive in case the literal type widens later.
+    """
+    if ref.transport == "stdio":
+        argv = list(ref.command or [])
+        if not argv:  # pragma: no cover — McpServerRef.__post_init__ blocks this
+            raise ValueError(f"McpServerRef(name={ref.name!r}) has empty command list")
+        config: dict[str, Any] = {"command": argv[0], "args": argv[1:]}
+        return config
+    if ref.transport in ("http", "sse"):
+        headers = dict(ref.headers or {})
+        if ref.auth_token and "Authorization" not in headers:
+            headers["Authorization"] = f"Bearer {ref.auth_token}"
+        out: dict[str, Any] = {"url": ref.url, "transport": ref.transport}
+        if headers:
+            out["headers"] = headers
+        return out
+    raise ValueError(
+        f"McpServerRef(name={ref.name!r}) has unrecognised transport {ref.transport!r}"
+    )
+
+
+def _build_kimi_mcp_configs(refs: list[Any]) -> list[dict[str, Any]] | None:
+    """Build the ``mcp_configs`` argument to :meth:`Session.create`.
+
+    Returns ``None`` (not an empty list) when ``refs`` is empty or
+    ``None`` — the SDK treats absence and empty-list equivalently, but
+    ``None`` keeps the kwargs dict tight at the call site.
+
+    The shape is ``[{"mcpServers": {name: <server config>}}]`` — a
+    single :class:`MCPConfig` containing every ref the consumer
+    registered. The SDK could equally accept one config per ref;
+    bundling keeps the wire shape compact.
+
+    Raises:
+        ValueError: ``refs`` contains two entries with the same
+        :attr:`McpServerRef.name`. The MCPConfig dict cannot represent
+        the collision; explicit error beats a silent overwrite.
+    """
+    if not refs:
+        return None
+    servers: dict[str, dict[str, Any]] = {}
+    for ref in refs:
+        if ref.name in servers:
+            raise ValueError(
+                f"duplicate McpServerRef name {ref.name!r} — MCPConfig.mcpServers "
+                f"is keyed by name; rename one of the refs."
+            )
+        servers[ref.name] = _mcp_ref_to_kimi_config(ref)
+    return [{"mcpServers": servers}]
+
+
 class KimiRuntime(AgentRuntime):
     """``AgentRuntime`` over Moonshot AI's Kimi Agent SDK.
 
@@ -351,6 +477,10 @@ class KimiRuntime(AgentRuntime):
             Feature.SESSION_RESUME,
             Feature.REASONING_EFFORT,
             Feature.VISION_INPUT,
+            Feature.PERMISSION_CALLBACK,
+            Feature.TOOLS_MCP_STDIO,
+            Feature.TOOLS_MCP_HTTP,
+            Feature.TOOLS_MCP_SSE,
         }
     )
 
@@ -459,11 +589,25 @@ class KimiRuntime(AgentRuntime):
         :class:`NotImplementedError` until Iteration D's MCP-based
         forced-tool path lands.
         """
-        _check_tools_supported(
-            tools,
-            adapter_label=self.label,
-            feature_supported=self.supports(Feature.TOOLS_FUNCTION),
-        )
+        if tools:
+            # Iteration D — the decline is **permanent**, not a
+            # not-yet-wired gate. kimi-agent-sdk's Python surface
+            # exposes no Python-callable tool-registration channel;
+            # tools come via the agent-file config or via MCP. Point
+            # consumers at ``mcp_servers=`` (the supported channel)
+            # rather than the generic shared-helper message, which
+            # implies a future iteration will flip the flag.
+            raise UnsupportedFeatureError(
+                f"{self.label}: function tools cannot be wired through the "
+                f"Kimi Agent SDK — its Python surface has no programmatic "
+                f"tool-registration channel for Python callables. Wrap your "
+                f"function as an MCP server and pass it via mcp_servers= "
+                f"instead, or configure tools through the kimi-cli agent "
+                f"file (see https://github.com/MoonshotAI/kimi-cli). "
+                f"Check runtime.supports(Feature.TOOLS_FUNCTION) before "
+                f"passing tools=.",
+                feature=Feature.TOOLS_FUNCTION,
+            )
         _check_mcp_servers_supported(
             mcp_servers,
             adapter_label=self.label,
@@ -490,6 +634,8 @@ class KimiRuntime(AgentRuntime):
             resume=resume,
             system=system,
             model=model,
+            mcp_servers=mcp_servers,
+            on_permission=on_permission,
             provider_options=kimi_options,
         )
 
@@ -566,12 +712,22 @@ class KimiSession(AgentSession):
         resume: str | None = None,
         system: str | None = None,
         model: ProviderModel | None = None,
+        mcp_servers: list[McpServerRef] | None = None,
+        on_permission: PermissionCallback | None = None,
         provider_options: KimiOptions | None = None,
     ) -> None:
         self._runtime = runtime
         self._resume_id = resume
         self._system = system
         self._model = model
+        self._mcp_servers: list[McpServerRef] = list(mcp_servers or [])
+        # Iteration D: precomputed at session-construction time so a
+        # malformed McpServerRef (e.g. duplicate names) surfaces
+        # synchronously from ``runtime.session()`` rather than at first
+        # ``execute()``. Empty list → ``None`` so the kwargs dict at
+        # the SDK boundary stays tight.
+        self._mcp_configs: list[dict[str, Any]] | None = _build_kimi_mcp_configs(self._mcp_servers)
+        self._on_permission: PermissionCallback | None = on_permission
         self._provider_options = provider_options
         self._sdk_session: Any = None  # lazy-created on first execute/stream
         # Pre-initialised so ``close()`` can run even if
@@ -650,14 +806,27 @@ class KimiSession(AgentSession):
             self._env_overrides["KIMI_BASE_URL"] = os.environ.get("KIMI_BASE_URL")
             os.environ["KIMI_BASE_URL"] = self._runtime._base_url
 
+        # Iteration D: ``yolo`` toggles based on whether the user
+        # supplied a permission callback. yolo=True (auto-approve every
+        # tool call) is the Iteration B+C default and stays in place
+        # when ``on_permission`` is None; yolo=False causes the SDK to
+        # surface :class:`ApprovalRequest` messages on the wire stream
+        # which the adapter dispatches to the user's callback.
+        yolo = self._on_permission is None
+        kwargs: dict[str, Any] = {
+            "work_dir": work_dir,
+            "model": model_id,
+            "yolo": yolo,
+            "thinking": thinking,
+        }
+        if self._mcp_configs is not None:
+            kwargs["mcp_configs"] = self._mcp_configs
+
         try:
             if self._resume_id is not None:
                 sdk = await Session.resume(
-                    work_dir=work_dir,
                     session_id=self._resume_id,
-                    model=model_id,
-                    yolo=True,
-                    thinking=thinking,
+                    **kwargs,
                 )
                 if sdk is None:
                     raise RuntimeProtocolError(
@@ -667,12 +836,7 @@ class KimiSession(AgentSession):
                         "prior `Session.create` / `Session.resume` call."
                     )
             else:
-                sdk = await Session.create(
-                    work_dir=work_dir,
-                    model=model_id,
-                    yolo=True,
-                    thinking=thinking,
-                )
+                sdk = await Session.create(**kwargs)
         except RuntimeProtocolError:
             raise
         except Exception as exc:
@@ -734,10 +898,7 @@ class KimiSession(AgentSession):
                 elif kind == "reasoning":
                     reasoning_buffer.append(wire.text)
                 elif kind == "approval":
-                    # Iteration B: yolo=True is set on Session.create, so
-                    # the SDK won't surface ApprovalRequest objects to us
-                    # — but defensively resolve any that slip through.
-                    wire.resolve("approve")
+                    await self._resolve_approval_request(wire)
                 elif kind == "usage":
                     last_usage = wire
                 # Other wire-types (TurnBegin / TurnEnd / StepBegin / etc.)
@@ -795,7 +956,7 @@ class KimiSession(AgentSession):
                 elif kind == "reasoning":
                     yield ReasoningDelta(text=wire.text)
                 elif kind == "approval":
-                    wire.resolve("approve")
+                    await self._resolve_approval_request(wire)
                 elif kind == "usage":
                     last_usage = wire
         finally:
@@ -915,6 +1076,51 @@ class KimiSession(AgentSession):
                 yield wire
         except Exception as exc:
             self._classify_sdk_exception(exc)
+
+    async def _resolve_approval_request(self, wire: Any) -> None:
+        """Dispatch one :class:`ApprovalRequest` to the registered
+        :class:`~airframe.permission.PermissionCallback`.
+
+        When no callback is registered (``on_permission`` was ``None``
+        at :meth:`session()` time) we still resolve the request — the
+        SDK is synchronous, so leaving it unanswered would stall the
+        prompt stream. The fallback is ``"approve"`` (matches the
+        ``yolo=True`` defaults of Iterations B+C).
+
+        Defer-decisions collapse to ``"reject"`` with a tailored
+        feedback string: the SDK's :class:`ApprovalRequest` channel
+        has no async "ask the human later" path, so the consumer has
+        to give the model *some* answer. The feedback explains the
+        situation so the model can decide whether to retry, suggest
+        an alternative, or stop. Documented in the module docstring.
+        """
+        if self._on_permission is None:
+            wire.resolve("approve")
+            return
+
+        from airframe.permission import PermissionRequest
+
+        request = PermissionRequest(
+            tool_name=getattr(wire, "action", "") or "",
+            tool_args={
+                "tool_call_id": getattr(wire, "tool_call_id", ""),
+                "sender": getattr(wire, "sender", ""),
+            },
+            reason=getattr(wire, "description", "") or "",
+        )
+        decision = await self._on_permission.handle(request)
+        mapped = _PERMISSION_DECISION_TO_KIMI.get(decision)
+        if mapped is None:  # pragma: no cover — Literal narrows this
+            raise UnsupportedFeatureError(
+                f"{self._runtime.label}: PermissionCallback returned unrecognised "
+                f"decision {decision!r}; expected one of 'allow', 'deny', 'defer'.",
+                feature=Feature.PERMISSION_CALLBACK,
+            )
+        response_kind, feedback = mapped
+        if feedback:
+            wire.resolve(response_kind, feedback)
+        else:
+            wire.resolve(response_kind)
 
     def _classify_wire_message(self, wire: Any) -> str:
         """Return a coarse category for ``wire`` — text/reasoning/approval/usage/other.

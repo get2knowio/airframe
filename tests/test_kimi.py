@@ -162,16 +162,22 @@ def test_validate_binding_rejects_foreign_provider_id() -> None:
 # --- supports() ---------------------------------------------------------------
 
 
-def test_supports_iteration_c_feature_matrix() -> None:
-    """Iteration C adds REASONING_EFFORT + VISION_INPUT on top of B.
+def test_supports_iteration_d_feature_matrix() -> None:
+    """Iteration D adds PERMISSION_CALLBACK + TOOLS_MCP_STDIO/HTTP/SSE
+    on top of C.
 
     ``STRUCTURED_OUTPUT_JSON_SCHEMA`` stays True (the conformance
     floor every airframe adapter declares), but
-    ``execute(schema=...)`` raises :class:`NotImplementedError` until
-    Iteration D wires the MCP-based forced-tool path. ``FILE_INPUT``
-    stays False — the SDK has no prompt-side file slot; files reach
-    Kimi tools via the session's ``work_dir`` instead. The rest of
-    the matrix flips on in Iterations D–F per the plan.
+    ``execute(schema=...)`` still raises :class:`NotImplementedError`
+    until a later iteration wires the MCP-based forced-tool path.
+    ``FILE_INPUT`` stays False — the SDK has no prompt-side file slot;
+    files reach Kimi tools via the session's ``work_dir`` instead.
+    ``TOOLS_FUNCTION`` stays **permanently** False — the kimi-agent-sdk
+    Python surface has no programmatic Python-callable tool channel;
+    wrap as MCP instead. ``TOOLS_MCP_IN_PROCESS`` stays permanently
+    False — no in-process MCP slot in the SDK. The remaining unflipped
+    flags (LIFECYCLE_HOOKS, BUDGET_*) flip on in Iteration E per
+    the plan.
     """
     rt = _make_runtime()
     expected_true = {
@@ -181,11 +187,15 @@ def test_supports_iteration_c_feature_matrix() -> None:
         Feature.SESSION_RESUME,
         Feature.REASONING_EFFORT,
         Feature.VISION_INPUT,
+        Feature.PERMISSION_CALLBACK,
+        Feature.TOOLS_MCP_STDIO,
+        Feature.TOOLS_MCP_HTTP,
+        Feature.TOOLS_MCP_SSE,
     }
     for feature in Feature:
         want = feature in expected_true
         assert rt.supports(feature) is want, (
-            f"Iteration C: {feature} supports() should be {want}; got {rt.supports(feature)}"
+            f"Iteration D: {feature} supports() should be {want}; got {rt.supports(feature)}"
         )
 
 

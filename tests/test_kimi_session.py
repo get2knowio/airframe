@@ -93,13 +93,27 @@ class ApprovalRequest:  # noqa: N801 — must match SDK type name for adapter di
     expects (``type(wire).__name__ == "ApprovalRequest"``).
     """
 
-    def __init__(self, request_id: str = "req-1") -> None:
+    def __init__(
+        self,
+        request_id: str = "req-1",
+        *,
+        tool_call_id: str = "tc-1",
+        sender: str = "agent",
+        action: str = "shell",
+        description: str = "Run `ls`",
+    ) -> None:
         self.id = request_id
+        self.tool_call_id = tool_call_id
+        self.sender = sender
+        self.action = action
+        self.description = description
         self.resolved_with: str | None = None
+        self.resolved_feedback: str = ""
         self.resolved = False
 
-    def resolve(self, decision: str) -> None:
+    def resolve(self, decision: str, feedback: str = "") -> None:
         self.resolved_with = decision
+        self.resolved_feedback = feedback
         self.resolved = True
 
 
@@ -936,3 +950,409 @@ def test_system_prompt_prepends_to_textpart_when_images_present(
     parts = sdk_session.prompt_calls[0]
     assert parts[0].text == "You are precise.\n\nCaption:"
     asyncio.run(sess.close())
+
+
+# ---------------------------------------------------------------------------
+# Iteration D: PermissionCallback ↔ ApprovalRequest dispatch
+# ---------------------------------------------------------------------------
+
+
+class _RecordingPermissionCallback:
+    """In-test ``PermissionCallback`` that records every dispatched
+    :class:`PermissionRequest` and replays a queued decision per call.
+
+    Matching the ``PermissionCallback`` protocol shape:
+    ``async def handle(request) -> PermissionDecision``.
+    """
+
+    def __init__(self, decisions: list[str]) -> None:
+        self._decisions = list(decisions)
+        self.requests: list[Any] = []
+
+    async def handle(self, request: Any) -> str:
+        self.requests.append(request)
+        return self._decisions.pop(0)  # raises if test runs past queue
+
+
+def test_yolo_true_by_default_when_no_permission_callback(
+    patch_sdk: dict[str, Any],
+) -> None:
+    """No ``on_permission`` → ``yolo=True`` on Session.create (B+C
+    behaviour preserved). Approval requests that slip through are
+    auto-approved."""
+    from airframe import KimiRuntime
+
+    patch_sdk["sdk_session"] = _FakeSdkSession(
+        wire_messages=[_wire("TextPart", text="ok")],
+    )
+
+    rt = KimiRuntime(api_key="sk-test")
+    sess = rt.session()
+    asyncio.run(sess.execute("hi"))
+
+    assert patch_sdk["create_calls"][0]["yolo"] is True
+    asyncio.run(sess.close())
+
+
+def test_yolo_false_when_permission_callback_supplied(
+    patch_sdk: dict[str, Any],
+) -> None:
+    """``on_permission=callback`` flips ``yolo=False`` on Session.create
+    so the SDK surfaces ApprovalRequests for the adapter to dispatch."""
+    from airframe import KimiRuntime
+
+    patch_sdk["sdk_session"] = _FakeSdkSession(
+        wire_messages=[_wire("TextPart", text="ok")],
+    )
+
+    rt = KimiRuntime(api_key="sk-test")
+    sess = rt.session(on_permission=_RecordingPermissionCallback(["allow"]))
+    asyncio.run(sess.execute("hi"))
+
+    assert patch_sdk["create_calls"][0]["yolo"] is False
+    asyncio.run(sess.close())
+
+
+def test_approval_request_dispatched_to_callback_with_allow_resolves_approve(
+    patch_sdk: dict[str, Any],
+) -> None:
+    """allow → ``ApprovalRequest.resolve("approve")``."""
+    from airframe import KimiRuntime
+
+    approval = ApprovalRequest(
+        request_id="req-A",
+        tool_call_id="tc-1",
+        sender="agent",
+        action="shell.run",
+        description="Run `ls -la`",
+    )
+    patch_sdk["sdk_session"] = _FakeSdkSession(
+        wire_messages=[approval, _wire("TextPart", text="ok")],
+    )
+
+    callback = _RecordingPermissionCallback(["allow"])
+    rt = KimiRuntime(api_key="sk-test")
+    sess = rt.session(on_permission=callback)
+    asyncio.run(sess.execute("hi"))
+
+    assert approval.resolved
+    assert approval.resolved_with == "approve"
+    assert approval.resolved_feedback == ""
+    # The callback saw a PermissionRequest with the wire's fields lifted.
+    assert len(callback.requests) == 1
+    req = callback.requests[0]
+    assert req.tool_name == "shell.run"
+    assert req.tool_args == {"tool_call_id": "tc-1", "sender": "agent"}
+    assert req.reason == "Run `ls -la`"
+    asyncio.run(sess.close())
+
+
+def test_approval_request_deny_resolves_reject(
+    patch_sdk: dict[str, Any],
+) -> None:
+    """deny → ``ApprovalRequest.resolve("reject")`` with empty feedback."""
+    from airframe import KimiRuntime
+
+    approval = ApprovalRequest(request_id="req-B")
+    patch_sdk["sdk_session"] = _FakeSdkSession(
+        wire_messages=[approval, _wire("TextPart", text="x")],
+    )
+
+    rt = KimiRuntime(api_key="sk-test")
+    sess = rt.session(on_permission=_RecordingPermissionCallback(["deny"]))
+    asyncio.run(sess.execute("hi"))
+
+    assert approval.resolved_with == "reject"
+    assert approval.resolved_feedback == ""
+    asyncio.run(sess.close())
+
+
+def test_approval_request_defer_resolves_reject_with_feedback(
+    patch_sdk: dict[str, Any],
+) -> None:
+    """defer → reject + feedback explaining the SDK has no async
+    "ask the human later" channel."""
+    from airframe import KimiRuntime
+
+    approval = ApprovalRequest(request_id="req-C")
+    patch_sdk["sdk_session"] = _FakeSdkSession(
+        wire_messages=[approval, _wire("TextPart", text="x")],
+    )
+
+    rt = KimiRuntime(api_key="sk-test")
+    sess = rt.session(on_permission=_RecordingPermissionCallback(["defer"]))
+    asyncio.run(sess.execute("hi"))
+
+    assert approval.resolved_with == "reject"
+    assert "deferred" in approval.resolved_feedback.lower()
+    asyncio.run(sess.close())
+
+
+def test_approval_request_auto_approved_when_no_callback_registered(
+    patch_sdk: dict[str, Any],
+) -> None:
+    """Defensive: an ApprovalRequest reaching the adapter without a
+    callback registered (shouldn't happen with yolo=True but the SDK
+    surface allows it) gets ``"approve"`` to keep the prompt stream
+    moving rather than stalling forever."""
+    from airframe import KimiRuntime
+
+    approval = ApprovalRequest(request_id="req-D")
+    patch_sdk["sdk_session"] = _FakeSdkSession(
+        wire_messages=[approval, _wire("TextPart", text="ok")],
+    )
+
+    rt = KimiRuntime(api_key="sk-test")
+    sess = rt.session()  # no on_permission
+    asyncio.run(sess.execute("hi"))
+
+    assert approval.resolved_with == "approve"
+    asyncio.run(sess.close())
+
+
+def test_permission_callback_dispatched_on_stream_path_too(
+    patch_sdk: dict[str, Any],
+) -> None:
+    """The dispatch is shared by execute() and stream() — verify the
+    stream path also calls the callback."""
+    from airframe import KimiRuntime
+
+    approval = ApprovalRequest(request_id="req-E")
+    patch_sdk["sdk_session"] = _FakeSdkSession(
+        wire_messages=[approval, _wire("TextPart", text="bye")],
+    )
+
+    callback = _RecordingPermissionCallback(["allow"])
+    rt = KimiRuntime(api_key="sk-test")
+    sess = rt.session(on_permission=callback)
+
+    async def drain() -> None:
+        async for _ in sess.stream("hi"):
+            pass
+
+    asyncio.run(drain())
+    assert approval.resolved_with == "approve"
+    assert len(callback.requests) == 1
+    asyncio.run(sess.close())
+
+
+# ---------------------------------------------------------------------------
+# Iteration D: MCP server refs
+# ---------------------------------------------------------------------------
+
+
+def test_session_without_mcp_servers_omits_mcp_configs(
+    patch_sdk: dict[str, Any],
+) -> None:
+    """No mcp_servers= → no ``mcp_configs`` kwarg on Session.create."""
+    from airframe import KimiRuntime
+
+    patch_sdk["sdk_session"] = _FakeSdkSession(
+        wire_messages=[_wire("TextPart", text="ok")],
+    )
+
+    rt = KimiRuntime(api_key="sk-test")
+    sess = rt.session()
+    asyncio.run(sess.execute("hi"))
+
+    assert "mcp_configs" not in patch_sdk["create_calls"][0]
+    asyncio.run(sess.close())
+
+
+def test_stdio_mcp_ref_translates_to_session_create_kwarg(
+    patch_sdk: dict[str, Any],
+) -> None:
+    """``McpServerRef(transport="stdio")`` lands as ``mcp_configs=[
+    {"mcpServers": {<name>: {"command": ..., "args": [...]}}}]`` on
+    Session.create."""
+    from airframe import KimiRuntime
+    from airframe.tools import McpServerRef
+
+    patch_sdk["sdk_session"] = _FakeSdkSession(
+        wire_messages=[_wire("TextPart", text="ok")],
+    )
+
+    ref = McpServerRef(
+        name="everything",
+        transport="stdio",
+        command=["uvx", "mcp-server-everything", "--flag"],
+    )
+    rt = KimiRuntime(api_key="sk-test")
+    sess = rt.session(mcp_servers=[ref])
+    asyncio.run(sess.execute("hi"))
+
+    mcp_configs = patch_sdk["create_calls"][0]["mcp_configs"]
+    assert mcp_configs == [
+        {
+            "mcpServers": {
+                "everything": {
+                    "command": "uvx",
+                    "args": ["mcp-server-everything", "--flag"],
+                }
+            }
+        }
+    ]
+    asyncio.run(sess.close())
+
+
+def test_http_mcp_ref_translates_with_auth_bearer_header(
+    patch_sdk: dict[str, Any],
+) -> None:
+    """``McpServerRef(transport="http", auth_token=...)`` →
+    ``{"url": ..., "transport": "http", "headers": {"Authorization":
+    "Bearer ..."}}``."""
+    from airframe import KimiRuntime
+    from airframe.tools import McpServerRef
+
+    patch_sdk["sdk_session"] = _FakeSdkSession(
+        wire_messages=[_wire("TextPart", text="ok")],
+    )
+
+    ref = McpServerRef(
+        name="github",
+        transport="http",
+        url="https://mcp.example.com/v1",
+        headers={"X-Trace-Id": "abc"},
+        auth_token="ghp_xxx",
+    )
+    rt = KimiRuntime(api_key="sk-test")
+    sess = rt.session(mcp_servers=[ref])
+    asyncio.run(sess.execute("hi"))
+
+    server_config = patch_sdk["create_calls"][0]["mcp_configs"][0]["mcpServers"]["github"]
+    assert server_config["url"] == "https://mcp.example.com/v1"
+    assert server_config["transport"] == "http"
+    assert server_config["headers"]["X-Trace-Id"] == "abc"
+    assert server_config["headers"]["Authorization"] == "Bearer ghp_xxx"
+    asyncio.run(sess.close())
+
+
+def test_sse_mcp_ref_translates_to_sse_transport(
+    patch_sdk: dict[str, Any],
+) -> None:
+    """``transport="sse"`` round-trips unchanged."""
+    from airframe import KimiRuntime
+    from airframe.tools import McpServerRef
+
+    patch_sdk["sdk_session"] = _FakeSdkSession(
+        wire_messages=[_wire("TextPart", text="ok")],
+    )
+
+    ref = McpServerRef(
+        name="livesearch",
+        transport="sse",
+        url="https://sse.example.com/feed",
+    )
+    rt = KimiRuntime(api_key="sk-test")
+    sess = rt.session(mcp_servers=[ref])
+    asyncio.run(sess.execute("hi"))
+
+    cfg = patch_sdk["create_calls"][0]["mcp_configs"][0]["mcpServers"]["livesearch"]
+    assert cfg["transport"] == "sse"
+    assert cfg["url"] == "https://sse.example.com/feed"
+    asyncio.run(sess.close())
+
+
+def test_caller_supplied_authorization_header_wins_over_auth_token(
+    patch_sdk: dict[str, Any],
+) -> None:
+    """Caller-supplied ``Authorization`` header beats ``auth_token=``
+    on collision — same precedence as the other adapters."""
+    from airframe import KimiRuntime
+    from airframe.tools import McpServerRef
+
+    patch_sdk["sdk_session"] = _FakeSdkSession(
+        wire_messages=[_wire("TextPart", text="ok")],
+    )
+
+    ref = McpServerRef(
+        name="srv",
+        transport="http",
+        url="https://x.example.com",
+        headers={"Authorization": "Custom abc"},
+        auth_token="overridden",
+    )
+    rt = KimiRuntime(api_key="sk-test")
+    sess = rt.session(mcp_servers=[ref])
+    asyncio.run(sess.execute("hi"))
+
+    server_config = patch_sdk["create_calls"][0]["mcp_configs"][0]["mcpServers"]["srv"]
+    assert server_config["headers"]["Authorization"] == "Custom abc"
+    asyncio.run(sess.close())
+
+
+def test_multiple_mcp_refs_bundle_into_one_mcpconfig(
+    patch_sdk: dict[str, Any],
+) -> None:
+    """Multiple refs land in a single ``MCPConfig.mcpServers`` dict
+    keyed by name — the SDK accepts a list of configs but bundling is
+    the canonical shape."""
+    from airframe import KimiRuntime
+    from airframe.tools import McpServerRef
+
+    patch_sdk["sdk_session"] = _FakeSdkSession(
+        wire_messages=[_wire("TextPart", text="ok")],
+    )
+
+    refs = [
+        McpServerRef(name="a", transport="stdio", command=["a"]),
+        McpServerRef(name="b", transport="http", url="https://b.example.com"),
+    ]
+    rt = KimiRuntime(api_key="sk-test")
+    sess = rt.session(mcp_servers=refs)
+    asyncio.run(sess.execute("hi"))
+
+    mcp_configs = patch_sdk["create_calls"][0]["mcp_configs"]
+    assert len(mcp_configs) == 1  # bundled
+    assert set(mcp_configs[0]["mcpServers"].keys()) == {"a", "b"}
+    asyncio.run(sess.close())
+
+
+def test_duplicate_mcp_ref_names_raise_at_session_construction() -> None:
+    """Two refs with the same ``name`` would silently overwrite in the
+    MCPConfig dict — raise a ValueError synchronously instead."""
+    from airframe import KimiRuntime
+    from airframe.tools import McpServerRef
+
+    refs = [
+        McpServerRef(name="dup", transport="stdio", command=["a"]),
+        McpServerRef(name="dup", transport="stdio", command=["b"]),
+    ]
+    rt = KimiRuntime(api_key="sk-test")
+    with pytest.raises(ValueError) as excinfo:
+        rt.session(mcp_servers=refs)
+    assert "duplicate" in str(excinfo.value).lower()
+
+
+# ---------------------------------------------------------------------------
+# Iteration D: function-tool permanent decline
+# ---------------------------------------------------------------------------
+
+
+def test_tools_kwarg_raises_unsupported_feature_pointing_at_mcp() -> None:
+    """``tools=`` is a permanent decline — the kimi-agent-sdk Python
+    surface has no programmatic Python-callable tool channel.
+    The error message must point consumers at ``mcp_servers=``."""
+    from pydantic import BaseModel
+
+    from airframe import KimiRuntime
+    from airframe.tools import FunctionTool
+
+    class _NoArgs(BaseModel):
+        pass
+
+    async def my_tool(params: _NoArgs) -> str:
+        return "ok"
+
+    tool = FunctionTool(
+        name="my_tool",
+        description="x",
+        params=_NoArgs,
+        handler=my_tool,
+    )
+    rt = KimiRuntime(api_key="sk-test")
+    with pytest.raises(UnsupportedFeatureError) as excinfo:
+        rt.session(tools=[tool])
+    assert excinfo.value.feature is Feature.TOOLS_FUNCTION
+    msg = str(excinfo.value)
+    assert "mcp_servers" in msg
