@@ -8,13 +8,33 @@ Anthropic Claude, Meta Llama, Mistral, Cohere, Amazon Nova, and
 AI21 Jamba behind one AWS-billed endpoint with IAM-rooted auth and
 region pinning.
 
-**Iteration D scope** (the current commit). Layers function tools
-+ permission gating onto the Iteration C baseline. The forced
-``submit_result`` tool used for ``schema=`` coexists with
-user-registered :class:`~airframe.tools.FunctionTool` entries —
-Converse's ``toolConfig`` slot accepts both — so structured output
-and function-calling are not mutually exclusive. ``Feature.TOOLS_FUNCTION``
-and ``Feature.PERMISSION_CALLBACK`` flip True.
+**Iteration E scope** (the current commit). Layers lifecycle hook
+emission + per-session budget caps + an in-tree pricing table
+onto the Iteration D baseline. ``Feature.LIFECYCLE_HOOKS``,
+``Feature.BUDGET_USD_CAP``, ``Feature.BUDGET_TURN_CAP`` flip True.
+
+The hook event surface emits six of airframe's eight
+:data:`~airframe.hooks.HookEventKind` literals — see
+``EMITTABLE_HOOK_KINDS`` on the runtime. ``pre_compact`` and
+``rate_limit`` stay unemittable: Converse has no compaction
+concept, and boto3's transient-retry chain swallows throttle
+events before they reach the adapter.
+
+Budget enforcement uses airframe's shared
+:func:`~airframe.sessions._enforce_budget_pre_turn` helper at the
+turn boundary. ``cost.cost_usd`` is computed from
+:data:`_BEDROCK_PRICING` (a curated point-in-time per-1k-token
+table) for known models; ``None`` for inference-profile / PT-ARN
+ids the table doesn't recognise — the budget gate only fires on
+turns whose cost it can compute, by design.
+
+**Iteration D scope** (prior commit). Function tools + permission
+gating: the forced ``submit_result`` tool used for ``schema=``
+coexists with user-registered :class:`~airframe.tools.FunctionTool`
+entries — Converse's ``toolConfig`` slot accepts both — so
+structured output and function-calling are not mutually exclusive.
+``Feature.TOOLS_FUNCTION`` and ``Feature.PERMISSION_CALLBACK``
+flipped True.
 
 The client-side tool loop in :meth:`BedrockSession.execute` /
 :meth:`BedrockSession.stream` parses ``toolUse`` content blocks
@@ -144,7 +164,12 @@ from airframe.protocol import (
     RuntimeResult,
     UnsupportedBindingError,
 )
-from airframe.sessions import _split_prompt_parts
+from airframe.sessions import (
+    _check_budget_supported,
+    _enforce_budget_pre_turn,
+    _fire_hook_event,
+    _split_prompt_parts,
+)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
@@ -256,6 +281,58 @@ _BEDROCK_METADATA: dict[str, _ModelMeta] = {
 }
 
 
+#: Per-1k-token USD rates for the curated Bedrock catalog.
+#:
+#: Rates are **point-in-time** — pulled from
+#: https://aws.amazon.com/bedrock/pricing/ at the time of writing
+#: (early 2026, us-east-1). Bedrock prices vary per region; the
+#: ``us-east-1`` figures are the broadest default and what
+#: :meth:`BedrockSession.execute` reports as ``cost.cost_usd`` for any
+#: known model id. Region-specific rates and provisioned-throughput
+#: pricing are out of scope — Iteration F may expose a ``pricing=``
+#: hook for callers that need a different rate table.
+#:
+#: Unknown ids (including every inference-profile / PT-ARN variant)
+#: return ``cost_usd=None`` from
+#: :meth:`BedrockSession.execute` rather than a guessed value — the
+#: honest signal that the caller has to source pricing themselves.
+#: Add new entries here when a model lands in the catalog.
+_BEDROCK_PRICING: dict[str, tuple[float, float]] = {
+    # (input_per_1k, output_per_1k)
+    # Anthropic Claude variants (us-east-1).
+    "anthropic.claude-3-5-haiku-20241022-v1:0": (0.0008, 0.004),
+    "anthropic.claude-3-5-sonnet-20241022-v2:0": (0.003, 0.015),
+    "anthropic.claude-3-opus-20240229-v1:0": (0.015, 0.075),
+    # Amazon Nova.
+    "amazon.nova-micro-v1:0": (0.000035, 0.00014),
+    "amazon.nova-lite-v1:0": (0.00006, 0.00024),
+    "amazon.nova-pro-v1:0": (0.0008, 0.0032),
+    # Meta Llama 3.1 Instruct.
+    "meta.llama3-1-8b-instruct-v1:0": (0.00022, 0.00022),
+    "meta.llama3-1-70b-instruct-v1:0": (0.00072, 0.00072),
+    "meta.llama3-1-405b-instruct-v1:0": (0.0024, 0.0024),
+    # Mistral Large.
+    "mistral.mistral-large-2407-v1:0": (0.002, 0.006),
+    # Cohere Command R+.
+    "cohere.command-r-plus-v1:0": (0.0025, 0.01),
+}
+
+
+def _compute_cost_usd(model_id: str, *, input_tokens: int, output_tokens: int) -> float | None:
+    """USD cost for ``model_id`` at the given token counts, or ``None``.
+
+    Returns ``None`` for any id not present in :data:`_BEDROCK_PRICING`
+    — including inference-profile prefixes and PT ARNs. Don't guess
+    rates: a ``None`` reported in structured logs is honest, a wrong
+    cost figure is silently misleading.
+    """
+    rates = _BEDROCK_PRICING.get(model_id)
+    if rates is None:
+        return None
+    input_per_1k, output_per_1k = rates
+    return (input_tokens / 1000.0) * input_per_1k + (output_tokens / 1000.0) * output_per_1k
+
+
 class BedrockRuntime(AgentRuntime):
     """AWS Bedrock Converse API as an :class:`AgentRuntime`.
 
@@ -329,9 +406,21 @@ class BedrockRuntime(AgentRuntime):
     #:   (Bedrock has no native fallback policy to defer to)
     #:   (Iteration D).
     #:
+    #: * ``LIFECYCLE_HOOKS`` — wired by firing
+    #:   :class:`~airframe.hooks.HookEvent` at six lifecycle moments
+    #:   synthesised from the client-side tool loop. See
+    #:   :attr:`EMITTABLE_HOOK_KINDS` for the set (Iteration E).
+    #: * ``BUDGET_USD_CAP`` / ``BUDGET_TURN_CAP`` — wired via the
+    #:   shared :func:`~airframe.sessions._enforce_budget_pre_turn`
+    #:   helper at every turn boundary. Cost source is the in-tree
+    #:   :data:`_BEDROCK_PRICING` table; unknown models report
+    #:   ``cost_usd=None`` and the USD cap then can't enforce on
+    #:   them (the honest signal) (Iteration E).
+    #:
     #: ``SESSION_RESUME`` stays False — Converse is stateless from the
     #: client's perspective. ``TOOLS_MCP_*`` stay False permanently —
-    #: Bedrock Converse has no MCP slot. Hooks + budget land in E.
+    #: Bedrock Converse has no MCP slot. ``STRUCTURED_OUTPUT_STRICT``
+    #: stays False — Converse has no "strict" tool-schema mode.
     SUPPORTED_FEATURES: ClassVar[frozenset[Feature]] = frozenset(
         {
             Feature.STRUCTURED_OUTPUT_JSON_SCHEMA,
@@ -343,6 +432,30 @@ class BedrockRuntime(AgentRuntime):
             Feature.FILE_INPUT,
             Feature.TOOLS_FUNCTION,
             Feature.PERMISSION_CALLBACK,
+            Feature.LIFECYCLE_HOOKS,
+            Feature.BUDGET_USD_CAP,
+            Feature.BUDGET_TURN_CAP,
+        }
+    )
+
+    #: The set of :class:`~airframe.hooks.HookEventKind` literals this
+    #: adapter can emit through ``on_event=``. Six of the eight
+    #: canonical kinds — Bedrock's wire model doesn't surface the
+    #: other two:
+    #:
+    #: * ``pre_compact`` — Converse has no server-side compaction
+    #:   concept; the client-side ``messages=[]`` buffer is the only
+    #:   history mechanism.
+    #: * ``rate_limit`` — boto3's transient-retry chain handles
+    #:   throttle events silently before the adapter sees them.
+    EMITTABLE_HOOK_KINDS: ClassVar[frozenset[str]] = frozenset(
+        {
+            "session_start",
+            "session_end",
+            "user_prompt_submit",
+            "pre_tool_use",
+            "post_tool_use",
+            "tool_failure",
         }
     )
 
@@ -474,11 +587,6 @@ class BedrockRuntime(AgentRuntime):
                 "hand-craft the shim.",
                 feature=Feature.TOOLS_MCP_STDIO,
             )
-        if on_event is not None:
-            raise UnsupportedFeatureError(
-                "BedrockSession: LIFECYCLE_HOOKS lands in Iteration E.",
-                feature=Feature.LIFECYCLE_HOOKS,
-            )
         if provider_options is not None:
             raise UnsupportedFeatureError(
                 "BedrockSession: BedrockOptions namespace lands in Iteration F. "
@@ -491,6 +599,7 @@ class BedrockRuntime(AgentRuntime):
             model_id=model_id,
             tools=tools,
             on_permission=on_permission,
+            on_event=on_event,
         )
 
     async def list_models(self) -> list[ModelInfo]:
@@ -707,6 +816,7 @@ class BedrockSession:
         model_id: str,
         tools: list[FunctionTool] | None = None,
         on_permission: PermissionCallback | None = None,
+        on_event: Callable[[HookEvent], None] | None = None,
     ) -> None:
         self._runtime = runtime
         self._model_id = model_id
@@ -724,6 +834,17 @@ class BedrockSession:
             [_translate_one_tool_for_bedrock(t) for t in tools] if tools else []
         )
         self._on_permission = on_permission
+        # Lifecycle hook observer (Iteration E). Synthesised events
+        # from the client-side tool loop — no native Bedrock event
+        # channel.
+        self._on_event = on_event
+        self._session_start_fired = False
+        self._session_end_fired = False
+        # Per-session running budget (Iteration E). Both caps enforced
+        # at the turn boundary in v0; mid-turn interrupts are additive
+        # later via the cancel() plumbing.
+        self._cumulative_cost_usd: float = 0.0
+        self._turn_count: int = 0
 
     # --- AgentSession interface --------------------------------------------
 
@@ -739,7 +860,19 @@ class BedrockSession:
     ) -> RuntimeResult:
         if self._closed:
             raise RuntimeError("session is closed")
-        _enforce_budget_gates(max_turns=max_turns, max_budget_usd=max_budget_usd)
+        _check_budget_supported(
+            max_turns=max_turns,
+            max_budget_usd=max_budget_usd,
+            adapter_label=self._runtime.label,
+            supports=self._runtime.supports,
+        )
+        _enforce_budget_pre_turn(
+            max_turns=max_turns,
+            max_budget_usd=max_budget_usd,
+            cumulative_cost_usd=self._cumulative_cost_usd,
+            turn_count=self._turn_count,
+            adapter_label=self._runtime.label,
+        )
 
         content = _build_user_content(prompt, adapter_label=self._runtime.label)
         thinking_field = _translate_thinking_for_bedrock(
@@ -747,13 +880,20 @@ class BedrockSession:
         )
         pre_len = len(self._messages)
         self._messages.append({"role": "user", "content": content})
+        self._fire_session_start_if_needed()
+        _fire_hook_event(
+            self._on_event,
+            "user_prompt_submit",
+            session_id=None,
+            payload={"prompt": _flatten_prompt_text(content), "blocks": len(content)},
+        )
 
         task = asyncio.create_task(
             self._do_execute(schema=schema, thinking_field=thinking_field, timeout=timeout)
         )
         self._in_flight_task = task
         try:
-            return await task
+            result = await task
         except asyncio.CancelledError as exc:
             del self._messages[pre_len:]
             raise RuntimeCancelledError(f"{self._runtime.label}: cancelled") from exc
@@ -762,6 +902,9 @@ class BedrockSession:
             raise
         finally:
             self._in_flight_task = None
+        self._turn_count += 1
+        self._cumulative_cost_usd += result.cost.cost_usd or 0.0
+        return result
 
     async def _do_execute(
         self,
@@ -832,8 +975,28 @@ class BedrockSession:
             # Dispatch user-tool calls, append toolResult blocks, loop.
             result_blocks: list[dict[str, Any]] = []
             for tool_use_id, name, args in user_tool_uses:
+                _fire_hook_event(
+                    self._on_event,
+                    "pre_tool_use",
+                    session_id=None,
+                    payload={
+                        "tool_name": name,
+                        "tool_call_id": tool_use_id,
+                        "arguments": _arguments_preview(args),
+                    },
+                )
                 output, is_error = await self._invoke_tool_with_permission(
                     tool_name=name, tool_args=args
+                )
+                _fire_hook_event(
+                    self._on_event,
+                    "tool_failure" if is_error else "post_tool_use",
+                    session_id=None,
+                    payload={
+                        "tool_name": name,
+                        "tool_call_id": tool_use_id,
+                        ("error" if is_error else "output"): output,
+                    },
                 )
                 result_blocks.append(
                     _build_tool_result_block(
@@ -920,7 +1083,19 @@ class BedrockSession:
     ) -> AsyncIterator[RuntimeEvent]:
         if self._closed:
             raise RuntimeError("session is closed")
-        _enforce_budget_gates(max_turns=max_turns, max_budget_usd=max_budget_usd)
+        _check_budget_supported(
+            max_turns=max_turns,
+            max_budget_usd=max_budget_usd,
+            adapter_label=self._runtime.label,
+            supports=self._runtime.supports,
+        )
+        _enforce_budget_pre_turn(
+            max_turns=max_turns,
+            max_budget_usd=max_budget_usd,
+            cumulative_cost_usd=self._cumulative_cost_usd,
+            turn_count=self._turn_count,
+            adapter_label=self._runtime.label,
+        )
 
         content = _build_user_content(prompt, adapter_label=self._runtime.label)
         thinking_field = _translate_thinking_for_bedrock(
@@ -929,6 +1104,13 @@ class BedrockSession:
         pre_len = len(self._messages)
         self._messages.append({"role": "user", "content": content})
         self._stream_cancelled = False
+        self._fire_session_start_if_needed()
+        _fire_hook_event(
+            self._on_event,
+            "user_prompt_submit",
+            session_id=None,
+            payload={"prompt": _flatten_prompt_text(content), "blocks": len(content)},
+        )
 
         client = await self._runtime._get_runtime_client()
         full_text: list[str] = []
@@ -985,6 +1167,8 @@ class BedrockSession:
                         cost=cost,
                         finish=final_stop,
                     )
+                    self._turn_count += 1
+                    self._cumulative_cost_usd += result.cost.cost_usd or 0.0
                     yield TurnComplete(result=result)
                     return
 
@@ -996,8 +1180,28 @@ class BedrockSession:
                         tool_call_id=tool_use_id,
                         arguments_preview=_arguments_preview(args),
                     )
+                    _fire_hook_event(
+                        self._on_event,
+                        "pre_tool_use",
+                        session_id=None,
+                        payload={
+                            "tool_name": name,
+                            "tool_call_id": tool_use_id,
+                            "arguments": _arguments_preview(args),
+                        },
+                    )
                     output, is_error = await self._invoke_tool_with_permission(
                         tool_name=name, tool_args=args
+                    )
+                    _fire_hook_event(
+                        self._on_event,
+                        "tool_failure" if is_error else "post_tool_use",
+                        session_id=None,
+                        payload={
+                            "tool_name": name,
+                            "tool_call_id": tool_use_id,
+                            ("error" if is_error else "output"): output,
+                        },
                     )
                     yield ToolCallResult(
                         tool_call_id=tool_use_id,
@@ -1162,6 +1366,20 @@ class BedrockSession:
     async def close(self) -> None:
         # Idempotent + never raises. Drops the messages buffer; the
         # shared runtime client stays alive for sibling sessions.
+        # Fires session_end exactly once (only if session_start fired
+        # — closing a never-used session is the no-op path).
+        if self._session_start_fired and not self._session_end_fired:
+            self._session_end_fired = True
+            _fire_hook_event(
+                self._on_event,
+                "session_end",
+                session_id=None,
+                payload={
+                    "model": self._model_id,
+                    "turn_count": self._turn_count,
+                    "cumulative_cost_usd": self._cumulative_cost_usd,
+                },
+            )
         self._closed = True
         self._messages.clear()
 
@@ -1172,6 +1390,18 @@ class BedrockSession:
             f"BedrockSession cannot unwrap to {cls!r}; the aioboto3 "
             f"bedrock-runtime client lives on the runtime — reach it via "
             f"``runtime.unwrap(BedrockRuntimeClient)`` instead."
+        )
+
+    def _fire_session_start_if_needed(self) -> None:
+        """Synthesise ``session_start`` on first execute()/stream()."""
+        if self._session_start_fired:
+            return
+        self._session_start_fired = True
+        _fire_hook_event(
+            self._on_event,
+            "session_start",
+            session_id=None,
+            payload={"model": self._model_id},
         )
 
     # --- Internals ----------------------------------------------------------
@@ -1215,26 +1445,15 @@ class BedrockSession:
 # ---------------------------------------------------------------------------
 
 
-def _enforce_budget_gates(
-    *,
-    max_turns: int | None,
-    max_budget_usd: float | None,
-) -> None:
-    """Decline budget kwargs until Iteration E wires the cost table.
+def _flatten_prompt_text(content: list[dict[str, Any]]) -> str:
+    """Pull every ``{"text": ...}`` block out of a user-message content list.
 
-    Per the "no silent fallbacks" principle: a capability declined
-    must raise, never quietly drop the request.
+    Used for the ``user_prompt_submit`` hook payload — the model
+    sees the full content (text + images + files) but the observer
+    typically only cares about the readable bit. Returns ``""`` for
+    image/file-only prompts.
     """
-    if max_turns is not None:
-        raise UnsupportedFeatureError(
-            "BedrockSession: BUDGET_TURN_CAP lands in Iteration E.",
-            feature=Feature.BUDGET_TURN_CAP,
-        )
-    if max_budget_usd is not None:
-        raise UnsupportedFeatureError(
-            "BedrockSession: BUDGET_USD_CAP lands in Iteration E.",
-            feature=Feature.BUDGET_USD_CAP,
-        )
+    return "\n\n".join(b["text"] for b in content if isinstance(b, dict) and "text" in b)
 
 
 #: Bedrock Converse's recognised image formats (the ``format`` field on
@@ -1675,16 +1894,21 @@ def _build_cost_record(
 ) -> CostRecord:
     """Build a :class:`CostRecord` from Converse ``usage``.
 
-    Iteration B leaves ``cost_usd=None`` — the pricing table arrives
-    in Iteration E alongside ``BUDGET_USD_CAP``. Token counters are
-    populated regardless so structured logs are useful immediately.
+    ``cost_usd`` is computed from :data:`_BEDROCK_PRICING` when the
+    model id is known; ``None`` for unknown ids (inference-profile
+    prefixes, PT ARNs, models AWS shipped after the pricing table
+    was last refreshed). Token counters are populated regardless.
     """
+    input_tokens = int(usage.get("inputTokens") or 0)
+    output_tokens = int(usage.get("outputTokens") or 0)
     return CostRecord(
         provider_id=provider_id,
         model_id=model_id,
-        cost_usd=None,
-        input_tokens=int(usage.get("inputTokens") or 0),
-        output_tokens=int(usage.get("outputTokens") or 0),
+        cost_usd=_compute_cost_usd(
+            model_id, input_tokens=input_tokens, output_tokens=output_tokens
+        ),
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
         cache_read_tokens=int(usage.get("cacheReadInputTokens") or 0),
         cache_write_tokens=int(usage.get("cacheWriteInputTokens") or 0),
         finish=finish,

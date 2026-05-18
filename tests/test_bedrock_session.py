@@ -129,7 +129,9 @@ async def test_execute_plain_text_returns_text(
     assert result.cost.input_tokens == 100
     assert result.cost.output_tokens == 50
     assert result.cost.provider_id == "bedrock"
-    assert result.cost.cost_usd is None  # Pricing table lands in Iteration E
+    # Default model is in _BEDROCK_PRICING — cost is computed.
+    assert result.cost.cost_usd is not None
+    assert result.cost.cost_usd > 0
 
     # Outgoing call: messages contains the user turn; modelId set.
     call_kwargs = client.converse.await_args.kwargs
@@ -516,30 +518,41 @@ async def test_runtime_execute_is_sugar_for_session(
 
 
 # ---------------------------------------------------------------------------
-# Iteration E gates — budget kwargs decline cleanly until pricing lands
+# Iteration E — budget caps + lifecycle hooks
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_execute_max_turns_raises_unsupported(
+async def test_execute_max_turns_accepts_then_trips_on_next_turn(
     runtime_with_mock_client: tuple[BedrockRuntime, MagicMock],
 ) -> None:
-    rt, _ = runtime_with_mock_client
+    from airframe.errors import RuntimeBudgetExceededError
+
+    rt, client = runtime_with_mock_client
     sess = rt.session()
-    with pytest.raises(UnsupportedFeatureError) as exc:
-        await sess.execute("hi", max_turns=3)
-    assert exc.value.feature == Feature.BUDGET_TURN_CAP
+    # First turn passes (turn_count goes 0 -> 1).
+    await sess.execute("first", max_turns=1)
+    # Second turn would push turn_count past the cap.
+    with pytest.raises(RuntimeBudgetExceededError) as exc:
+        await sess.execute("second", max_turns=1)
+    assert exc.value.kind == "turns"
 
 
 @pytest.mark.asyncio
-async def test_execute_max_budget_usd_raises_unsupported(
+async def test_execute_max_budget_usd_trips_when_exceeded(
     runtime_with_mock_client: tuple[BedrockRuntime, MagicMock],
 ) -> None:
-    rt, _ = runtime_with_mock_client
+    from airframe.errors import RuntimeBudgetExceededError
+
+    rt, client = runtime_with_mock_client
     sess = rt.session()
-    with pytest.raises(UnsupportedFeatureError) as exc:
-        await sess.execute("hi", max_budget_usd=1.0)
-    assert exc.value.feature == Feature.BUDGET_USD_CAP
+    # First call costs a tiny amount; second call would already be at the cap.
+    await sess.execute("first")
+    # Force the running total above any small cap.
+    sess._cumulative_cost_usd = 1.0
+    with pytest.raises(RuntimeBudgetExceededError) as exc:
+        await sess.execute("second", max_budget_usd=0.5)
+    assert exc.value.kind == "usd"
 
 
 # ---------------------------------------------------------------------------
@@ -1145,6 +1158,173 @@ def _final_text_stream_chunks(text: str) -> list[dict[str, Any]]:
         {"messageStop": {"stopReason": "end_turn"}},
         {"metadata": {"usage": {"inputTokens": 30, "outputTokens": 5}}},
     ]
+
+
+@pytest.mark.asyncio
+async def test_lifecycle_hooks_fire_around_execute(
+    runtime_with_mock_client: tuple[BedrockRuntime, MagicMock],
+) -> None:
+    """session_start fires on first execute; user_prompt_submit on each;
+    session_end fires on close()."""
+    rt, _ = runtime_with_mock_client
+    events: list[Any] = []
+    sess = rt.session(on_event=events.append)
+    # No events fire on bare session() — hook plumbing waits for first turn.
+    assert events == []
+    await sess.execute("first")
+    kinds_after_first = [e.kind for e in events]
+    assert kinds_after_first == ["session_start", "user_prompt_submit"]
+    await sess.execute("second")
+    assert [e.kind for e in events][-1] == "user_prompt_submit"
+    # session_start fired exactly once.
+    assert sum(1 for e in events if e.kind == "session_start") == 1
+    await sess.close()
+    assert events[-1].kind == "session_end"
+    # session_end payload carries the running cost + turn count.
+    assert events[-1].payload["turn_count"] == 2
+    assert events[-1].payload["cumulative_cost_usd"] > 0
+
+
+@pytest.mark.asyncio
+async def test_session_end_skipped_on_never_used_session(
+    runtime_with_mock_client: tuple[BedrockRuntime, MagicMock],
+) -> None:
+    """Closing a session that never ran a turn doesn't fire session_end."""
+    rt, _ = runtime_with_mock_client
+    events: list[Any] = []
+    sess = rt.session(on_event=events.append)
+    await sess.close()
+    assert events == []
+
+
+@pytest.mark.asyncio
+async def test_session_end_fires_only_once(
+    runtime_with_mock_client: tuple[BedrockRuntime, MagicMock],
+) -> None:
+    rt, _ = runtime_with_mock_client
+    events: list[Any] = []
+    sess = rt.session(on_event=events.append)
+    await sess.execute("hi")
+    await sess.close()
+    await sess.close()
+    await sess.close()
+    end_count = sum(1 for e in events if e.kind == "session_end")
+    assert end_count == 1
+
+
+@pytest.mark.asyncio
+async def test_tool_hooks_fire_around_handler(
+    runtime_with_mock_client: tuple[BedrockRuntime, MagicMock],
+) -> None:
+    """pre_tool_use fires before the handler; post_tool_use fires after success."""
+    rt, client = runtime_with_mock_client
+    tool = _make_calc_tool()
+    client.converse = AsyncMock(
+        side_effect=[
+            _tool_use_response("tc_hooks", "calculator", {"a": 1, "b": 2}),
+            _converse_response(text="3"),
+        ]
+    )
+    events: list[Any] = []
+    sess = rt.session(tools=[tool], on_event=events.append)
+    await sess.execute("compute")
+    kinds = [e.kind for e in events]
+    assert "pre_tool_use" in kinds
+    assert "post_tool_use" in kinds
+    # pre fires before post.
+    assert kinds.index("pre_tool_use") < kinds.index("post_tool_use")
+    pre = next(e for e in events if e.kind == "pre_tool_use")
+    assert pre.payload["tool_name"] == "calculator"
+    assert pre.payload["tool_call_id"] == "tc_hooks"
+    post = next(e for e in events if e.kind == "post_tool_use")
+    assert post.payload["output"] == 3
+
+
+@pytest.mark.asyncio
+async def test_tool_failure_hook_fires_on_handler_error(
+    runtime_with_mock_client: tuple[BedrockRuntime, MagicMock],
+) -> None:
+    """tool_failure fires (in place of post_tool_use) when handler raises."""
+    rt, client = runtime_with_mock_client
+
+    async def boom(_p: _AddParams) -> int:
+        raise RuntimeError("nope")
+
+    tool = _make_calc_tool(handler=boom)
+    client.converse = AsyncMock(
+        side_effect=[
+            _tool_use_response("tc_fail", "calculator", {"a": 1, "b": 2}),
+            _converse_response(text="Skipping."),
+        ]
+    )
+    events: list[Any] = []
+    sess = rt.session(tools=[tool], on_event=events.append)
+    await sess.execute("compute")
+    kinds = [e.kind for e in events]
+    assert "tool_failure" in kinds
+    assert "post_tool_use" not in kinds
+    fail = next(e for e in events if e.kind == "tool_failure")
+    assert "nope" in fail.payload["error"]
+
+
+@pytest.mark.asyncio
+async def test_cumulative_cost_accumulates_across_turns(
+    runtime_with_mock_client: tuple[BedrockRuntime, MagicMock],
+) -> None:
+    rt, _ = runtime_with_mock_client
+    sess = rt.session()
+    await sess.execute("first")
+    cost_after_one = sess._cumulative_cost_usd
+    await sess.execute("second")
+    assert sess._cumulative_cost_usd == pytest.approx(2 * cost_after_one)
+    assert sess._turn_count == 2
+
+
+# --- pricing table -----------------------------------------------------------
+
+
+def test_compute_cost_usd_known_model() -> None:
+    from airframe.adapters.bedrock import _compute_cost_usd
+
+    # Default model: anthropic.claude-3-5-haiku — 0.0008 input, 0.004 output per 1k.
+    # 1000 in + 500 out = 1.0 * 0.0008 + 0.5 * 0.004 = 0.0028
+    cost = _compute_cost_usd(
+        "anthropic.claude-3-5-haiku-20241022-v1:0",
+        input_tokens=1000,
+        output_tokens=500,
+    )
+    assert cost == pytest.approx(0.0028, rel=1e-3)
+
+
+def test_compute_cost_usd_unknown_model_is_none() -> None:
+    from airframe.adapters.bedrock import _compute_cost_usd
+
+    # Inference-profile prefix not in the table.
+    cost = _compute_cost_usd(
+        "us.anthropic.claude-3-5-sonnet-20241022-v2:0",
+        input_tokens=1000,
+        output_tokens=500,
+    )
+    assert cost is None
+    # PT ARN not in the table either.
+    cost = _compute_cost_usd(
+        "arn:aws:bedrock:us-east-1:123456789012:provisioned-model/abc",
+        input_tokens=1,
+        output_tokens=1,
+    )
+    assert cost is None
+
+
+def test_compute_cost_usd_curated_models_all_have_rates() -> None:
+    """Every entry in _BEDROCK_METADATA must also appear in _BEDROCK_PRICING.
+
+    Pinned so adding a model to the metadata catalog without
+    pricing surfaces as a test failure — easy mistake to make.
+    """
+    from airframe.adapters.bedrock import _BEDROCK_METADATA, _BEDROCK_PRICING
+
+    missing = set(_BEDROCK_METADATA) - set(_BEDROCK_PRICING)
+    assert not missing, f"models in metadata but missing from pricing: {sorted(missing)}"
 
 
 @pytest.mark.asyncio

@@ -68,18 +68,18 @@ def test_constructor_model_overrides_env(monkeypatch: pytest.MonkeyPatch) -> Non
 
 
 # ---------------------------------------------------------------------------
-# SUPPORTED_FEATURES — Iteration D adds tools + permission
+# SUPPORTED_FEATURES — Iteration E adds hooks + budget caps
 # ---------------------------------------------------------------------------
 
 
-def test_supported_features_iteration_d_set() -> None:
-    """Iteration D adds TOOLS_FUNCTION + PERMISSION_CALLBACK on top of
-    Iteration C's seven flags.
+def test_supported_features_iteration_e_set() -> None:
+    """Iteration E adds LIFECYCLE_HOOKS + BUDGET_USD_CAP + BUDGET_TURN_CAP.
 
-    Hooks + budget land in Iteration E. MCP transports stay False
-    permanently — Bedrock Converse has no MCP slot.
+    MCP transports + SESSION_RESUME + STRUCTURED_OUTPUT_STRICT stay
+    False permanently — Bedrock Converse has no equivalent on the
+    wire.
     """
-    iteration_b_through_d = {
+    iteration_b_through_e = {
         Feature.STRUCTURED_OUTPUT_JSON_SCHEMA,
         Feature.STREAMING,
         Feature.CANCEL,
@@ -89,32 +89,51 @@ def test_supported_features_iteration_d_set() -> None:
         Feature.FILE_INPUT,
         Feature.TOOLS_FUNCTION,
         Feature.PERMISSION_CALLBACK,
+        Feature.LIFECYCLE_HOOKS,
+        Feature.BUDGET_USD_CAP,
+        Feature.BUDGET_TURN_CAP,
     }
-    for feature in iteration_b_through_d:
+    for feature in iteration_b_through_e:
         assert feature in BedrockRuntime.SUPPORTED_FEATURES
-    assert len(BedrockRuntime.SUPPORTED_FEATURES) == 9
+    assert len(BedrockRuntime.SUPPORTED_FEATURES) == 12
 
 
-def test_supports_iteration_d_flags_true() -> None:
+def test_supports_iteration_e_flags_true() -> None:
     rt = BedrockRuntime()
-    assert rt.supports(Feature.TOOLS_FUNCTION) is True
-    assert rt.supports(Feature.PERMISSION_CALLBACK) is True
+    assert rt.supports(Feature.LIFECYCLE_HOOKS) is True
+    assert rt.supports(Feature.BUDGET_USD_CAP) is True
+    assert rt.supports(Feature.BUDGET_TURN_CAP) is True
 
 
-def test_supports_returns_false_for_later_iteration_features() -> None:
+def test_supports_returns_false_for_permanent_declines() -> None:
+    """Three flags are *permanent* declines — pin them so future
+    iterations don't silently flip them True."""
     rt = BedrockRuntime()
-    later = {
+    permanent = {
         Feature.SESSION_RESUME,
         Feature.TOOLS_MCP_STDIO,
         Feature.TOOLS_MCP_HTTP,
         Feature.TOOLS_MCP_SSE,
-        Feature.LIFECYCLE_HOOKS,
-        Feature.BUDGET_USD_CAP,
-        Feature.BUDGET_TURN_CAP,
         Feature.STRUCTURED_OUTPUT_STRICT,
     }
-    for feature in later:
+    for feature in permanent:
         assert rt.supports(feature) is False, f"unexpected True for {feature.name}"
+
+
+def test_emittable_hook_kinds_six_kinds() -> None:
+    """Six of the eight canonical kinds — see EMITTABLE_HOOK_KINDS docstring."""
+    expected = {
+        "session_start",
+        "session_end",
+        "user_prompt_submit",
+        "pre_tool_use",
+        "post_tool_use",
+        "tool_failure",
+    }
+    assert set(BedrockRuntime.EMITTABLE_HOOK_KINDS) == expected
+    # pre_compact / rate_limit are intentionally absent.
+    assert "pre_compact" not in BedrockRuntime.EMITTABLE_HOOK_KINDS
+    assert "rate_limit" not in BedrockRuntime.EMITTABLE_HOOK_KINDS
 
 
 def test_supports_mcp_transports_permanent_decline() -> None:
