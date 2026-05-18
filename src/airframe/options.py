@@ -242,26 +242,28 @@ class BedrockOptions:
 class KimiOptions:
     """Vendor-specific options for :class:`KimiRuntime`.
 
-    Empty scaffolding in Iteration A — the namespace exists so the
-    adapter's ``session(provider_options=)`` can type-check against
-    it (and reject every other vendor's namespace per the tagged-
-    union discipline). Fields populate as the corresponding Kimi
-    Agent SDK features land in Iterations B–F per
+    Iteration B adds ``working_directory``; the remaining fields
+    populate as later iterations land per
     ``dev-docs/kimi-adapter-plan.md``:
 
-    * ``working_directory`` (Iteration B) — per-session working
-      directory the SDK's filesystem-affecting tools operate from.
-      Maps to ``Session.create(work_dir=...)``.
     * ``yolo`` (Iteration D) — auto-approve all tool / shell
       invocations. Mutually exclusive with ``on_permission=`` at the
-      session factory.
+      session factory. Iteration B hard-codes ``yolo=True`` on the
+      SDK call because ``PermissionCallback`` isn't wired yet; D
+      adds the proper bridge and surfaces ``yolo`` as a knob.
     * ``additional_mcp_servers`` / ``skill_directories`` /
       ``additional_config_fields`` (Iterations D / F) — pass-throughs
       for vendor-specific knobs airframe doesn't surface portably.
 
-    All fields default to "unset" so an empty :class:`KimiOptions()`
-    instance is a no-op the SDK never sees.
+    Attributes:
+        working_directory: Per-session working directory the SDK's
+            filesystem-affecting tools operate relative to. Resolves
+            on the adapter side via ``KaosPath`` (the SDK's required
+            path type) — pass a plain ``str`` or ``pathlib.Path``.
+            ``None`` defaults to the current working directory.
     """
+
+    working_directory: str | None = None
 
 
 #: Tagged union of provider-specific options. Adapters

@@ -32,6 +32,7 @@ import asyncio
 from typing import Any
 
 import pytest
+from pydantic import BaseModel
 
 from airframe.adapters.kimi import (
     DEFAULT_KIMI_BASE_URL,
@@ -161,20 +162,26 @@ def test_validate_binding_rejects_foreign_provider_id() -> None:
 # --- supports() ---------------------------------------------------------------
 
 
-def test_supports_only_declares_structured_output_floor() -> None:
-    """Iteration A declares only the universal ``STRUCTURED_OUTPUT_JSON_SCHEMA``
-    floor that every airframe adapter must implement.
+def test_supports_iteration_b_feature_matrix() -> None:
+    """Iteration B flips STREAMING / CANCEL / SESSION_RESUME on.
 
-    Iterations B–F flip the remaining flags on as features land; this
-    test pins the Iteration-A starting state and will need updating
-    in B.
+    ``STRUCTURED_OUTPUT_JSON_SCHEMA`` stays True (the conformance
+    floor every airframe adapter declares), but
+    ``execute(schema=...)`` raises :class:`NotImplementedError` until
+    Iteration D wires the MCP-based forced-tool path. The rest of
+    the matrix flips on in Iterations C–F per the plan.
     """
     rt = _make_runtime()
-    expected_true = {Feature.STRUCTURED_OUTPUT_JSON_SCHEMA}
+    expected_true = {
+        Feature.STRUCTURED_OUTPUT_JSON_SCHEMA,
+        Feature.STREAMING,
+        Feature.CANCEL,
+        Feature.SESSION_RESUME,
+    }
     for feature in Feature:
         want = feature in expected_true
         assert rt.supports(feature) is want, (
-            f"Iteration A: {feature} supports() should be {want}; got {rt.supports(feature)}"
+            f"Iteration B: {feature} supports() should be {want}; got {rt.supports(feature)}"
         )
 
 
@@ -215,18 +222,7 @@ def test_reset_is_idempotent() -> None:
     asyncio.run(rt.reset())
 
 
-# --- execute() — explicitly NotImplemented in Iteration A --------------------
-
-
-def test_execute_raises_notimplementederror_pointing_at_iteration_b() -> None:
-    rt = _make_runtime()
-    with pytest.raises(NotImplementedError) as excinfo:
-        asyncio.run(rt.execute("hi"))
-    msg = str(excinfo.value)
-    # The message must signal it's an iteration-gated decline rather than a
-    # protocol gap — consumers see a clear "this lands later" hint.
-    assert "Iteration B" in msg
-    assert "kimi-agent-sdk" in msg
+# --- execute() — behavioural surface tested in tests/test_kimi_session.py ----
 
 
 def test_execute_signature_accepts_schema_kwarg_default_none() -> None:
@@ -244,6 +240,27 @@ def test_execute_signature_accepts_schema_kwarg_default_none() -> None:
     assert schema.default is None
     # No legacy gate string — would fail the conformance contract.
     assert "plain-text execute() is not wired" not in inspect.getsource(KimiRuntime.execute)
+
+
+def test_execute_with_schema_raises_pointing_at_iteration_d() -> None:
+    """``execute(schema=...)`` raises until Iteration D wires the MCP forced-tool.
+
+    The conformance suite declares ``STRUCTURED_OUTPUT_JSON_SCHEMA = True``
+    so callers see the capability advertised, but the actual delivery
+    path isn't ready yet — schema callers get a clear NotImplementedError
+    pointing at Iteration D.
+    """
+
+    class _Schema(BaseModel):
+        x: int
+
+    rt = _make_runtime()
+    sess = rt.session()
+    with pytest.raises(NotImplementedError) as excinfo:
+        asyncio.run(sess.execute("hi", schema=_Schema))
+    msg = str(excinfo.value)
+    assert "Iteration D" in msg
+    asyncio.run(sess.close())
 
 
 # --- list_models() — fallback catalogue --------------------------------------
@@ -302,17 +319,20 @@ def test_session_accepts_kimi_options_namespace() -> None:
     asyncio.run(sess.close())
 
 
-def test_session_resume_raises_until_feature_flips() -> None:
-    """Session resume isn't wired in Iteration A.
+def test_session_resume_eagerly_populates_session_id() -> None:
+    """Iteration B: ``session(resume=…)`` surfaces the ID before the SDK call.
 
-    Per the conformance contract ``test_session_resume_not_implemented_
-    until_feature_flips``: when SESSION_RESUME is False, resume=
-    must raise. Iteration A returns _ThinAgentSession via _open_thin_
-    session which raises NotImplementedError.
+    The actual ``Session.resume(work_dir, session_id)`` round-trip is
+    deferred to the first ``execute()``/``stream()``; the unit test only
+    pins that the ID is observable on the session immediately. Behavioural
+    coverage of the resume path (including the "ID not found" branch
+    that surfaces as :class:`RuntimeProtocolError`) lives in the
+    SDK-mock tests under ``tests/test_kimi_session.py``.
     """
     rt = _make_runtime()
-    with pytest.raises(NotImplementedError):
-        rt.session(resume="some-session-id")
+    sess = rt.session(resume="prior-session-id")
+    assert sess.id == "prior-session-id"
+    asyncio.run(sess.close())
 
 
 # --- constructor accepts the documented kwargs --------------------------------

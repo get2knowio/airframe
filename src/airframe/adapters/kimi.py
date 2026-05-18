@@ -7,20 +7,20 @@ this adapter is the closest analogue to :class:`ClaudeCodeRuntime` in
 the lineup — both are subprocess-class agent SDKs with sessions,
 streaming, approvals, and MCP.
 
-**Iteration A — scaffolding only.** This module ships the protocol
-surface: identity, auth resolution, ``validate_binding``,
-``supports``, ``unwrap``, an offline-fallback ``list_models()``, and
-a bespoke :class:`KimiSession` whose execute / stream signatures
-match the protocol exactly (including the Phase 5 ``max_turns`` /
-``max_budget_usd`` kwargs the conformance contracts pin). Every
-per-feature kwarg is gated against the corresponding
-:class:`Feature` flag and raises :class:`UnsupportedFeatureError`
-when the capability is declined. ``execute()`` raises
-:class:`NotImplementedError` *after* the gates pass — the SDK-backed
-implementation lands in Iteration B. ``SUPPORTED_FEATURES`` declares
-only :data:`Feature.STRUCTURED_OUTPUT_JSON_SCHEMA` (the universal
-floor); the rest flip on in Iterations B–F per
-``dev-docs/kimi-adapter-plan.md``.
+**Iteration B.** The protocol surface from Iteration A is now SDK-
+backed: :class:`KimiSession` lazily creates / resumes a
+``kimi_agent_sdk.Session`` on first :meth:`execute` / :meth:`stream`,
+drives a turn through ``session.prompt()``, translates the SDK's
+``WireMessage`` stream into airframe's :class:`RuntimeEvent` union,
+and surfaces cost telemetry from ``TokenUsage`` events.
+:data:`Feature.STREAMING`, :data:`Feature.CANCEL`, and
+:data:`Feature.SESSION_RESUME` flip True. Structured output (the
+``schema=`` kwarg on :meth:`execute`) still raises
+:class:`NotImplementedError` — kimi-agent-sdk exposes no JSON-schema
+constraint knob, and the wrap-don't-rewrite principle in
+``CLAUDE.md`` rules out prompt-engineering it. Iteration D will
+wire structured output via an in-process MCP forced-tool, the same
+pattern :class:`CopilotRuntime` uses.
 
 **Auth.** Three options, checked in order:
 
@@ -53,8 +53,20 @@ from typing import TYPE_CHECKING, Any, ClassVar, TypeVar
 
 from pydantic import BaseModel
 
-from airframe.errors import RuntimeAuthError, UnsupportedFeatureError
-from airframe.events import RuntimeEvent, TurnComplete
+from airframe.cost import CostRecord
+from airframe.errors import (
+    RuntimeAuthError,
+    RuntimeCancelledError,
+    RuntimeProtocolError,
+    RuntimeTransientError,
+    UnsupportedFeatureError,
+)
+from airframe.events import (
+    ReasoningDelta,
+    RuntimeEvent,
+    TextDelta,
+    TurnComplete,
+)
 from airframe.features import Feature
 from airframe.inputs import Prompt
 from airframe.models import ModelInfo
@@ -140,15 +152,20 @@ class KimiRuntime(AgentRuntime):
             :data:`DEFAULT_KIMI_BASE_URL`.
         api_key: Optional explicit Moonshot API key. Resolution chain:
             this argument → ``KIMI_API_KEY`` env var → SDK's own
-            resolution. Mutation of ``os.environ`` is avoided; explicit
-            keys are forwarded through the SDK's :class:`Config`.
+            resolution. When set, the session injects the key into
+            ``os.environ["KIMI_API_KEY"]`` for the duration of the
+            SDK call (and restores the prior value on close) since
+            ``Session.create`` doesn't accept an ``api_key=`` kwarg
+            directly. Iteration C may switch to a typed ``Config``
+            object once that surface is better understood.
 
-    Iteration A: ``execute()`` raises :class:`NotImplementedError`
-    after feature-gate checks pass. ``session()`` returns a
-    :class:`KimiSession` whose protocol surface is complete and
-    correctly gated, but whose terminal SDK call is the same
-    :class:`NotImplementedError`. Iteration B replaces the SDK call
-    sites with the real :class:`kimi_agent_sdk.Session` lifecycle.
+    Iteration B: :class:`KimiSession` is fully SDK-backed —
+    ``execute`` / ``stream`` drive ``Session.create`` /
+    ``Session.resume`` lazily, translate the ``WireMessage`` stream
+    into airframe's :class:`RuntimeEvent` union, and surface cost
+    telemetry. ``execute(schema=…)`` still raises
+    :class:`NotImplementedError` pending Iteration D's MCP-based
+    forced-tool path for structured output.
     """
 
     label = "kimi"
@@ -166,16 +183,24 @@ class KimiRuntime(AgentRuntime):
 
     #: Features this runtime exposes today.
     #:
-    #: Iteration A declares only :data:`~airframe.features.Feature.STRUCTURED_OUTPUT_JSON_SCHEMA`
-    #: — the universal "every airframe adapter ships `execute(schema=...)`"
-    #: floor that the conformance contract enforces. The actual SDK-
-    #: backed implementation lands in Iteration B; until then,
-    #: ``execute()`` raises :class:`NotImplementedError` with a clear
-    #: message pointing at the iteration. Iterations B–F flip the
-    #: remaining flags on as each feature lands per
-    #: ``dev-docs/kimi-adapter-plan.md``.
+    #: Iteration B adds :data:`Feature.STREAMING`,
+    #: :data:`Feature.CANCEL`, and :data:`Feature.SESSION_RESUME` —
+    #: the SDK exposes the corresponding surface natively:
+    #: ``session.prompt()`` is the streaming async generator,
+    #: ``session.cancel()`` sets the SDK's cancel event, and
+    #: ``Session.resume(work_dir, session_id)`` resumes a prior
+    #: session by ID. Structured output stays at the conformance
+    #: floor only — :data:`Feature.STRUCTURED_OUTPUT_JSON_SCHEMA`
+    #: declared True (every airframe adapter must declare it), but
+    #: ``execute(schema=…)`` raises :class:`NotImplementedError`
+    #: until Iteration D wires the MCP-based forced-tool pattern.
     SUPPORTED_FEATURES: ClassVar[frozenset[Feature]] = frozenset(
-        {Feature.STRUCTURED_OUTPUT_JSON_SCHEMA}
+        {
+            Feature.STRUCTURED_OUTPUT_JSON_SCHEMA,
+            Feature.STREAMING,
+            Feature.CANCEL,
+            Feature.SESSION_RESUME,
+        }
     )
 
     #: The set of :class:`~airframe.hooks.HookEventKind` literals this
@@ -265,27 +290,24 @@ class KimiRuntime(AgentRuntime):
     ) -> AgentSession:
         """Open a :class:`KimiSession`.
 
-        Iteration A returns a session whose protocol surface is fully
-        in place — execute/stream signatures match the protocol; every
-        feature kwarg (``tools``, ``mcp_servers``, ``on_permission``,
-        ``on_event``, ``thinking``, ``max_turns``, ``max_budget_usd``,
-        polymorphic ``prompt``) is gated against the corresponding
+        The session's protocol surface is fully in place — execute /
+        stream signatures match the protocol; every feature kwarg
+        (``tools``, ``mcp_servers``, ``on_permission``, ``on_event``,
+        ``thinking``, ``max_turns``, ``max_budget_usd``, polymorphic
+        ``prompt``) is gated against the corresponding
         :class:`Feature` flag and raises
         :class:`UnsupportedFeatureError` when the capability is
-        declined. The *actual turn execution* path raises
-        :class:`NotImplementedError` until Iteration B wires the
-        ``kimi-agent-sdk`` ``Session``-backed implementation.
+        declined.
 
-        ``resume=`` raises :class:`NotImplementedError` because
-        :data:`~airframe.features.Feature.SESSION_RESUME` is not yet
-        declared. The conformance contract checks this gate.
+        Iteration B wires the SDK call sites. ``resume=`` resumes via
+        ``kimi_agent_sdk.Session.resume`` (the SDK looks up
+        ``session_id`` under ``work_dir``; ``None`` from the SDK on a
+        missing ID surfaces as :class:`RuntimeProtocolError` at first
+        :meth:`execute`/:meth:`stream`). ``schema=`` on
+        :meth:`KimiSession.execute` still raises
+        :class:`NotImplementedError` until Iteration D's MCP-based
+        forced-tool path lands.
         """
-        if resume is not None:
-            raise NotImplementedError(
-                "session(resume=...) is not wired yet — Iteration B of the "
-                "Kimi adapter plan adds resume via the kimi-agent-sdk "
-                "Session API. Check runtime.supports(Feature.SESSION_RESUME) first."
-            )
         _check_tools_supported(
             tools,
             adapter_label=self.label,
@@ -314,6 +336,7 @@ class KimiRuntime(AgentRuntime):
         kimi_options = provider_options if isinstance(provider_options, KimiOptions) else None
         return KimiSession(
             self,
+            resume=resume,
             system=system,
             model=model,
             provider_options=kimi_options,
@@ -361,38 +384,132 @@ class KimiRuntime(AgentRuntime):
 class KimiSession(AgentSession):
     """Bespoke :class:`AgentSession` for :class:`KimiRuntime`.
 
-    Iteration A protocol-correct stub. The full execute / stream
-    signatures match the :class:`AgentSession` protocol (including the
-    Phase 5 ``max_turns`` / ``max_budget_usd`` kwargs that the
-    structural conformance contract checks), every per-feature kwarg
-    is gated against the corresponding :class:`Feature` flag, and the
-    failure mode for unsupported features is
-    :class:`UnsupportedFeatureError` (not :class:`NotImplementedError`)
-    — the conformance contracts distinguish the two.
+    Wraps a lazy-created ``kimi_agent_sdk.Session``. The SDK session
+    is constructed on first :meth:`execute`/`stream` so the synchronous
+    ``runtime.session()`` factory stays compatible with the async
+    ``Session.create``/`Session.resume` calls underneath.
 
-    The terminal SDK call inside :meth:`execute` /
-    :meth:`stream` raises :class:`NotImplementedError` until
-    Iteration B replaces this class with the real ``kimi-agent-sdk``
-    ``Session``-backed implementation.
+    **Auth.** The Kimi Agent SDK reads ``KIMI_API_KEY`` / ``KIMI_BASE_URL``
+    / ``KIMI_MODEL_NAME`` from the environment via its ``Config`` layer.
+    If :class:`KimiRuntime` was constructed with an explicit ``api_key=``
+    or ``base_url=``, the session installs them into ``os.environ`` for
+    the duration of the underlying SDK call so the SDK's auth chain
+    picks them up. The env mutation is scoped to one call boundary and
+    restored on close.
+
+    **Approvals.** Iteration B hard-codes ``yolo=True`` on the SDK call
+    (auto-approve every tool / shell invocation). Iteration D wires
+    ``PermissionCallback`` properly via the SDK's
+    ``approval_handler_fn`` bridge.
+
+    **Structured output.** ``schema=`` raises
+    :class:`NotImplementedError` — kimi-agent-sdk exposes no
+    JSON-schema constraint knob. Iteration D adds it via the
+    MCP-based forced-tool pattern.
     """
 
     def __init__(
         self,
         runtime: KimiRuntime,
         *,
+        resume: str | None = None,
         system: str | None = None,
         model: ProviderModel | None = None,
         provider_options: KimiOptions | None = None,
     ) -> None:
         self._runtime = runtime
+        self._resume_id = resume
         self._system = system
         self._model = model
         self._provider_options = provider_options
+        self._sdk_session: Any = None  # lazy-created on first execute/stream
+        # Pre-initialised so ``close()`` can run even if
+        # ``_ensure_sdk_session`` was never called (e.g. a session
+        # opened-and-immediately-closed never reaches the env-mutation
+        # step).
+        self._env_overrides: dict[str, str | None] = {}
         self._closed = False
         self._in_flight = False
-        # ``id`` populates from the kimi-agent-sdk Session in
-        # Iteration B; ``None`` until then.
-        self.id: str | None = None
+        # ``id`` is populated from the SDK session once it materialises.
+        # When ``resume=`` was passed we surface it eagerly so callers
+        # can read it before driving a turn.
+        self.id: str | None = resume
+
+    # --- SDK lifecycle ------------------------------------------------------
+
+    async def _ensure_sdk_session(self) -> Any:
+        """Lazily create or resume the underlying ``kimi_agent_sdk.Session``."""
+        if self._sdk_session is not None:
+            return self._sdk_session
+
+        # Late imports — the ``[kimi]`` extra installs these. The
+        # ImportError surfaces clearly when the extra isn't present.
+        from kaos.path import KaosPath
+        from kimi_agent_sdk import Session
+
+        # Resolve work_dir: KimiOptions.working_directory → KaosPath.cwd().
+        work_dir_str = self._provider_options.working_directory if self._provider_options else None
+        work_dir = KaosPath(work_dir_str) if work_dir_str else KaosPath.cwd()
+
+        # Resolve model id from the binding override or the runtime default.
+        model_id = (
+            self._model.model_id if self._model is not None else self._runtime._default_model
+        )
+
+        # Auth: the SDK reads KIMI_API_KEY / KIMI_BASE_URL from env.
+        # Mutate os.environ to inject explicit constructor args; restore
+        # at session close so we don't leak across runtimes. Iteration C+
+        # may switch to building a ``Config`` object explicitly once we
+        # have a clearer picture of the Config surface — env mutation is
+        # the pragmatic Iteration B move.
+        if self._runtime._api_key_override:
+            self._env_overrides["KIMI_API_KEY"] = os.environ.get("KIMI_API_KEY")
+            os.environ["KIMI_API_KEY"] = self._runtime._api_key_override
+        if self._runtime._base_url and self._runtime._base_url != DEFAULT_KIMI_BASE_URL:
+            self._env_overrides["KIMI_BASE_URL"] = os.environ.get("KIMI_BASE_URL")
+            os.environ["KIMI_BASE_URL"] = self._runtime._base_url
+
+        try:
+            if self._resume_id is not None:
+                sdk = await Session.resume(
+                    work_dir=work_dir,
+                    session_id=self._resume_id,
+                    model=model_id,
+                    yolo=True,
+                )
+                if sdk is None:
+                    raise RuntimeProtocolError(
+                        f"{self._runtime.label}: session "
+                        f"{self._resume_id!r} not found under {work_dir}. "
+                        "Verify the session ID and the work_dir match a "
+                        "prior `Session.create` / `Session.resume` call."
+                    )
+            else:
+                sdk = await Session.create(
+                    work_dir=work_dir,
+                    model=model_id,
+                    yolo=True,
+                )
+        except RuntimeProtocolError:
+            raise
+        except Exception as exc:
+            self._restore_env()
+            self._classify_sdk_exception(exc)
+
+        self._sdk_session = sdk
+        self.id = sdk.id
+        return sdk
+
+    def _restore_env(self) -> None:
+        """Undo any environment mutations made by ``_ensure_sdk_session``."""
+        for key, prior in self._env_overrides.items():
+            if prior is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = prior
+        self._env_overrides = {}
+
+    # --- AgentSession interface --------------------------------------------
 
     async def execute(
         self,
@@ -406,43 +523,52 @@ class KimiSession(AgentSession):
     ) -> RuntimeResult:
         if self._closed:
             raise RuntimeError("session is closed")
-        # Gate every Phase 2+ feature kwarg against capabilities BEFORE
-        # entering the SDK path so the failure mode is
-        # UnsupportedFeatureError (not NotImplementedError) — the
-        # conformance contracts care about the distinction.
-        if thinking is not None and not self._runtime.supports(Feature.REASONING_EFFORT):
-            raise UnsupportedFeatureError(
-                f"{self._runtime.label}: thinking= is not wired on this "
-                f"adapter yet. Check runtime.supports(Feature.REASONING_EFFORT) "
-                f"before passing thinking=.",
-                feature=Feature.REASONING_EFFORT,
-            )
-        # Polymorphic prompts gate against VISION_INPUT / FILE_INPUT
-        # via the shared helper. Plain ``str`` prompts pass through.
-        _split_prompt_parts(
+        prompt_str = self._gate_and_coerce_prompt(
             prompt,
-            adapter_label=self._runtime.label,
-            supports_vision=self._runtime.supports(Feature.VISION_INPUT),
-            supports_file=self._runtime.supports(Feature.FILE_INPUT),
-        )
-        _check_budget_supported(
+            schema=schema,
+            thinking=thinking,
             max_turns=max_turns,
             max_budget_usd=max_budget_usd,
-            adapter_label=self._runtime.label,
-            supports=self._runtime.supports,
         )
-        # All gates passed — Iteration A stops here. Iteration B
-        # replaces this raise with the real ``kimi-agent-sdk`` call.
-        del schema, timeout
+        del timeout  # Iteration B doesn't wire a per-call deadline; the
+        # SDK's internal step caps are the de-facto upper bound.
+
+        text_buffer: list[str] = []
+        reasoning_buffer: list[str] = []
+        last_usage: Any = None
+        sdk = await self._ensure_sdk_session()
+
         self._in_flight = True
         try:
-            raise NotImplementedError(
-                "KimiSession.execute() is not yet wired — Iteration B of the "
-                "Kimi adapter plan (dev-docs/kimi-adapter-plan.md) lands the "
-                "kimi-agent-sdk Session-backed turn execution."
-            )
+            async for wire in self._iter_wire_messages(sdk, prompt_str):
+                kind = self._classify_wire_message(wire)
+                if kind == "text":
+                    text_buffer.append(wire.text)
+                elif kind == "reasoning":
+                    reasoning_buffer.append(wire.text)
+                elif kind == "approval":
+                    # Iteration B: yolo=True is set on Session.create, so
+                    # the SDK won't surface ApprovalRequest objects to us
+                    # — but defensively resolve any that slip through.
+                    wire.resolve("approve")
+                elif kind == "usage":
+                    last_usage = wire
+                # Other wire-types (TurnBegin / TurnEnd / StepBegin / etc.)
+                # are observed for their side-effect on stream events
+                # (when stream() drives the same loop); execute() doesn't
+                # need to act on them.
         finally:
             self._in_flight = False
+
+        text = "".join(text_buffer)
+        cost = self._build_cost_record(model_id=self._resolved_model_id(), usage=last_usage)
+        return RuntimeResult(
+            text=text,
+            structured=None,
+            cost=cost,
+            finish="stop",
+            raw=None,
+        )
 
     async def stream(
         self,
@@ -454,44 +580,232 @@ class KimiSession(AgentSession):
         max_budget_usd: float | None = None,
         timeout: float = 600.0,
     ) -> AsyncIterator[RuntimeEvent]:
-        # ``execute`` raises before returning a RuntimeResult in
-        # Iteration A; the ``yield`` keeps Python recognising this as
-        # an async generator function (the conformance contract checks
-        # ``inspect.isasyncgenfunction``). Iteration B replaces this
-        # with the SDK's typed event stream.
-        result = await self.execute(
+        if self._closed:
+            raise RuntimeError("session is closed")
+        prompt_str = self._gate_and_coerce_prompt(
             prompt,
             schema=schema,
             thinking=thinking,
             max_turns=max_turns,
             max_budget_usd=max_budget_usd,
-            timeout=timeout,
         )
-        yield TurnComplete(result=result)
+        del timeout
+
+        text_buffer: list[str] = []
+        last_usage: Any = None
+        sdk = await self._ensure_sdk_session()
+
+        self._in_flight = True
+        try:
+            async for wire in self._iter_wire_messages(sdk, prompt_str):
+                kind = self._classify_wire_message(wire)
+                if kind == "text":
+                    text_buffer.append(wire.text)
+                    yield TextDelta(text=wire.text)
+                elif kind == "reasoning":
+                    yield ReasoningDelta(text=wire.text)
+                elif kind == "approval":
+                    wire.resolve("approve")
+                elif kind == "usage":
+                    last_usage = wire
+        finally:
+            self._in_flight = False
+
+        text = "".join(text_buffer)
+        cost = self._build_cost_record(model_id=self._resolved_model_id(), usage=last_usage)
+        yield TurnComplete(
+            result=RuntimeResult(text=text, structured=None, cost=cost, finish="stop", raw=None)
+        )
 
     async def cancel(self) -> None:
         if not self._in_flight:
             # No-op when idle — matches the conformance contract
             # ``test_session_cancel_when_idle_is_noop``.
             return
-        # Mid-turn cancel isn't wired yet — Iteration B adds it via
-        # the SDK's interrupt path.
-        raise UnsupportedFeatureError(
-            "KimiSession.cancel() is not wired yet; check "
-            "runtime.supports(Feature.CANCEL) before calling.",
-            feature=Feature.CANCEL,
-        )
+        if self._sdk_session is not None:
+            # ``Session.cancel()`` sets the underlying cancel event; the
+            # running ``session.prompt()`` raises ``RunCancelled`` which
+            # we classify as :class:`RuntimeCancelledError`.
+            self._sdk_session.cancel()
 
     async def close(self) -> None:
+        if self._closed:
+            return
         self._closed = True
+        if self._sdk_session is not None:
+            try:
+                await self._sdk_session.close()
+            except Exception:  # noqa: BLE001 — close never raises
+                logger.debug("kimi: SDK session close raised", exc_info=True)
+            self._sdk_session = None
+        self._restore_env()
 
     def unwrap(self, cls: type[Any]) -> Any:
         if isinstance(self, cls):
             return self
+        # Expose the underlying kimi_agent_sdk.Session for callers that
+        # want vendor-specific access (e.g. status snapshot, model name).
+        if self._sdk_session is not None and isinstance(self._sdk_session, cls):
+            return self._sdk_session
         raise TypeError(
-            f"{type(self).__name__} has no vendor-specific session object to "
-            f"unwrap to {cls!r} yet — Iteration B exposes the underlying "
-            f"kimi_agent_sdk.Session via this method."
+            f"{type(self).__name__} cannot unwrap to {cls!r}. Use "
+            f"``runtime.unwrap(KimiRuntime)`` for runtime-level access, or "
+            f"``session.unwrap(kimi_agent_sdk.Session)`` once the session "
+            f"has materialised (after the first execute/stream call)."
+        )
+
+    # --- Internals ----------------------------------------------------------
+
+    def _gate_and_coerce_prompt(
+        self,
+        prompt: Prompt,
+        *,
+        schema: type[BaseModel] | None,
+        thinking: ThinkingMode,
+        max_turns: int | None,
+        max_budget_usd: float | None,
+    ) -> str:
+        """Run all per-call gates; return the plain-text prompt string.
+
+        Capability gates raise :class:`UnsupportedFeatureError` (not
+        :class:`NotImplementedError`) so the conformance contracts that
+        distinguish "declined" from "not-yet-wired" stay happy.
+        """
+        if thinking is not None and not self._runtime.supports(Feature.REASONING_EFFORT):
+            raise UnsupportedFeatureError(
+                f"{self._runtime.label}: thinking= is not wired on this "
+                f"adapter yet. Check runtime.supports(Feature.REASONING_EFFORT) "
+                f"before passing thinking=.",
+                feature=Feature.REASONING_EFFORT,
+            )
+        if schema is not None:
+            raise NotImplementedError(
+                f"{self._runtime.label}: execute(schema=...) is not yet "
+                f"wired — Iteration D of the Kimi adapter plan adds "
+                f"structured output via an in-process MCP forced-tool, "
+                f"mirroring CopilotRuntime's pattern. Until then, request "
+                f"JSON via prompt-engineering in your application and parse "
+                f"the response yourself, OR set runtime.supports("
+                f"Feature.STRUCTURED_OUTPUT_JSON_SCHEMA) expectations "
+                f"accordingly."
+            )
+        # Polymorphic prompts gate against VISION_INPUT / FILE_INPUT
+        # via the shared helper. Plain ``str`` prompts pass through and
+        # come back as ``(prompt, [], [])``.
+        text, _images, _files = _split_prompt_parts(
+            prompt,
+            adapter_label=self._runtime.label,
+            supports_vision=self._runtime.supports(Feature.VISION_INPUT),
+            supports_file=self._runtime.supports(Feature.FILE_INPUT),
+        )
+        _check_budget_supported(
+            max_turns=max_turns,
+            max_budget_usd=max_budget_usd,
+            adapter_label=self._runtime.label,
+            supports=self._runtime.supports,
+        )
+        if self._system:
+            # The SDK's ``Session.create(config=...)`` is the canonical
+            # system-prompt slot. Iteration B doesn't yet thread the
+            # system kwarg into the Config layer (the Config shape is
+            # opaque without installing kimi-cli); we prepend it to the
+            # first prompt as a lightweight stand-in. Iteration C/D
+            # will route through Config properly.
+            return f"{self._system}\n\n{text}"
+        return text
+
+    async def _iter_wire_messages(self, sdk: Any, prompt_str: str) -> AsyncIterator[Any]:
+        """Yield :class:`WireMessage` instances from the SDK, classifying errors."""
+        try:
+            async for wire in sdk.prompt(prompt_str):
+                yield wire
+        except Exception as exc:
+            self._classify_sdk_exception(exc)
+
+    def _classify_wire_message(self, wire: Any) -> str:
+        """Return a coarse category for ``wire`` — text/reasoning/approval/usage/other.
+
+        The match-by-type-name approach avoids importing every Wire
+        type at module load (kimi_agent_sdk pulls in fastmcp /
+        kimi-cli / kaos / kosong transitively, all of which are
+        co-installation hazards). Tests substitute lightweight fake
+        types whose ``__name__`` matches.
+        """
+        name = type(wire).__name__
+        if name == "TextPart":
+            return "text"
+        if name == "ThinkPart":
+            return "reasoning"
+        if name == "ApprovalRequest":
+            return "approval"
+        if name == "TokenUsage":
+            return "usage"
+        return "other"
+
+    def _classify_sdk_exception(self, exc: BaseException) -> None:
+        """Translate kimi-agent-sdk exceptions to airframe's ``Runtime*Error``.
+
+        Match on ``type(exc).__name__`` (rather than ``isinstance``)
+        for the same reason :meth:`_classify_wire_message` does — keeps
+        the test surface free of transitive-dep entanglement.
+        """
+        name = type(exc).__name__
+        msg = f"{self._runtime.label}: {name}: {exc}"
+        if name == "RunCancelled":
+            raise RuntimeCancelledError(msg) from exc
+        if name in {"APIConnectionError", "APITimeoutError"}:
+            raise RuntimeTransientError(msg) from exc
+        if name == "APIStatusError":
+            status = getattr(exc, "status_code", None)
+            if status in (401, 403):
+                raise RuntimeAuthError(msg) from exc
+            if status in (429, 502, 503, 504):
+                raise RuntimeTransientError(msg) from exc
+            raise RuntimeProtocolError(msg) from exc
+        if name == "APIEmptyResponseError":
+            raise RuntimeProtocolError(msg) from exc
+        if name in {"LLMNotSet", "LLMNotSupported"}:
+            raise RuntimeAuthError(msg) from exc
+        if name in {
+            "ConfigError",
+            "AgentSpecError",
+            "InvalidToolError",
+            "MCPConfigError",
+            "MCPRuntimeError",
+            "SystemPromptTemplateError",
+            "PromptValidationError",
+            "MaxStepsReached",
+        }:
+            raise RuntimeProtocolError(msg) from exc
+        if name == "SessionStateError":
+            raise RuntimeError(msg) from exc
+        # Unknown — surface as protocol error rather than swallowing.
+        raise RuntimeProtocolError(msg) from exc
+
+    def _resolved_model_id(self) -> str:
+        return self._model.model_id if self._model is not None else self._runtime._default_model
+
+    def _build_cost_record(self, *, model_id: str, usage: Any) -> CostRecord:
+        """Build a :class:`CostRecord` from a ``TokenUsage`` wire message.
+
+        Iteration B leaves USD cost as ``None`` — the pricing table
+        lands in Iteration E alongside ``BUDGET_USD_CAP``. Token
+        counts populate from ``usage.input_tokens`` /
+        ``usage.output_tokens`` when present; otherwise zero.
+        """
+        input_tokens = int(getattr(usage, "input_tokens", 0) or 0) if usage is not None else 0
+        output_tokens = int(getattr(usage, "output_tokens", 0) or 0) if usage is not None else 0
+        cache_read = int(getattr(usage, "cache_read_tokens", 0) or 0) if usage is not None else 0
+        cache_write = int(getattr(usage, "cache_write_tokens", 0) or 0) if usage is not None else 0
+        return CostRecord(
+            provider_id=self._runtime.PROVIDER_ID,
+            model_id=model_id,
+            cost_usd=None,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cache_read_tokens=cache_read,
+            cache_write_tokens=cache_write,
+            finish="stop",
         )
 
 
