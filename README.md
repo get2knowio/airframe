@@ -65,13 +65,13 @@ is `airframe`.
 
 | Adapter | `PROVIDER_ID` | Vendor SDK | Auth |
 |---|---|---|---|
-| [`ClaudeCodeRuntime`](docs/adapters/claude.md) | `claude` | `claude-agent-sdk` | Claude Max OAuth → `~/.claude/credentials.json` → `ANTHROPIC_API_KEY` |
-| [`CopilotRuntime`](docs/adapters/copilot.md) | `github-copilot` | `github-copilot-sdk` | `GITHUB_TOKEN` → `gh auth` |
-| [`CodexRuntime`](docs/adapters/codex.md) | `codex` | `openai-codex-sdk` | `OPENAI_API_KEY` → opencode `auth.json` → `~/.codex/auth.json` |
-| [`OpenCodeZenRuntime`](docs/adapters/opencode-zen.md) | `opencode-zen` | `openai` | `OPENCODE_API_KEY` → opencode `auth.json::opencode.key` |
-| [`OpenCodeGoRuntime`](docs/adapters/opencode-go.md) | `opencode-go` | `openai` | `OPENCODE_API_KEY` → opencode `auth.json::opencode-go.key` |
-| [`OpenRouterRuntime`](docs/adapters/openrouter.md) | `openrouter` | `openai` | `OPENROUTER_API_KEY` |
 | [`BedrockRuntime`](docs/adapters/bedrock.md) | `bedrock` | `aioboto3` | boto3 chain (env / `AWS_PROFILE` / IAM role) + `AWS_REGION` |
+| [`ClaudeCodeRuntime`](docs/adapters/claude.md) | `claude` | `claude-agent-sdk` | Claude Max OAuth → `~/.claude/credentials.json` → `ANTHROPIC_API_KEY` |
+| [`CodexRuntime`](docs/adapters/codex.md) | `codex` | `openai-codex-sdk` | `OPENAI_API_KEY` → opencode `auth.json` → `~/.codex/auth.json` |
+| [`CopilotRuntime`](docs/adapters/copilot.md) | `github-copilot` | `github-copilot-sdk` | `GITHUB_TOKEN` → `gh auth` |
+| [`OpenCodeGoRuntime`](docs/adapters/opencode-go.md) | `opencode-go` | OpenAI compatible | `OPENCODE_API_KEY` → opencode `auth.json::opencode-go.key` |
+| [`OpenCodeZenRuntime`](docs/adapters/opencode-zen.md) | `opencode-zen` | OpenAI compatible | `OPENCODE_API_KEY` → opencode `auth.json::opencode.key` |
+| [`OpenRouterRuntime`](docs/adapters/openrouter.md) | `openrouter` | OpenAI compatible | `OPENROUTER_API_KEY` |
 
 The OpenAI-compatible family (`OpenCodeZenRuntime` per-token,
 `OpenCodeGoRuntime` subscription, `OpenRouterRuntime` multi-vendor
