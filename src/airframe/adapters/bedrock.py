@@ -8,17 +8,15 @@ Anthropic Claude, Meta Llama, Mistral, Cohere, Amazon Nova, and
 AI21 Jamba behind one AWS-billed endpoint with IAM-rooted auth and
 region pinning.
 
-**Iteration A scope.** This commit lands the adapter's protocol
-scaffolding only — discovery, capability predicates, the four-step
-AWS credential chain, region resolution, ``unwrap()`` self-cast,
-``close()`` / ``reset()`` lifecycle, and ``list_models()`` backed by
-``bedrock.list_foundation_models()``. Behaviour-bearing methods
-(``execute``, ``session``, ``stream``, ``cancel``) raise
-:class:`NotImplementedError` pointing at the iteration that will
-wire them (B for execute/stream/cancel + structured output, C for
-vision/files + reasoning, D for tools + permission, E for hooks +
-budget, F for ``BedrockOptions`` wrap-up). ``SUPPORTED_FEATURES``
-is the empty set until those iterations flip flags on.
+**Iteration B scope** (the current commit). Lands the bespoke
+:class:`BedrockSession` that owns the per-conversation ``messages=[]``
+buffer, single-turn ``client.converse()`` execution, schema-shaped
+structured output via a forced ``submit_result`` tool, streaming via
+``client.converse_stream()`` (text + reasoning deltas), and
+cooperative cancellation. ``Feature.STRUCTURED_OUTPUT_JSON_SCHEMA``,
+``Feature.STREAMING``, and ``Feature.CANCEL`` flip True.
+Polymorphic prompts + reasoning land in Iteration C; tools +
+permission in D; hooks + budget in E.
 
 **Auth.** Resolved at first network call via the boto3 four-step
 chain — see :doc:`auth` and ``_resolve_aws_credentials``:
@@ -36,35 +34,54 @@ chain — see :doc:`auth` and ``_resolve_aws_credentials``:
 
 1. Explicit ``region_name=`` constructor arg.
 2. ``AWS_REGION`` / ``AWS_DEFAULT_REGION`` env var.
-3. ``~/.aws/config`` ``region`` for the resolved profile (boto3
-   handles this natively when the session is constructed without
-   an explicit region).
+3. ``~/.aws/config`` ``region`` for the resolved profile.
 
-If no region resolves *and* the user did not configure one in
-``~/.aws/config``, the first network call raises
-:class:`RuntimeAuthError` — Bedrock is region-pinned and silent
+If no region resolves, the first network call raises
+:class:`RuntimeAuthError`. Bedrock is region-pinned and silent
 fallback to a default region would route traffic to a different
 model catalog than the user expects.
 
-**``validate_binding``.** Accepts any non-empty ``model_id`` when
-``provider_id == "bedrock"``. The Bedrock catalog is too dynamic
-to gate by prefix — inference profiles
-(``us.anthropic.claude-3-5-sonnet-20241022-v2:0``), provisioned
-throughput ARNs, and per-region model variants all coexist; an
-allowlist would lag the catalog.
+**Structured output.** Implemented via Bedrock's native ``toolConfig``
+with a forced ``submit_result`` tool whose ``inputSchema`` is the
+user-supplied Pydantic schema serialised to JSON Schema. The model
+must call the tool exactly once; the adapter extracts the validated
+payload from the resulting ``toolUse`` content block. Mirrors
+:class:`CopilotRuntime`'s forced-tool pattern exactly.
+
+**Lifecycle.** The bedrock-runtime client is lazily built on first
+``execute()`` / ``stream()`` (and on ``list_models()`` for the
+control-plane client), and torn down by :meth:`close`. Sibling
+sessions reuse one client per runtime — opening a session never
+spawns a new client.
 """
 
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
 import os
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, ClassVar, TypeVar
 
+from pydantic import BaseModel, ValidationError
+
+from airframe.cost import CostRecord
 from airframe.errors import (
     RuntimeAuthError,
+    RuntimeCancelledError,
+    RuntimeContextOverflowError,
+    RuntimeModelNotFoundError,
     RuntimeProtocolError,
+    RuntimeStructuredOutputError,
     RuntimeTransientError,
+    UnsupportedFeatureError,
+)
+from airframe.events import (
+    ReasoningDelta,
+    RuntimeEvent,
+    TextDelta,
+    TurnComplete,
 )
 from airframe.features import Feature
 from airframe.models import (
@@ -83,9 +100,7 @@ from airframe.protocol import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
-
-    from pydantic import BaseModel
+    from collections.abc import AsyncIterator, Callable
 
     from airframe.hooks import HookEvent
     from airframe.inputs import Prompt
@@ -106,6 +121,12 @@ T = TypeVar("T")
 DEFAULT_BEDROCK_MODEL = "anthropic.claude-3-5-haiku-20241022-v1:0"
 
 
+#: Canonical name for the hidden structured-output tool. Same constant
+#: shape as :class:`CopilotRuntime`'s ``SUBMIT_RESULT_TOOL`` — Bedrock
+#: Converse's ``toolConfig`` slot honours the same forced-tool pattern.
+SUBMIT_RESULT_TOOL = "submit_result"
+
+
 @dataclass(frozen=True, slots=True)
 class _ModelMeta:
     """Per-model enrichment for the live ``list_foundation_models`` response."""
@@ -121,14 +142,12 @@ class _ModelMeta:
 #: context windows. The live ``list_foundation_models`` response carries
 #: ``modelId`` / ``modelName`` / ``providerName``; this table layers
 #: airframe's normalised display label and context window on top.
-#: Pricing is intentionally absent at Iteration A — the cost table
+#: Pricing is intentionally absent at Iteration B — the cost table
 #: (``_BEDROCK_PRICING``) lands with the budget-cap work in Iteration E.
 #:
 #: Inference-profile IDs (e.g. ``us.anthropic.claude-...``) are not
 #: keyed here — they enrich with ``None`` and fall through to the raw
-#: ``modelName`` / ``modelId`` from the API response. Bedrock's
-#: cross-region inference profiles are too region-specific to maintain
-#: a static table for.
+#: ``modelName`` / ``modelId`` from the API response.
 _BEDROCK_METADATA: dict[str, _ModelMeta] = {
     # Anthropic on Bedrock
     "anthropic.claude-3-5-haiku-20241022-v1:0": _ModelMeta(
@@ -202,12 +221,25 @@ class BedrockRuntime(AgentRuntime):
 
     #: Features this runtime exposes today.
     #:
-    #: Iteration A intentionally ships an empty set — discovery,
-    #: capability predicates, and ``list_models()`` work, but no
-    #: behaviour-bearing capability is wired yet. Iteration B flips
-    #: ``STRUCTURED_OUTPUT_JSON_SCHEMA``, ``STREAMING``, and ``CANCEL``
-    #: True once ``execute()`` / ``stream()`` / ``cancel()`` land.
-    SUPPORTED_FEATURES: ClassVar[frozenset[Feature]] = frozenset()
+    #: * ``STRUCTURED_OUTPUT_JSON_SCHEMA`` — wired via the forced
+    #:   ``submit_result`` tool in Converse's ``toolConfig`` slot
+    #:   (Iteration B).
+    #: * ``STREAMING`` — wired via :class:`BedrockSession.stream` over
+    #:   ``client.converse_stream`` (Iteration B).
+    #: * ``CANCEL`` — wired via :func:`asyncio.Task.cancel` for
+    #:   :meth:`BedrockSession.execute` + a stream-iterator close for
+    #:   :meth:`BedrockSession.stream` (Iteration B).
+    #:
+    #: ``SESSION_RESUME`` stays False — Converse is stateless from the
+    #: client's perspective. Reasoning + vision + tools + budget land in
+    #: Iterations C through E.
+    SUPPORTED_FEATURES: ClassVar[frozenset[Feature]] = frozenset(
+        {
+            Feature.STRUCTURED_OUTPUT_JSON_SCHEMA,
+            Feature.STREAMING,
+            Feature.CANCEL,
+        }
+    )
 
     def __init__(
         self,
@@ -227,6 +259,12 @@ class BedrockRuntime(AgentRuntime):
         self._aws_secret_access_key = aws_secret_access_key
         self._aws_session_token = aws_session_token
         self._profile_name = profile_name
+        # Lazy bedrock-runtime client + its enclosing async context.
+        # Built on first execute()/stream(); torn down by close().
+        self._aws_session: Any = None
+        self._runtime_client_ctx: Any = None
+        self._runtime_client: Any = None
+        self._client_lock: asyncio.Lock | None = None
         self._closed = False
 
     # --- AgentRuntime interface ---------------------------------------------
@@ -242,27 +280,34 @@ class BedrockRuntime(AgentRuntime):
         thinking: ThinkingMode = None,
         timeout: float = 600.0,
     ) -> RuntimeResult:
-        # Iteration A scaffolding: the Converse API call lands in
-        # Iteration B alongside the bespoke ``BedrockSession``. Until
-        # then the entry point exists so ``supports()`` / discovery
-        # work, but a real call raises so the gap is loud.
-        raise NotImplementedError(
-            "BedrockRuntime.execute() is wired in Iteration B of the bedrock-adapter "
-            "plan. Iteration A ships discovery + capability scaffolding only."
-        )
+        # Documented sugar for ``runtime.session(...).execute(...) + close()``.
+        # Single-turn, ephemeral — the runtime client is shared, so the
+        # only per-call setup is the BedrockSession itself.
+        del persona  # accepted in the protocol but not consumed by Bedrock
+        sess = self.session(system=system, model=model)
+        try:
+            return await sess.execute(prompt, schema=schema, thinking=thinking, timeout=timeout)
+        finally:
+            await sess.close()
 
     async def reset(self) -> None:
         # Sessionless runtime — the per-conversation buffer lives on
-        # ``BedrockSession`` (Iteration B). Nothing scope-bound to drop.
+        # ``BedrockSession``. Nothing scope-bound to drop. The shared
+        # bedrock-runtime client stays alive for sibling sessions.
         return None
 
     async def close(self) -> None:
         # Idempotent + never raises (runs from ``finally`` / ``__aexit__``).
-        # The aioboto3 client is opened lazily inside ``list_models()`` /
-        # ``execute()`` as an ``async with`` block, so nothing long-lived
-        # outlives those calls at Iteration A. ``_closed`` is set so
-        # later iterations can refuse calls after teardown without
-        # changing the public lifecycle contract.
+        # Tears down the lazily-built bedrock-runtime client if any.
+        ctx = self._runtime_client_ctx
+        self._runtime_client_ctx = None
+        self._runtime_client = None
+        self._aws_session = None
+        if ctx is not None:
+            try:
+                await ctx.__aexit__(None, None, None)
+            except Exception as exc:  # noqa: BLE001 — teardown never raises
+                logger.debug("bedrock.client_teardown_failed error=%s", exc)
         self._closed = True
 
     def validate_binding(self, binding: ProviderModel) -> bool:
@@ -278,17 +323,18 @@ class BedrockRuntime(AgentRuntime):
     def unwrap(self, cls: type[T]) -> T:
         if isinstance(self, cls):
             return self  # type: ignore[return-value]
-        # Iteration A doesn't materialise a vendor client — the
-        # bedrock-runtime aioboto3 client is built per ``list_models()``
-        # call as an async-context-manager and torn down on exit. The
-        # persistent client mapping (``unwrap(BedrockRuntimeClient)``)
-        # lands in Iteration B once execute()/session() own the client.
+        # The aioboto3 bedrock-runtime client class is dynamically
+        # generated by botocore; users reach it by passing the type
+        # they imported (`from types_aiobotocore_bedrock_runtime import
+        # BedrockRuntimeClient`) or by the runtime client they already
+        # hold. ``isinstance`` is the only honest check.
+        if self._runtime_client is not None and isinstance(self._runtime_client, cls):
+            return self._runtime_client  # type: ignore[return-value]
         raise TypeError(
             f"BedrockRuntime cannot unwrap to {cls!r}; only "
-            f"BedrockRuntime is supported on the runtime today. The "
-            f"aioboto3 bedrock-runtime client becomes reachable via "
-            f"``unwrap(BedrockRuntimeClient)`` in Iteration B once the "
-            f"session class owns it."
+            f"BedrockRuntime or the live aioboto3 bedrock-runtime client "
+            f"(once execute()/stream() has built it) are supported. "
+            f"Call execute()/stream() first if you need the client."
         )
 
     def session(
@@ -303,17 +349,45 @@ class BedrockRuntime(AgentRuntime):
         on_event: Callable[[HookEvent], None] | None = None,
         provider_options: ProviderOptions | None = None,
     ) -> AgentSession:
-        # Iteration A scaffolding. ``BedrockSession`` (with
-        # ``messages=[]`` buffer + per-turn ``client.converse()``) lands
-        # in Iteration B. Raising here keeps the protocol method present
-        # so ``runtime.session`` is callable for type-checking / mocking
-        # purposes, but the method is not yet behavioural.
-        del resume, system, model, tools, mcp_servers
-        del on_permission, on_event, provider_options
-        raise NotImplementedError(
-            "BedrockRuntime.session() is wired in Iteration B of the bedrock-adapter "
-            "plan. Iteration A ships discovery + capability scaffolding only."
-        )
+        # Iteration B accepts the structural kwargs but only ``system`` /
+        # ``model`` are honoured; later iterations wire tools/MCP/hooks/
+        # permission/options. Per the "no silent fallbacks" principle,
+        # passing a non-None decline-target raises.
+        if resume is not None:
+            raise UnsupportedFeatureError(
+                "BedrockSession: SESSION_RESUME is not supported — Converse is "
+                "stateless from the client's perspective. The messages buffer "
+                "doesn't survive process restart.",
+                feature=Feature.SESSION_RESUME,
+            )
+        if tools is not None and tools:
+            raise UnsupportedFeatureError(
+                "BedrockSession: TOOLS_FUNCTION lands in Iteration D of the bedrock-adapter plan.",
+                feature=Feature.TOOLS_FUNCTION,
+            )
+        if mcp_servers is not None and mcp_servers:
+            raise UnsupportedFeatureError(
+                "BedrockSession: Bedrock Converse has no MCP slot — "
+                "TOOLS_MCP_* are permanent declines.",
+                feature=Feature.TOOLS_MCP_STDIO,
+            )
+        if on_permission is not None:
+            raise UnsupportedFeatureError(
+                "BedrockSession: PERMISSION_CALLBACK lands in Iteration D.",
+                feature=Feature.PERMISSION_CALLBACK,
+            )
+        if on_event is not None:
+            raise UnsupportedFeatureError(
+                "BedrockSession: LIFECYCLE_HOOKS lands in Iteration E.",
+                feature=Feature.LIFECYCLE_HOOKS,
+            )
+        if provider_options is not None:
+            raise UnsupportedFeatureError(
+                "BedrockSession: BedrockOptions namespace lands in Iteration F. "
+                "Pass provider_options=None for now."
+            )
+        model_id = self._resolve_model(model) if model is not None else self._default_model
+        return BedrockSession(self, system=system, model_id=model_id)
 
     async def list_models(self) -> list[ModelInfo]:
         """Return text-output models the resolved AWS identity can see.
@@ -322,21 +396,20 @@ class BedrockRuntime(AgentRuntime):
         on the resolved AWS region and identity. Embedding-only models
         are filtered out server-side by the modality argument.
 
+        Note: ``bedrock`` (the control-plane / catalog client) is
+        distinct from ``bedrock-runtime`` (the model-invocation client)
+        — only the former exposes ``list_foundation_models``. This call
+        does *not* reuse the runtime-level bedrock-runtime client.
+
         Raises:
             RuntimeAuthError: When AWS credentials are missing /
                 invalid, or when no region resolves through the boto3
-                chain (Bedrock is region-pinned; falling back to
-                ``us-east-1`` silently would route to a different
-                catalog).
+                chain.
             RuntimeTransientError: When the Bedrock API returns a
                 throttling / 5xx response.
             RuntimeProtocolError: When the response shape is
                 unparseable.
         """
-        # Lazy-import: ``import airframe`` shouldn't pull aioboto3 in.
-        # Consumers calling list_models() have already accepted the
-        # dependency by instantiating BedrockRuntime under the
-        # [bedrock] extra.
         try:
             import aioboto3
         except ImportError as exc:
@@ -353,10 +426,6 @@ class BedrockRuntime(AgentRuntime):
                 "knows which catalog to query."
             )
         session_kwargs = self._resolve_aws_credentials()
-        # ``bedrock`` (the control-plane / catalog client) is distinct
-        # from ``bedrock-runtime`` (the model-invocation client). Only
-        # ``bedrock`` exposes ``list_foundation_models``; ``execute()``
-        # in Iteration B will open ``bedrock-runtime`` instead.
         try:
             session = aioboto3.Session(**session_kwargs)
             async with session.client("bedrock", region_name=region) as client:
@@ -394,6 +463,52 @@ class BedrockRuntime(AgentRuntime):
 
     # --- Internals ----------------------------------------------------------
 
+    async def _get_runtime_client(self) -> Any:
+        """Return the live aioboto3 bedrock-runtime client, lazy-built.
+
+        Sibling :class:`BedrockSession` instances all share one client —
+        Bedrock's stateless wire model makes per-session clients pure
+        overhead. The client is built under a lock so concurrent first-
+        ``execute()`` calls don't race.
+        """
+        if self._closed:
+            raise RuntimeError("BedrockRuntime is closed")
+        if self._runtime_client is not None:
+            return self._runtime_client
+        # The asyncio.Lock has to be created inside a running loop;
+        # constructing it lazily here keeps __init__ usable from sync
+        # code (matches how tests construct the runtime).
+        if self._client_lock is None:
+            self._client_lock = asyncio.Lock()
+        async with self._client_lock:
+            if self._runtime_client is not None:
+                return self._runtime_client
+            try:
+                import aioboto3
+            except ImportError as exc:
+                raise ImportError(
+                    "BedrockRuntime requires the 'aioboto3' package. "
+                    "Install with: pip install airframe-agents[bedrock]"
+                ) from exc
+            region = self._resolve_region()
+            if not region:
+                raise RuntimeAuthError(
+                    "BedrockRuntime: no AWS region resolved. Bedrock is region-pinned; "
+                    "set AWS_REGION (or pass region_name= explicitly)."
+                )
+            try:
+                self._aws_session = aioboto3.Session(**self._resolve_aws_credentials())
+                self._runtime_client_ctx = self._aws_session.client(
+                    "bedrock-runtime", region_name=region
+                )
+                self._runtime_client = await self._runtime_client_ctx.__aenter__()
+            except Exception as exc:
+                self._runtime_client_ctx = None
+                self._runtime_client = None
+                self._aws_session = None
+                raise _classify_bedrock_error(exc) from exc
+            return self._runtime_client
+
     def _resolve_aws_credentials(self) -> dict[str, str | None]:
         """Return kwargs for :class:`aioboto3.Session` per the auth chain.
 
@@ -425,17 +540,12 @@ class BedrockRuntime(AgentRuntime):
             if self._profile_name is not None:
                 kwargs["profile_name"] = self._profile_name
             return kwargs
-        # Step 2: env-var key pair. We don't read these explicitly —
-        # boto3 picks them up natively when no profile_name is set.
-        # Setting profile_name here would *override* the env-var path,
-        # so we only set it if the user asked for it.
+        # Step 1.5: explicit profile_name without keys.
         if self._profile_name is not None:
             kwargs["profile_name"] = self._profile_name
             return kwargs
-        # Step 3: AWS_PROFILE env var. boto3 reads this natively when
-        # the session is constructed with no profile_name, so we leave
-        # kwargs empty.
-        # Step 4: default chain. Same — empty kwargs let boto3 walk it.
+        # Steps 2-4: empty kwargs let boto3 walk env vars → AWS_PROFILE
+        # → default credential chain natively.
         return kwargs
 
     def _resolve_region(self) -> str | None:
@@ -444,15 +554,6 @@ class BedrockRuntime(AgentRuntime):
         1. Explicit ``region_name=`` constructor arg.
         2. ``AWS_REGION`` env var.
         3. ``AWS_DEFAULT_REGION`` env var.
-
-        Returns ``None`` when none resolves. The caller (``list_models``,
-        future ``execute``) raises :class:`RuntimeAuthError` rather than
-        letting boto3 fall through to the SDK default region — Bedrock
-        catalogs are per-region and silent fallback misroutes traffic.
-        boto3's own ``~/.aws/config`` ``region = ...`` resolution still
-        works when callers pass ``region_name=None`` through to
-        :class:`aioboto3.Session`; that path is honoured at the session
-        layer, not here.
         """
         if self._region_override:
             return self._region_override
@@ -472,18 +573,446 @@ class BedrockRuntime(AgentRuntime):
         return model.model_id
 
 
-def _infer_capabilities(entry: dict[str, Any]) -> frozenset[str]:
-    """Derive airframe capability flags from a Bedrock model summary.
+class BedrockSession:
+    """Per-conversation handle for Bedrock Converse.
 
-    The ``modelSummaries`` entries carry ``inputModalities`` (list of
-    ``"TEXT"`` / ``"IMAGE"`` / ``"DOCUMENT"``) and
-    ``responseStreamingSupported`` (bool). Map those onto the
-    airframe capability strings so menus can render badges without
-    consulting a separate per-model lookup.
+    Owns a client-side ``messages=[]`` buffer; each :meth:`execute` /
+    :meth:`stream` appends the user message before the call and the
+    assistant response after success. Failures (including cancellation)
+    pop the user message so a retry sends a clean history. Mirrors
+    :class:`OpenAICompatibleSession`'s buffer discipline — Converse is
+    stateless from the client side, same as Chat Completions.
 
-    Structured output + tools are universally on under Converse, so
-    every text-output model gets those flags too.
+    :attr:`id` is always ``None``; Converse has no server-side session
+    identifier. Consumer code branching on ``session.id is None`` can
+    treat that as the "stateless wire" signal.
+
+    The bedrock-runtime client lives on the parent
+    :class:`BedrockRuntime` and is shared across sibling sessions.
+    Opening a session never spawns a vendor client; closing one
+    leaves the runtime client untouched.
     """
+
+    id: str | None = None
+
+    def __init__(
+        self,
+        runtime: BedrockRuntime,
+        *,
+        system: str | None = None,
+        model_id: str,
+    ) -> None:
+        self._runtime = runtime
+        self._model_id = model_id
+        self._system = system
+        self._messages: list[dict[str, Any]] = []
+        self._closed = False
+        self._in_flight_task: asyncio.Task[Any] | None = None
+        self._active_stream: Any | None = None
+        self._stream_cancelled = False
+
+    # --- AgentSession interface --------------------------------------------
+
+    async def execute(
+        self,
+        prompt: Prompt,
+        *,
+        schema: type[BaseModel] | None = None,
+        thinking: ThinkingMode = None,
+        max_turns: int | None = None,
+        max_budget_usd: float | None = None,
+        timeout: float = 600.0,
+    ) -> RuntimeResult:
+        if self._closed:
+            raise RuntimeError("session is closed")
+        _enforce_iteration_b_gates(thinking, max_turns=max_turns, max_budget_usd=max_budget_usd)
+
+        prompt_str = _coerce_prompt_str(prompt)
+        pre_len = len(self._messages)
+        self._messages.append({"role": "user", "content": [{"text": prompt_str}]})
+
+        task = asyncio.create_task(self._do_execute(schema=schema, timeout=timeout))
+        self._in_flight_task = task
+        try:
+            return await task
+        except asyncio.CancelledError as exc:
+            del self._messages[pre_len:]
+            raise RuntimeCancelledError(f"{self._runtime.label}: cancelled") from exc
+        except BaseException:
+            del self._messages[pre_len:]
+            raise
+        finally:
+            self._in_flight_task = None
+
+    async def _do_execute(
+        self, *, schema: type[BaseModel] | None, timeout: float
+    ) -> RuntimeResult:
+        client = await self._runtime._get_runtime_client()
+        call_kwargs = self._build_call_kwargs(schema=schema)
+        try:
+            response = await asyncio.wait_for(client.converse(**call_kwargs), timeout=timeout)
+        except TimeoutError as exc:
+            raise RuntimeTransientError(
+                f"{self._runtime.label}: timeout after {timeout}s"
+            ) from exc
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            raise _classify_bedrock_error(exc) from exc
+        return self._parse_converse_response(response, schema=schema)
+
+    async def stream(
+        self,
+        prompt: Prompt,
+        *,
+        schema: type[BaseModel] | None = None,
+        thinking: ThinkingMode = None,
+        max_turns: int | None = None,
+        max_budget_usd: float | None = None,
+        timeout: float = 600.0,
+    ) -> AsyncIterator[RuntimeEvent]:
+        if self._closed:
+            raise RuntimeError("session is closed")
+        _enforce_iteration_b_gates(thinking, max_turns=max_turns, max_budget_usd=max_budget_usd)
+
+        prompt_str = _coerce_prompt_str(prompt)
+        pre_len = len(self._messages)
+        self._messages.append({"role": "user", "content": [{"text": prompt_str}]})
+        self._stream_cancelled = False
+
+        client = await self._runtime._get_runtime_client()
+        call_kwargs = self._build_call_kwargs(schema=schema)
+        try:
+            response = await client.converse_stream(**call_kwargs)
+        except Exception as exc:
+            del self._messages[pre_len:]
+            raise _classify_bedrock_error(exc) from exc
+
+        stream_iter = response.get("stream") if isinstance(response, dict) else None
+        if stream_iter is None:
+            del self._messages[pre_len:]
+            raise RuntimeProtocolError(
+                f"{self._runtime.label}: converse_stream returned no 'stream' field"
+            )
+
+        self._active_stream = stream_iter
+        text_buf: list[str] = []
+        tool_input_buf = ""
+        tool_use_id: str | None = None
+        tool_use_name: str | None = None
+        captured_tool_input: dict[str, Any] | None = None
+        stop_reason: str | None = None
+        usage_info: dict[str, Any] = {}
+        try:
+            async for chunk in stream_iter:
+                if not isinstance(chunk, dict):
+                    continue
+                if "contentBlockStart" in chunk:
+                    start = chunk["contentBlockStart"].get("start", {})
+                    if "toolUse" in start:
+                        tu = start["toolUse"]
+                        tool_use_id = tu.get("toolUseId")
+                        tool_use_name = tu.get("name")
+                        tool_input_buf = ""
+                elif "contentBlockDelta" in chunk:
+                    delta = chunk["contentBlockDelta"].get("delta", {})
+                    if "text" in delta:
+                        piece = delta["text"]
+                        text_buf.append(piece)
+                        yield TextDelta(text=piece)
+                    elif "reasoningContent" in delta:
+                        rc = delta["reasoningContent"]
+                        # ``redactedContent`` chunks have no ``text`` field;
+                        # skip rather than crash (Anthropic-on-Bedrock
+                        # emits these for safety-redacted thinking).
+                        if "text" in rc:
+                            yield ReasoningDelta(text=rc["text"])
+                    elif "toolUse" in delta:
+                        td = delta["toolUse"]
+                        if "input" in td:
+                            tool_input_buf += td["input"]
+                elif "contentBlockStop" in chunk:
+                    if tool_use_name == SUBMIT_RESULT_TOOL and tool_input_buf:
+                        try:
+                            captured_tool_input = json.loads(tool_input_buf)
+                        except json.JSONDecodeError:
+                            captured_tool_input = None
+                    tool_input_buf = ""
+                    tool_use_name = None
+                elif "messageStop" in chunk:
+                    stop_reason = chunk["messageStop"].get("stopReason")
+                elif "metadata" in chunk:
+                    metadata = chunk.get("metadata", {})
+                    if isinstance(metadata, dict):
+                        usage_info = metadata.get("usage", {}) or {}
+        except asyncio.CancelledError:
+            del self._messages[pre_len:]
+            raise RuntimeCancelledError(f"{self._runtime.label}: cancelled") from None
+        except Exception as exc:
+            del self._messages[pre_len:]
+            raise _classify_bedrock_error(exc) from exc
+        finally:
+            self._active_stream = None
+
+        if self._stream_cancelled:
+            del self._messages[pre_len:]
+            raise RuntimeCancelledError(f"{self._runtime.label}: cancelled")
+
+        # Append the assistant turn so subsequent execute()/stream()
+        # calls see history. Mirror Converse's response shape.
+        assistant_content: list[dict[str, Any]] = []
+        if text_buf:
+            assistant_content.append({"text": "".join(text_buf)})
+        if captured_tool_input is not None and tool_use_id is not None:
+            assistant_content.append(
+                {
+                    "toolUse": {
+                        "toolUseId": tool_use_id,
+                        "name": SUBMIT_RESULT_TOOL,
+                        "input": captured_tool_input,
+                    }
+                }
+            )
+        if assistant_content:
+            self._messages.append({"role": "assistant", "content": assistant_content})
+
+        structured = None
+        if schema is not None:
+            structured = _validate_tool_payload(
+                captured_tool_input, schema=schema, label=self._runtime.label
+            )
+
+        cost = _build_cost_record(
+            self._runtime.PROVIDER_ID,
+            self._model_id,
+            usage_info,
+            finish=stop_reason,
+        )
+        result = RuntimeResult(
+            text="".join(text_buf),
+            structured=structured,
+            cost=cost,
+            finish=stop_reason,
+        )
+        yield TurnComplete(result=result)
+
+    async def cancel(self) -> None:
+        # Cooperative cancellation: cancel the in-flight execute task if
+        # one is running; otherwise mark the stream so the generator
+        # raises on its next yield boundary. Idempotent — calling on an
+        # idle session is a no-op.
+        task = self._in_flight_task
+        if task is not None and not task.done():
+            task.cancel()
+            return
+        if self._active_stream is not None:
+            self._stream_cancelled = True
+            close = getattr(self._active_stream, "close", None)
+            if close is not None:
+                try:
+                    result = close()
+                    if asyncio.iscoroutine(result):
+                        await result
+                except Exception as exc:  # noqa: BLE001 — teardown
+                    logger.debug("%s.stream_close_failed error=%s", self._runtime.label, exc)
+
+    async def close(self) -> None:
+        # Idempotent + never raises. Drops the messages buffer; the
+        # shared runtime client stays alive for sibling sessions.
+        self._closed = True
+        self._messages.clear()
+
+    def unwrap(self, cls: type[T]) -> T:
+        if isinstance(self, cls):
+            return self  # type: ignore[return-value]
+        raise TypeError(
+            f"BedrockSession cannot unwrap to {cls!r}; the aioboto3 "
+            f"bedrock-runtime client lives on the runtime — reach it via "
+            f"``runtime.unwrap(BedrockRuntimeClient)`` instead."
+        )
+
+    # --- Internals ----------------------------------------------------------
+
+    def _build_call_kwargs(self, *, schema: type[BaseModel] | None) -> dict[str, Any]:
+        # Pass a shallow copy so the assistant-message append we do
+        # after the call doesn't retroactively mutate what the API saw.
+        call_kwargs: dict[str, Any] = {
+            "modelId": self._model_id,
+            "messages": list(self._messages),
+        }
+        if self._system:
+            call_kwargs["system"] = [{"text": self._system}]
+        if schema is not None:
+            call_kwargs["toolConfig"] = _build_submit_result_tool_config(schema)
+        return call_kwargs
+
+    def _parse_converse_response(
+        self, response: dict[str, Any], *, schema: type[BaseModel] | None
+    ) -> RuntimeResult:
+        if not isinstance(response, dict):
+            raise RuntimeProtocolError(f"{self._runtime.label}: converse response is not a dict")
+        output_msg = response.get("output", {}).get("message")
+        if not isinstance(output_msg, dict):
+            raise RuntimeProtocolError(
+                f"{self._runtime.label}: converse response missing output.message"
+            )
+        # Append assistant response so subsequent turns see history.
+        self._messages.append(output_msg)
+
+        text_parts: list[str] = []
+        tool_use_input: dict[str, Any] | None = None
+        for block in output_msg.get("content", []) or []:
+            if not isinstance(block, dict):
+                continue
+            if "text" in block:
+                text_parts.append(block["text"])
+            elif "toolUse" in block:
+                tu = block["toolUse"]
+                if isinstance(tu, dict) and tu.get("name") == SUBMIT_RESULT_TOOL:
+                    tool_use_input = tu.get("input")
+
+        structured = None
+        if schema is not None:
+            structured = _validate_tool_payload(
+                tool_use_input, schema=schema, label=self._runtime.label
+            )
+
+        cost = _build_cost_record(
+            self._runtime.PROVIDER_ID,
+            self._model_id,
+            response.get("usage", {}) or {},
+            finish=response.get("stopReason"),
+        )
+        return RuntimeResult(
+            text="".join(text_parts),
+            structured=structured,
+            cost=cost,
+            finish=response.get("stopReason"),
+            raw=response,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _coerce_prompt_str(prompt: Prompt) -> str:
+    """Reject list-shaped prompts until Iteration C wires vision / files."""
+    if isinstance(prompt, str):
+        return prompt
+    raise UnsupportedFeatureError(
+        "BedrockSession: polymorphic prompts (images, files) land in Iteration C. "
+        "Pass a plain str for now.",
+        feature=Feature.VISION_INPUT,
+    )
+
+
+def _enforce_iteration_b_gates(
+    thinking: ThinkingMode,
+    *,
+    max_turns: int | None,
+    max_budget_usd: float | None,
+) -> None:
+    """Raise on capability-bearing kwargs not yet wired.
+
+    Per the "no silent fallbacks" principle: a capability declined
+    must raise, never quietly drop the request. Each gate matches a
+    later iteration that flips the corresponding flag True.
+    """
+    if thinking is not None:
+        raise UnsupportedFeatureError(
+            "BedrockSession: REASONING_EFFORT / REASONING_BUDGET_TOKENS land in "
+            "Iteration C. Pass thinking=None for now.",
+            feature=Feature.REASONING_EFFORT,
+        )
+    if max_turns is not None:
+        raise UnsupportedFeatureError(
+            "BedrockSession: BUDGET_TURN_CAP lands in Iteration E.",
+            feature=Feature.BUDGET_TURN_CAP,
+        )
+    if max_budget_usd is not None:
+        raise UnsupportedFeatureError(
+            "BedrockSession: BUDGET_USD_CAP lands in Iteration E.",
+            feature=Feature.BUDGET_USD_CAP,
+        )
+
+
+def _build_submit_result_tool_config(schema: type[BaseModel]) -> dict[str, Any]:
+    """Build the forced-tool Converse ``toolConfig`` for structured output.
+
+    Same pattern as :class:`CopilotRuntime` — a hidden tool whose
+    ``inputSchema`` is the user's JSON Schema, with ``toolChoice``
+    pinned so the model must call exactly that tool.
+    """
+    json_schema = schema.model_json_schema()
+    return {
+        "tools": [
+            {
+                "toolSpec": {
+                    "name": SUBMIT_RESULT_TOOL,
+                    "description": (
+                        f"Submit the final typed payload as a {schema.__name__}. "
+                        "Call this exactly once with all required fields filled in."
+                    ),
+                    "inputSchema": {"json": json_schema},
+                }
+            }
+        ],
+        "toolChoice": {"tool": {"name": SUBMIT_RESULT_TOOL}},
+    }
+
+
+def _validate_tool_payload(
+    payload: dict[str, Any] | None,
+    *,
+    schema: type[BaseModel],
+    label: str,
+) -> dict[str, Any]:
+    """Validate the captured ``submit_result`` arguments against ``schema``."""
+    if payload is None:
+        raise RuntimeStructuredOutputError(
+            f"{label}: model did not call the {SUBMIT_RESULT_TOOL} tool; "
+            f"no structured payload available."
+        )
+    try:
+        instance = schema.model_validate(payload)
+    except ValidationError as exc:
+        raise RuntimeStructuredOutputError(
+            f"{label}: {SUBMIT_RESULT_TOOL} payload did not validate against "
+            f"{schema.__name__}: {exc}",
+            body=payload,
+        ) from exc
+    return instance.model_dump()
+
+
+def _build_cost_record(
+    provider_id: str,
+    model_id: str,
+    usage: dict[str, Any],
+    *,
+    finish: str | None,
+) -> CostRecord:
+    """Build a :class:`CostRecord` from Converse ``usage``.
+
+    Iteration B leaves ``cost_usd=None`` — the pricing table arrives
+    in Iteration E alongside ``BUDGET_USD_CAP``. Token counters are
+    populated regardless so structured logs are useful immediately.
+    """
+    return CostRecord(
+        provider_id=provider_id,
+        model_id=model_id,
+        cost_usd=None,
+        input_tokens=int(usage.get("inputTokens") or 0),
+        output_tokens=int(usage.get("outputTokens") or 0),
+        cache_read_tokens=int(usage.get("cacheReadInputTokens") or 0),
+        cache_write_tokens=int(usage.get("cacheWriteInputTokens") or 0),
+        finish=finish,
+    )
+
+
+def _infer_capabilities(entry: dict[str, Any]) -> frozenset[str]:
+    """Derive airframe capability flags from a Bedrock model summary."""
     caps: set[str] = {CAPABILITY_STRUCTURED_OUTPUT, CAPABILITY_TOOLS}
     if entry.get("responseStreamingSupported"):
         caps.add(CAPABILITY_STREAMING)
@@ -494,13 +1023,12 @@ def _infer_capabilities(entry: dict[str, Any]) -> frozenset[str]:
 
 
 def _classify_bedrock_error(exc: Exception) -> Exception:
-    """Map a boto3 / aioboto3 exception onto the airframe error hierarchy.
+    """Map a boto3 / aioboto3 / aiohttp exception onto airframe's error hierarchy.
 
-    Iteration A only needs auth / transient / protocol classification
-    for the catalog endpoint; the per-model execute() classification
-    (``ValidationException`` → :class:`RuntimeModelNotFoundError`,
-    throttling → :class:`RuntimeTransientError`) lands in Iteration B
-    alongside ``execute()`` itself.
+    Covers both the catalog endpoint (``list_foundation_models``) and
+    the model-invocation endpoint (``converse`` / ``converse_stream``).
+    The execute-path codes (``ValidationException`` for unknown models,
+    ``ThrottlingException`` for rate-limits, etc.) are honoured here.
     """
     # Late-import so we never force botocore at module-import time.
     try:
@@ -510,10 +1038,9 @@ def _classify_bedrock_error(exc: Exception) -> Exception:
             NoCredentialsError,
             NoRegionError,
             PartialCredentialsError,
+            ReadTimeoutError,
         )
     except ImportError:
-        # botocore not installed (i.e. the consumer skipped the extra
-        # entirely). Surface the original exception unchanged.
         return exc
 
     if isinstance(exc, NoCredentialsError | PartialCredentialsError):
@@ -524,12 +1051,13 @@ def _classify_bedrock_error(exc: Exception) -> Exception:
             f"region_name=) — Bedrock is region-pinned. Underlying: {exc}"
         )
     if isinstance(exc, ClientError):
-        # ``response["Error"]["Code"]`` is the canonical error name.
         code = ""
         status: int | None = None
+        message = ""
         try:
             err = exc.response.get("Error", {})  # type: ignore[attr-defined]
             code = err.get("Code", "") or ""
+            message = err.get("Message", "") or ""
             status = exc.response.get("ResponseMetadata", {}).get("HTTPStatusCode")  # type: ignore[attr-defined]
         except Exception:  # noqa: BLE001
             pass
@@ -542,15 +1070,40 @@ def _classify_bedrock_error(exc: Exception) -> Exception:
             return RuntimeAuthError(f"bedrock: auth: {exc}", status=status)
         if code in {"ThrottlingException", "ServiceUnavailableException"}:
             return RuntimeTransientError(f"bedrock: transient {code}: {exc}", status=status)
+        if code == "ResourceNotFoundException":
+            return RuntimeModelNotFoundError(f"bedrock: resource not found: {exc}", status=status)
+        if code == "ValidationException":
+            lower = message.lower()
+            if "context" in lower or "token" in lower and "limit" in lower:
+                return RuntimeContextOverflowError(
+                    f"bedrock: context window exceeded: {exc}", status=status
+                )
+            if "model" in lower:
+                return RuntimeModelNotFoundError(
+                    f"bedrock: model not available: {exc}", status=status
+                )
+            return RuntimeProtocolError(f"bedrock: validation error: {exc}", status=status)
+        if code == "ModelStreamErrorException":
+            return RuntimeTransientError(f"bedrock: stream error: {exc}", status=status)
         if isinstance(status, int) and 500 <= status < 600:
             return RuntimeTransientError(f"bedrock: transient {status}: {exc}", status=status)
         return RuntimeProtocolError(f"bedrock: {code or 'ClientError'}: {exc}", status=status)
-    if isinstance(exc, EndpointConnectionError):
-        return RuntimeTransientError(f"bedrock: endpoint unreachable: {exc}")
+    if isinstance(exc, EndpointConnectionError | ReadTimeoutError):
+        return RuntimeTransientError(f"bedrock: network: {exc}")
+    # aiohttp.ClientError is the typical transport failure under aioboto3.
+    # Late-import: aiohttp may not be installed in every consumer's env.
+    try:
+        import aiohttp
+    except ImportError:
+        return exc
+    if isinstance(exc, aiohttp.ClientError):
+        return RuntimeTransientError(f"bedrock: network: {exc}")
     return exc
 
 
 __all__ = [
     "DEFAULT_BEDROCK_MODEL",
+    "SUBMIT_RESULT_TOOL",
     "BedrockRuntime",
+    "BedrockSession",
 ]

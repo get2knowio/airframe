@@ -68,23 +68,48 @@ def test_constructor_model_overrides_env(monkeypatch: pytest.MonkeyPatch) -> Non
 
 
 # ---------------------------------------------------------------------------
-# SUPPORTED_FEATURES — Iteration A ships the empty set
+# SUPPORTED_FEATURES — Iteration B flips three flags True
 # ---------------------------------------------------------------------------
 
 
-def test_supported_features_is_empty_at_iteration_a() -> None:
-    """No behaviour-bearing capabilities are wired yet.
+def test_supported_features_iteration_b_set() -> None:
+    """Iteration B flips STRUCTURED_OUTPUT_JSON_SCHEMA + STREAMING + CANCEL.
 
-    Iteration A intentionally ships zero flags True. Iteration B flips
-    ``STRUCTURED_OUTPUT_JSON_SCHEMA``, ``STREAMING``, ``CANCEL`` True;
-    later iterations flip the rest.
+    The rest stay False — reasoning + vision + tools + budget + hooks
+    land in Iterations C through E.
     """
-    assert len(BedrockRuntime.SUPPORTED_FEATURES) == 0
+    assert Feature.STRUCTURED_OUTPUT_JSON_SCHEMA in BedrockRuntime.SUPPORTED_FEATURES
+    assert Feature.STREAMING in BedrockRuntime.SUPPORTED_FEATURES
+    assert Feature.CANCEL in BedrockRuntime.SUPPORTED_FEATURES
+    assert len(BedrockRuntime.SUPPORTED_FEATURES) == 3
 
 
-def test_supports_returns_false_for_every_feature() -> None:
+def test_supports_iteration_b_flags_true() -> None:
     rt = BedrockRuntime()
-    for feature in Feature:
+    assert rt.supports(Feature.STRUCTURED_OUTPUT_JSON_SCHEMA) is True
+    assert rt.supports(Feature.STREAMING) is True
+    assert rt.supports(Feature.CANCEL) is True
+
+
+def test_supports_returns_false_for_later_iteration_features() -> None:
+    rt = BedrockRuntime()
+    later = {
+        Feature.SESSION_RESUME,
+        Feature.REASONING_EFFORT,
+        Feature.REASONING_BUDGET_TOKENS,
+        Feature.VISION_INPUT,
+        Feature.FILE_INPUT,
+        Feature.TOOLS_FUNCTION,
+        Feature.TOOLS_MCP_STDIO,
+        Feature.TOOLS_MCP_HTTP,
+        Feature.TOOLS_MCP_SSE,
+        Feature.PERMISSION_CALLBACK,
+        Feature.LIFECYCLE_HOOKS,
+        Feature.BUDGET_USD_CAP,
+        Feature.BUDGET_TURN_CAP,
+        Feature.STRUCTURED_OUTPUT_STRICT,
+    }
+    for feature in later:
         assert rt.supports(feature) is False, f"unexpected True for {feature.name}"
 
 
@@ -92,7 +117,8 @@ def test_supports_accepts_model_kwarg() -> None:
     """Per-model differentiation isn't wired yet but the kwarg is honoured."""
     rt = BedrockRuntime()
     binding = ProviderModel("bedrock", "anthropic.claude-3-5-haiku-20241022-v1:0")
-    assert rt.supports(Feature.STREAMING, model=binding) is False
+    assert rt.supports(Feature.STREAMING, model=binding) is True
+    assert rt.supports(Feature.SESSION_RESUME, model=binding) is False
 
 
 # ---------------------------------------------------------------------------
@@ -159,10 +185,8 @@ def test_unwrap_unrelated_type_raises_typeerror() -> None:
         pass
 
     rt = BedrockRuntime()
-    with pytest.raises(TypeError) as exc:
+    with pytest.raises(TypeError):
         rt.unwrap(_Unrelated)
-    # Message should hint at the upcoming Iteration B unwrap target.
-    assert "Iteration B" in str(exc.value)
 
 
 # ---------------------------------------------------------------------------
@@ -193,23 +217,42 @@ async def test_reset_is_noop() -> None:
 
 
 # ---------------------------------------------------------------------------
-# execute() / session() are stubs until Iteration B
+# session() declines for later-iteration kwargs
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.asyncio
-async def test_execute_raises_not_implemented_at_iteration_a() -> None:
+def test_session_with_no_kwargs_returns_bedrock_session() -> None:
+    from airframe.adapters.bedrock import BedrockSession
+
     rt = BedrockRuntime()
-    with pytest.raises(NotImplementedError) as exc:
-        await rt.execute("hi")
-    assert "Iteration B" in str(exc.value)
+    sess = rt.session()
+    assert isinstance(sess, BedrockSession)
+    assert sess.id is None
 
 
-def test_session_raises_not_implemented_at_iteration_a() -> None:
+def test_session_resume_raises_unsupported_feature() -> None:
+    from airframe.errors import UnsupportedFeatureError
+
     rt = BedrockRuntime()
-    with pytest.raises(NotImplementedError) as exc:
-        rt.session()
-    assert "Iteration B" in str(exc.value)
+    with pytest.raises(UnsupportedFeatureError):
+        rt.session(resume="some-session-id")
+
+
+def test_session_tools_raises_unsupported_feature_iteration_b() -> None:
+    from pydantic import BaseModel
+
+    from airframe.errors import UnsupportedFeatureError
+    from airframe.tools import FunctionTool
+
+    class _P(BaseModel):
+        x: int
+
+    async def _h(p: BaseModel) -> int:
+        return 1
+
+    rt = BedrockRuntime()
+    with pytest.raises(UnsupportedFeatureError):
+        rt.session(tools=[FunctionTool(name="t", description="d", params=_P, handler=_h)])
 
 
 # ---------------------------------------------------------------------------
