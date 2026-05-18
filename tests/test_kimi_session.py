@@ -278,8 +278,10 @@ def test_execute_aggregates_text_parts_and_returns_runtime_result(
     assert result.cost.provider_id == "kimi"
     assert result.cost.input_tokens == 12
     assert result.cost.output_tokens == 8
-    # Iteration B doesn't ship a pricing table — Iteration E lands it.
-    assert result.cost.cost_usd is None
+    # Iteration E: cost_usd populates from the in-tree _KIMI_PRICING
+    # table for kimi-k2-thinking-turbo (12*1.5 + 8*5.0 per 1M = $0.000058).
+    assert result.cost.cost_usd is not None
+    assert result.cost.cost_usd > 0
     asyncio.run(sess.close())
 
 
@@ -1356,3 +1358,412 @@ def test_tools_kwarg_raises_unsupported_feature_pointing_at_mcp() -> None:
     assert excinfo.value.feature is Feature.TOOLS_FUNCTION
     msg = str(excinfo.value)
     assert "mcp_servers" in msg
+
+
+# ---------------------------------------------------------------------------
+# Iteration E: pricing
+# ---------------------------------------------------------------------------
+
+
+def test_cost_usd_populated_from_in_tree_pricing(patch_sdk: dict[str, Any]) -> None:
+    """``CostRecord.cost_usd`` populates from :data:`_KIMI_PRICING`
+    when the model is in the table. ``cache_read_tokens`` bills at
+    the cheaper cache rate, not the fresh-input rate."""
+    from airframe import KimiRuntime
+    from airframe.adapters.kimi import _KIMI_PRICING
+
+    patch_sdk["sdk_session"] = _FakeSdkSession(
+        wire_messages=[
+            _wire("TextPart", text="ok"),
+            _wire(
+                "TokenUsage",
+                input_tokens=1000,
+                output_tokens=500,
+                cache_read_tokens=200,
+            ),
+        ]
+    )
+
+    rt = KimiRuntime(api_key="sk-test")
+    sess = rt.session()
+    result = asyncio.run(sess.execute("hi"))
+
+    in_rate, out_rate, cache_rate = _KIMI_PRICING["kimi-k2-thinking-turbo"]
+    fresh = 1000 - 200
+    expected = round(
+        (fresh / 1000.0) * in_rate + (200 / 1000.0) * cache_rate + (500 / 1000.0) * out_rate,
+        6,
+    )
+    assert result.cost.cost_usd == expected
+    asyncio.run(sess.close())
+
+
+def test_cost_usd_none_for_models_outside_pricing_table(
+    patch_sdk: dict[str, Any],
+) -> None:
+    """Models not in :data:`_KIMI_PRICING` keep ``cost_usd=None`` so
+    consumer code can still trust token counts as a budget proxy."""
+    from airframe import KimiRuntime, ProviderModel
+
+    patch_sdk["sdk_session"] = _FakeSdkSession(
+        wire_messages=[
+            _wire("TextPart", text="ok"),
+            _wire("TokenUsage", input_tokens=100, output_tokens=50),
+        ]
+    )
+
+    rt = KimiRuntime(api_key="sk-test")
+    sess = rt.session(model=ProviderModel("kimi", "kimi-future-unreleased"))
+    result = asyncio.run(sess.execute("hi"))
+
+    assert result.cost.cost_usd is None
+    assert result.cost.input_tokens == 100
+    asyncio.run(sess.close())
+
+
+# ---------------------------------------------------------------------------
+# Iteration E: lifecycle hooks
+# ---------------------------------------------------------------------------
+
+
+def _collect_events() -> tuple[list[Any], Any]:
+    """Return a (events_list, observer_callable) pair for hook tests."""
+    events: list[Any] = []
+
+    def observer(ev: Any) -> None:
+        events.append(ev)
+
+    return events, observer
+
+
+def test_session_start_fires_on_first_execute_only(
+    patch_sdk: dict[str, Any],
+) -> None:
+    """``session_start`` fires once on the first execute() / stream();
+    subsequent turns don't re-fire."""
+    from airframe import KimiRuntime
+
+    patch_sdk["sdk_session"] = _FakeSdkSession(
+        wire_messages=[_wire("TextPart", text="ok")],
+    )
+
+    events, observer = _collect_events()
+    rt = KimiRuntime(api_key="sk-test")
+    sess = rt.session(on_event=observer)
+    asyncio.run(sess.execute("first"))
+    asyncio.run(sess.execute("second"))
+
+    start_events = [e for e in events if e.kind == "session_start"]
+    assert len(start_events) == 1
+    assert start_events[0].payload["model"] == "kimi-k2-thinking-turbo"
+    assert start_events[0].payload["resumed"] is False
+    asyncio.run(sess.close())
+
+
+def test_session_end_fires_on_close_with_cumulative_payload(
+    patch_sdk: dict[str, Any],
+) -> None:
+    """``session_end`` carries ``turn_count`` + ``cost_usd``
+    cumulative-since-session-start."""
+    from airframe import KimiRuntime
+
+    patch_sdk["sdk_session"] = _FakeSdkSession(
+        wire_messages=[
+            _wire("TextPart", text="ok"),
+            _wire("TokenUsage", input_tokens=100, output_tokens=50),
+        ]
+    )
+
+    events, observer = _collect_events()
+    rt = KimiRuntime(api_key="sk-test")
+    sess = rt.session(on_event=observer)
+    asyncio.run(sess.execute("hi"))
+    asyncio.run(sess.close())
+
+    end_events = [e for e in events if e.kind == "session_end"]
+    assert len(end_events) == 1
+    payload = end_events[0].payload
+    assert payload["turn_count"] == 1
+    assert payload["cost_usd"] > 0
+
+
+def test_session_end_does_not_fire_on_close_without_session_start(
+    patch_sdk: dict[str, Any],
+) -> None:
+    """A session that was opened and immediately closed without ever
+    running a turn does NOT emit either lifecycle event."""
+    from airframe import KimiRuntime
+
+    events, observer = _collect_events()
+    rt = KimiRuntime(api_key="sk-test")
+    sess = rt.session(on_event=observer)
+    asyncio.run(sess.close())
+
+    assert events == []  # neither start nor end fired
+
+
+def test_user_prompt_submit_fires_each_turn(patch_sdk: dict[str, Any]) -> None:
+    """``user_prompt_submit`` fires once per execute() / stream(),
+    carrying ``prompt`` (the post-system-prompt text) and ``length``."""
+    from airframe import KimiRuntime
+
+    patch_sdk["sdk_session"] = _FakeSdkSession(
+        wire_messages=[_wire("TextPart", text="x")],
+    )
+
+    events, observer = _collect_events()
+    rt = KimiRuntime(api_key="sk-test")
+    sess = rt.session(on_event=observer)
+    asyncio.run(sess.execute("first prompt"))
+    asyncio.run(sess.execute("second prompt"))
+
+    submit_events = [e for e in events if e.kind == "user_prompt_submit"]
+    assert len(submit_events) == 2
+    assert submit_events[0].payload["prompt"] == "first prompt"
+    assert submit_events[0].payload["length"] == len("first prompt")
+    assert submit_events[1].payload["prompt"] == "second prompt"
+
+
+def _tool_call(call_id: str, name: str, arguments: str | None = None) -> Any:
+    """Build a fake ``ToolCall`` wire whose attribute shape matches kosong."""
+
+    class _FakeFunction:
+        def __init__(self, name: str, arguments: str | None) -> None:
+            self.name = name
+            self.arguments = arguments
+
+    class ToolCall:  # noqa: N801 — must match SDK type name for adapter dispatch
+        def __init__(self, id: str, function: Any) -> None:
+            self.id = id
+            self.function = function
+
+    return ToolCall(id=call_id, function=_FakeFunction(name, arguments))
+
+
+def _tool_result(
+    tool_call_id: str,
+    *,
+    is_error: bool,
+    message: str = "",
+    output: Any = None,
+) -> Any:
+    """Build a fake ``ToolResult`` wire with the kosong shape."""
+
+    class _ReturnValue:
+        def __init__(self, is_error: bool, message: str, output: Any) -> None:
+            self.is_error = is_error
+            self.message = message
+            self.output = output
+
+    class ToolResult:  # noqa: N801 — must match SDK type name
+        def __init__(self, tool_call_id: str, return_value: Any) -> None:
+            self.tool_call_id = tool_call_id
+            self.return_value = return_value
+
+    return ToolResult(
+        tool_call_id=tool_call_id,
+        return_value=_ReturnValue(is_error, message, output),
+    )
+
+
+def test_pre_tool_use_fires_on_toolcall_wire(patch_sdk: dict[str, Any]) -> None:
+    """A ``ToolCall`` on the wire stream emits ``pre_tool_use`` with
+    name + tool_call_id + arguments."""
+    from airframe import KimiRuntime
+
+    patch_sdk["sdk_session"] = _FakeSdkSession(
+        wire_messages=[
+            _tool_call("tc-1", "shell", arguments='{"cmd": "ls"}'),
+            _wire("TextPart", text="done"),
+        ],
+    )
+
+    events, observer = _collect_events()
+    rt = KimiRuntime(api_key="sk-test")
+    sess = rt.session(on_event=observer)
+    asyncio.run(sess.execute("hi"))
+
+    pre = [e for e in events if e.kind == "pre_tool_use"]
+    assert len(pre) == 1
+    assert pre[0].payload["tool_name"] == "shell"
+    assert pre[0].payload["tool_call_id"] == "tc-1"
+    assert pre[0].payload["arguments"] == '{"cmd": "ls"}'
+
+
+def test_post_tool_use_fires_on_successful_toolresult(
+    patch_sdk: dict[str, Any],
+) -> None:
+    """A non-error ``ToolResult`` emits ``post_tool_use`` with the
+    tool's output / message lifted as ``output``."""
+    from airframe import KimiRuntime
+
+    patch_sdk["sdk_session"] = _FakeSdkSession(
+        wire_messages=[
+            _tool_result("tc-1", is_error=False, message="ok", output="file list"),
+            _wire("TextPart", text="ok"),
+        ],
+    )
+
+    events, observer = _collect_events()
+    rt = KimiRuntime(api_key="sk-test")
+    sess = rt.session(on_event=observer)
+    asyncio.run(sess.execute("hi"))
+
+    post = [e for e in events if e.kind == "post_tool_use"]
+    assert len(post) == 1
+    assert post[0].payload["tool_call_id"] == "tc-1"
+    assert post[0].payload["output"] == "file list"
+
+
+def test_tool_failure_fires_on_errored_toolresult(
+    patch_sdk: dict[str, Any],
+) -> None:
+    """An error ``ToolResult`` (``return_value.is_error=True``) emits
+    ``tool_failure`` with the message lifted as ``error``."""
+    from airframe import KimiRuntime
+
+    patch_sdk["sdk_session"] = _FakeSdkSession(
+        wire_messages=[
+            _tool_result("tc-2", is_error=True, message="permission denied"),
+            _wire("TextPart", text="x"),
+        ],
+    )
+
+    events, observer = _collect_events()
+    rt = KimiRuntime(api_key="sk-test")
+    sess = rt.session(on_event=observer)
+    asyncio.run(sess.execute("hi"))
+
+    failures = [e for e in events if e.kind == "tool_failure"]
+    assert len(failures) == 1
+    assert failures[0].payload["tool_call_id"] == "tc-2"
+    assert failures[0].payload["error"] == "permission denied"
+
+
+def test_pre_compact_fires_on_compaction_begin(
+    patch_sdk: dict[str, Any],
+) -> None:
+    """A ``CompactionBegin`` wire emits ``pre_compact``. The matching
+    ``CompactionEnd`` is intentionally silent (no ``post_compact`` kind
+    in airframe's taxonomy)."""
+    from airframe import KimiRuntime
+
+    patch_sdk["sdk_session"] = _FakeSdkSession(
+        wire_messages=[
+            _wire("CompactionBegin"),
+            _wire("CompactionEnd"),
+            _wire("TextPart", text="x"),
+        ],
+    )
+
+    events, observer = _collect_events()
+    rt = KimiRuntime(api_key="sk-test")
+    sess = rt.session(on_event=observer)
+    asyncio.run(sess.execute("hi"))
+
+    pre_compact = [e for e in events if e.kind == "pre_compact"]
+    assert len(pre_compact) == 1
+
+
+def test_hook_events_fire_on_stream_path_too(
+    patch_sdk: dict[str, Any],
+) -> None:
+    """The hook emission is shared by execute() and stream()."""
+    from airframe import KimiRuntime
+
+    patch_sdk["sdk_session"] = _FakeSdkSession(
+        wire_messages=[
+            _tool_call("tc-9", "shell", arguments="{}"),
+            _wire("TextPart", text="x"),
+        ],
+    )
+
+    events, observer = _collect_events()
+    rt = KimiRuntime(api_key="sk-test")
+    sess = rt.session(on_event=observer)
+
+    async def drain() -> None:
+        async for _ in sess.stream("hi"):
+            pass
+
+    asyncio.run(drain())
+    pre = [e for e in events if e.kind == "pre_tool_use"]
+    assert len(pre) == 1
+
+
+def test_hook_observer_exception_does_not_break_session(
+    patch_sdk: dict[str, Any],
+) -> None:
+    """A raising observer must not propagate — the session must
+    continue. :func:`_fire_hook_event` swallows non-system
+    exceptions; we just confirm the contract here."""
+    from airframe import KimiRuntime
+
+    patch_sdk["sdk_session"] = _FakeSdkSession(
+        wire_messages=[_wire("TextPart", text="ok")],
+    )
+
+    def boom(_ev: Any) -> None:
+        raise RuntimeError("observer broke")
+
+    rt = KimiRuntime(api_key="sk-test")
+    sess = rt.session(on_event=boom)
+    # Must not raise.
+    result = asyncio.run(sess.execute("hi"))
+    assert result.text == "ok"
+    asyncio.run(sess.close())
+
+
+# ---------------------------------------------------------------------------
+# Iteration E: budget enforcement
+# ---------------------------------------------------------------------------
+
+
+def test_max_turns_cap_trips_after_n_turns(patch_sdk: dict[str, Any]) -> None:
+    """``max_turns=2`` lets the first two turns through and aborts the
+    third with :class:`RuntimeBudgetExceededError`."""
+    from airframe import KimiRuntime
+    from airframe.errors import RuntimeBudgetExceededError
+
+    patch_sdk["sdk_session"] = _FakeSdkSession(
+        wire_messages=[_wire("TextPart", text="ok")],
+    )
+
+    rt = KimiRuntime(api_key="sk-test")
+    sess = rt.session()
+    asyncio.run(sess.execute("first", max_turns=2))
+    asyncio.run(sess.execute("second", max_turns=2))
+    with pytest.raises(RuntimeBudgetExceededError) as excinfo:
+        asyncio.run(sess.execute("third", max_turns=2))
+    assert excinfo.value.kind == "turns"
+    assert excinfo.value.cap == 2.0
+    asyncio.run(sess.close())
+
+
+def test_max_budget_usd_cap_trips_when_cumulative_spend_exceeds(
+    patch_sdk: dict[str, Any],
+) -> None:
+    """``max_budget_usd`` aborts the next turn once cumulative spend
+    has met the cap. Pre-turn check uses ``cumulative >= cap``, so the
+    second turn aborts as soon as the first turn's cost reached the
+    cap."""
+    from airframe import KimiRuntime
+    from airframe.errors import RuntimeBudgetExceededError
+
+    # First turn: ~$0.004 (1000 input @ $0.0015/1k + 500 output @ $0.005/1k
+    # = 0.0015 + 0.0025 = $0.004). Cap at $0.003 → second turn trips.
+    patch_sdk["sdk_session"] = _FakeSdkSession(
+        wire_messages=[
+            _wire("TextPart", text="ok"),
+            _wire("TokenUsage", input_tokens=1000, output_tokens=500),
+        ],
+    )
+
+    rt = KimiRuntime(api_key="sk-test")
+    sess = rt.session()
+    asyncio.run(sess.execute("first", max_budget_usd=0.003))
+    # Cumulative now $0.004 >= cap $0.003 → second turn must abort.
+    with pytest.raises(RuntimeBudgetExceededError) as excinfo:
+        asyncio.run(sess.execute("second", max_budget_usd=0.003))
+    assert excinfo.value.kind == "usd"
+    asyncio.run(sess.close())

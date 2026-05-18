@@ -35,6 +35,25 @@ prompt-side file slot — files reach Kimi tools via the session's
 between turns rebuilds the SDK session, mirroring how Codex rebuilds
 its :class:`Thread` on a reasoning-effort change.
 
+**Iteration E.** Lifecycle hooks + budget caps + pricing.
+:class:`KimiSession` now synthesises seven of airframe's eight
+:class:`~airframe.hooks.HookEventKind` literals from the
+wire-message stream: ``session_start`` / ``session_end`` /
+``user_prompt_submit`` (synthesised at the execute / close
+boundaries — the SDK has no native session-lifecycle events);
+``pre_tool_use`` (from kosong's :class:`ToolCall` wire);
+``post_tool_use`` / ``tool_failure`` (from
+:class:`ToolResult.return_value.is_error`); and ``pre_compact``
+(from :class:`CompactionBegin`). ``rate_limit`` stays unemitted —
+Moonshot raises 429s as :class:`APIStatusError` exceptions rather
+than wire events. :data:`Feature.LIFECYCLE_HOOKS` flips True.
+Per-turn budget caps land via the shared
+:func:`_enforce_budget_pre_turn` helper:
+:data:`Feature.BUDGET_USD_CAP` + :data:`Feature.BUDGET_TURN_CAP`
+flip True; :class:`CostRecord.cost_usd` populates from an in-tree
+:data:`_KIMI_PRICING` table that captures Moonshot's per-1k-token
+rates as of 2026-05-18.
+
 **Iteration D.** Permission callback + MCP refs. The SDK surfaces
 :class:`ApprovalRequest` objects on the wire-message stream when
 ``yolo=False``; the adapter now dispatches each one to the
@@ -122,6 +141,8 @@ from airframe.sessions import (
     _check_mcp_servers_supported,
     _check_permission_supported,
     _check_provider_options,
+    _enforce_budget_pre_turn,
+    _fire_hook_event,
     _split_prompt_parts,
 )
 from airframe.thinking import ThinkingMode
@@ -149,20 +170,35 @@ DEFAULT_KIMI_MODEL = "kimi-k2-thinking-turbo"
 DEFAULT_KIMI_BASE_URL = "https://api.moonshot.ai/v1"
 
 
+#: Per-model pricing for the Kimi K2 line. Point-in-time numbers
+#: captured 2026-05-18 from Moonshot's public pricing page
+#: (https://platform.moonshot.ai/docs/pricing). Re-verify rates
+#: when the next Kimi adapter PR ships — Moonshot has moved prices
+#: more than once over the K2 line's lifetime.
+#:
+#: Shape: ``{model_id → (input_per_1k_usd, output_per_1k_usd,
+#: cache_read_per_1k_usd)}``. Cache-write isn't billed separately on
+#: Moonshot today; we count the write tokens but don't add them to
+#: ``cost_usd``. The Codex / Bedrock plans use the same convention.
+_KIMI_PRICING: dict[str, tuple[float, float, float]] = {
+    "kimi-k2-thinking": (0.0006, 0.0025, 0.00015),
+    "kimi-k2-thinking-turbo": (0.0015, 0.0050, 0.00015),
+}
+
+
 #: Curated fallback catalogue for :meth:`KimiRuntime.list_models` when no
 #: credential is available (or when the live ``/v1/models`` endpoint is
 #: unreachable). Real catalogue surfaces from Moonshot's API when called
-#: with a valid key — see :meth:`list_models`. Pricing left as ``None``
-#: in Iteration A; populated alongside the in-tree ``_KIMI_PRICING``
-#: table in Iteration E.
+#: with a valid key — see :meth:`list_models`. Iteration E populates
+#: pricing from :data:`_KIMI_PRICING`.
 _FALLBACK_MODELS: tuple[ModelInfo, ...] = (
     ModelInfo(
         id="kimi-k2-thinking-turbo",
         display_name="Kimi K2 (Thinking, Turbo)",
         provider_id="kimi",
         context_window=256_000,
-        pricing_input_per_1k_usd=None,
-        pricing_output_per_1k_usd=None,
+        pricing_input_per_1k_usd=_KIMI_PRICING["kimi-k2-thinking-turbo"][0],
+        pricing_output_per_1k_usd=_KIMI_PRICING["kimi-k2-thinking-turbo"][1],
         capabilities=frozenset(),
     ),
     ModelInfo(
@@ -170,11 +206,40 @@ _FALLBACK_MODELS: tuple[ModelInfo, ...] = (
         display_name="Kimi K2 (Thinking)",
         provider_id="kimi",
         context_window=256_000,
-        pricing_input_per_1k_usd=None,
-        pricing_output_per_1k_usd=None,
+        pricing_input_per_1k_usd=_KIMI_PRICING["kimi-k2-thinking"][0],
+        pricing_output_per_1k_usd=_KIMI_PRICING["kimi-k2-thinking"][1],
         capabilities=frozenset(),
     ),
 )
+
+
+def _compute_kimi_cost_usd(
+    model_id: str,
+    *,
+    input_tokens: int,
+    output_tokens: int,
+    cache_read_tokens: int,
+) -> float | None:
+    """Compute the USD cost for one Kimi turn, or ``None`` when the
+    model isn't in :data:`_KIMI_PRICING`.
+
+    Cached input tokens bill at the cache-read rate (cheaper than
+    fresh input). Cache-*write* isn't billed separately on Moonshot
+    today — those tokens already count as fresh input on the turn
+    that wrote them. Rounds to 6 decimal places; matches the
+    convention every other pricing-aware adapter uses.
+    """
+    rates = _KIMI_PRICING.get(model_id)
+    if rates is None:
+        return None
+    in_rate, out_rate, cache_in_rate = rates
+    fresh_input = max(0, input_tokens - cache_read_tokens)
+    cost = (
+        (fresh_input / 1000.0) * in_rate
+        + (cache_read_tokens / 1000.0) * cache_in_rate
+        + (output_tokens / 1000.0) * out_rate
+    )
+    return round(cost, 6)
 
 
 def _translate_thinking_for_kimi(thinking: ThinkingMode) -> bool:
@@ -481,13 +546,31 @@ class KimiRuntime(AgentRuntime):
             Feature.TOOLS_MCP_STDIO,
             Feature.TOOLS_MCP_HTTP,
             Feature.TOOLS_MCP_SSE,
+            Feature.LIFECYCLE_HOOKS,
+            Feature.BUDGET_USD_CAP,
+            Feature.BUDGET_TURN_CAP,
         }
     )
 
-    #: The set of :class:`~airframe.hooks.HookEventKind` literals this
-    #: adapter can emit through ``on_event=``. Empty in Iteration A;
-    #: Iteration E adds the six kinds the SDK surfaces natively.
-    EMITTABLE_HOOK_KINDS: ClassVar[frozenset[str]] = frozenset()
+    #: The :class:`~airframe.hooks.HookEventKind` literals this
+    #: adapter can emit through ``on_event=``. Iteration E wires the
+    #: seven kinds the kimi-cli wire stream natively surfaces; the
+    #: ``rate_limit`` kind stays unemitted today (Moonshot returns 429s
+    #: as :class:`APIStatusError` exceptions, not as typed wire events,
+    #: and the wire stream completes before the exception bubbles up;
+    #: synthesising rate_limit on the exception path is additive in a
+    #: later iteration).
+    EMITTABLE_HOOK_KINDS: ClassVar[frozenset[str]] = frozenset(
+        {
+            "session_start",
+            "session_end",
+            "user_prompt_submit",
+            "pre_tool_use",
+            "post_tool_use",
+            "tool_failure",
+            "pre_compact",
+        }
+    )
 
     def __init__(
         self,
@@ -636,6 +719,7 @@ class KimiRuntime(AgentRuntime):
             model=model,
             mcp_servers=mcp_servers,
             on_permission=on_permission,
+            on_event=on_event,
             provider_options=kimi_options,
         )
 
@@ -714,6 +798,7 @@ class KimiSession(AgentSession):
         model: ProviderModel | None = None,
         mcp_servers: list[McpServerRef] | None = None,
         on_permission: PermissionCallback | None = None,
+        on_event: Callable[[HookEvent], None] | None = None,
         provider_options: KimiOptions | None = None,
     ) -> None:
         self._runtime = runtime
@@ -728,6 +813,17 @@ class KimiSession(AgentSession):
         # the SDK boundary stays tight.
         self._mcp_configs: list[dict[str, Any]] | None = _build_kimi_mcp_configs(self._mcp_servers)
         self._on_permission: PermissionCallback | None = on_permission
+        # Iteration E: lifecycle-hook observer + budget trackers.
+        # ``_session_start_fired`` distinguishes "the first execute() /
+        # stream() will emit session_start" from "session_start was
+        # already emitted on a prior turn" so we don't double-fire.
+        # ``_cumulative_cost_usd`` / ``_turn_count`` feed
+        # :func:`_enforce_budget_pre_turn` at each turn boundary.
+        self._on_event: Callable[[HookEvent], None] | None = on_event
+        self._session_start_fired = False
+        self._session_end_fired = False
+        self._cumulative_cost_usd: float = 0.0
+        self._turn_count: int = 0
         self._provider_options = provider_options
         self._sdk_session: Any = None  # lazy-created on first execute/stream
         # Pre-initialised so ``close()`` can run even if
@@ -878,6 +974,16 @@ class KimiSession(AgentSession):
             max_turns=max_turns,
             max_budget_usd=max_budget_usd,
         )
+        # Iteration E: budget enforcement at the turn boundary. Both
+        # caps fire before any vendor work — re-using the shared helper
+        # keeps the error shape consistent with Codex / Copilot.
+        _enforce_budget_pre_turn(
+            max_turns=max_turns,
+            max_budget_usd=max_budget_usd,
+            cumulative_cost_usd=self._cumulative_cost_usd,
+            turn_count=self._turn_count,
+            adapter_label=self._runtime.label,
+        )
         del timeout  # Iteration B doesn't wire a per-call deadline; the
         # SDK's internal step caps are the de-facto upper bound.
 
@@ -888,6 +994,13 @@ class KimiSession(AgentSession):
         import kimi_agent_sdk as kimi_sdk  # late import — see module docstring
 
         user_input = _build_kimi_user_input(text, images, sdk_module=kimi_sdk)
+        self._fire_session_start_if_needed()
+        _fire_hook_event(
+            self._on_event,
+            "user_prompt_submit",
+            session_id=self.id,
+            payload={"prompt": text, "length": len(text)},
+        )
 
         self._in_flight = True
         try:
@@ -901,6 +1014,12 @@ class KimiSession(AgentSession):
                     await self._resolve_approval_request(wire)
                 elif kind == "usage":
                     last_usage = wire
+                elif kind == "tool_call":
+                    self._fire_tool_call_hook(wire)
+                elif kind == "tool_result":
+                    self._fire_tool_result_hook(wire)
+                elif kind == "compaction_begin":
+                    self._fire_compaction_hook()
                 # Other wire-types (TurnBegin / TurnEnd / StepBegin / etc.)
                 # are observed for their side-effect on stream events
                 # (when stream() drives the same loop); execute() doesn't
@@ -910,6 +1029,9 @@ class KimiSession(AgentSession):
 
         text = "".join(text_buffer)
         cost = self._build_cost_record(model_id=self._resolved_model_id(), usage=last_usage)
+        # Iteration E: tally turn + cost for the next pre-turn check.
+        self._turn_count += 1
+        self._cumulative_cost_usd += cost.cost_usd or 0.0
         return RuntimeResult(
             text=text,
             structured=None,
@@ -937,6 +1059,13 @@ class KimiSession(AgentSession):
             max_turns=max_turns,
             max_budget_usd=max_budget_usd,
         )
+        _enforce_budget_pre_turn(
+            max_turns=max_turns,
+            max_budget_usd=max_budget_usd,
+            cumulative_cost_usd=self._cumulative_cost_usd,
+            turn_count=self._turn_count,
+            adapter_label=self._runtime.label,
+        )
         del timeout
 
         text_buffer: list[str] = []
@@ -945,6 +1074,13 @@ class KimiSession(AgentSession):
         import kimi_agent_sdk as kimi_sdk  # late import — see module docstring
 
         user_input = _build_kimi_user_input(text, images, sdk_module=kimi_sdk)
+        self._fire_session_start_if_needed()
+        _fire_hook_event(
+            self._on_event,
+            "user_prompt_submit",
+            session_id=self.id,
+            payload={"prompt": text, "length": len(text)},
+        )
 
         self._in_flight = True
         try:
@@ -959,11 +1095,19 @@ class KimiSession(AgentSession):
                     await self._resolve_approval_request(wire)
                 elif kind == "usage":
                     last_usage = wire
+                elif kind == "tool_call":
+                    self._fire_tool_call_hook(wire)
+                elif kind == "tool_result":
+                    self._fire_tool_result_hook(wire)
+                elif kind == "compaction_begin":
+                    self._fire_compaction_hook()
         finally:
             self._in_flight = False
 
         text = "".join(text_buffer)
         cost = self._build_cost_record(model_id=self._resolved_model_id(), usage=last_usage)
+        self._turn_count += 1
+        self._cumulative_cost_usd += cost.cost_usd or 0.0
         yield TurnComplete(
             result=RuntimeResult(text=text, structured=None, cost=cost, finish="stop", raw=None)
         )
@@ -983,6 +1127,25 @@ class KimiSession(AgentSession):
         if self._closed:
             return
         self._closed = True
+        # Iteration E: emit ``session_end`` exactly once, gated on
+        # ``session_start`` having fired (a never-used session that
+        # was opened-and-immediately-closed must not emit either kind).
+        if (
+            self._on_event is not None
+            and self._session_start_fired
+            and not self._session_end_fired
+        ):
+            self._session_end_fired = True
+            _fire_hook_event(
+                self._on_event,
+                "session_end",
+                session_id=self.id,
+                payload={
+                    "model": self._resolved_model_id(),
+                    "turn_count": self._turn_count,
+                    "cost_usd": round(self._cumulative_cost_usd, 6),
+                },
+            )
         if self._sdk_session is not None:
             try:
                 await self._sdk_session.close()
@@ -1123,13 +1286,19 @@ class KimiSession(AgentSession):
             wire.resolve(response_kind)
 
     def _classify_wire_message(self, wire: Any) -> str:
-        """Return a coarse category for ``wire`` — text/reasoning/approval/usage/other.
+        """Return a coarse category for ``wire``.
 
         The match-by-type-name approach avoids importing every Wire
         type at module load (kimi_agent_sdk pulls in fastmcp /
         kimi-cli / kaos / kosong transitively, all of which are
         co-installation hazards). Tests substitute lightweight fake
         types whose ``__name__`` matches.
+
+        Returns one of: ``"text"``, ``"reasoning"``, ``"approval"``,
+        ``"usage"``, ``"tool_call"`` (Iteration E — model invoking a
+        tool), ``"tool_result"`` (Iteration E — tool returned),
+        ``"compaction_begin"`` (Iteration E — vendor compacting
+        history), or ``"other"``.
         """
         name = type(wire).__name__
         if name == "TextPart":
@@ -1140,6 +1309,12 @@ class KimiSession(AgentSession):
             return "approval"
         if name == "TokenUsage":
             return "usage"
+        if name == "ToolCall":
+            return "tool_call"
+        if name == "ToolResult":
+            return "tool_result"
+        if name == "CompactionBegin":
+            return "compaction_begin"
         return "other"
 
     def _classify_sdk_exception(self, exc: BaseException) -> None:
@@ -1182,16 +1357,122 @@ class KimiSession(AgentSession):
         # Unknown — surface as protocol error rather than swallowing.
         raise RuntimeProtocolError(msg) from exc
 
+    def _fire_session_start_if_needed(self) -> None:
+        """Emit ``session_start`` once per session at first execute().
+
+        The Kimi Agent SDK has no native ``session_start`` event; the
+        adapter synthesises it from the first :meth:`execute` /
+        :meth:`stream` call. Subsequent turns don't re-fire — a session
+        is one start / end pair, even across many turns.
+        """
+        if self._on_event is None or self._session_start_fired:
+            return
+        self._session_start_fired = True
+        _fire_hook_event(
+            self._on_event,
+            "session_start",
+            session_id=self.id,
+            payload={
+                "model": self._resolved_model_id(),
+                "resumed": self._resume_id is not None,
+            },
+        )
+
+    def _fire_tool_call_hook(self, wire: Any) -> None:
+        """Translate a kosong ``ToolCall`` wire into ``pre_tool_use``.
+
+        The :class:`ToolCall` carries an ``id`` and a ``function``
+        sub-object with ``name`` and ``arguments`` (a JSON-string
+        slice — partial on streaming, complete on the consolidated
+        ``ToolCall`` wire). The payload mirrors what Codex emits so
+        portable observers see the same shape across adapters.
+        """
+        if self._on_event is None:
+            return
+        function = getattr(wire, "function", None)
+        name = getattr(function, "name", "") if function is not None else ""
+        arguments = getattr(function, "arguments", None) if function is not None else None
+        payload: dict[str, Any] = {
+            "tool_name": name or "",
+            "tool_call_id": getattr(wire, "id", "") or "",
+        }
+        if arguments is not None:
+            payload["arguments"] = arguments
+        _fire_hook_event(
+            self._on_event,
+            "pre_tool_use",
+            session_id=self.id,
+            payload=payload,
+        )
+
+    def _fire_tool_result_hook(self, wire: Any) -> None:
+        """Translate a kosong ``ToolResult`` wire into
+        ``post_tool_use`` / ``tool_failure``.
+
+        Routes by ``wire.return_value.is_error``:
+
+        * ``False`` (or missing) → ``post_tool_use`` with the tool's
+          ``output`` / ``message`` lifted into the payload.
+        * ``True`` → ``tool_failure`` with the ``message`` (the
+          explanatory string the SDK gives the model) lifted as
+          ``error``.
+        """
+        if self._on_event is None:
+            return
+        rv = getattr(wire, "return_value", None)
+        is_error = bool(getattr(rv, "is_error", False)) if rv is not None else False
+        kind = "tool_failure" if is_error else "post_tool_use"
+        payload: dict[str, Any] = {
+            "tool_call_id": getattr(wire, "tool_call_id", "") or "",
+        }
+        if rv is not None:
+            message = getattr(rv, "message", "") or ""
+            output = getattr(rv, "output", None)
+            if is_error:
+                if message:
+                    payload["error"] = message
+            else:
+                if output is not None:
+                    payload["output"] = output
+                elif message:
+                    payload["output"] = message
+        _fire_hook_event(
+            self._on_event,
+            kind,
+            session_id=self.id,
+            payload=payload,
+        )
+
+    def _fire_compaction_hook(self) -> None:
+        """Emit ``pre_compact`` when the SDK signals a compaction begin.
+
+        The kimi-cli wire stream's :class:`CompactionBegin` /
+        :class:`CompactionEnd` events are empty markers — no fields to
+        lift. We surface ``pre_compact`` and skip the matching "end"
+        signal (airframe has no ``post_compact`` kind; compaction is a
+        single-shot observable).
+        """
+        if self._on_event is None:
+            return
+        _fire_hook_event(
+            self._on_event,
+            "pre_compact",
+            session_id=self.id,
+            payload={},
+        )
+
     def _resolved_model_id(self) -> str:
         return self._model.model_id if self._model is not None else self._runtime._default_model
 
     def _build_cost_record(self, *, model_id: str, usage: Any) -> CostRecord:
         """Build a :class:`CostRecord` from a ``TokenUsage`` wire message.
 
-        Iteration B leaves USD cost as ``None`` — the pricing table
-        lands in Iteration E alongside ``BUDGET_USD_CAP``. Token
-        counts populate from ``usage.input_tokens`` /
-        ``usage.output_tokens`` when present; otherwise zero.
+        Iteration E populates :attr:`CostRecord.cost_usd` from
+        :data:`_KIMI_PRICING` when the model is in the table; models
+        outside the table leave ``cost_usd=None`` so consumer code
+        can still trust token counts as a budget proxy. Token counts
+        populate from ``usage.input_tokens`` / ``usage.output_tokens``
+        / ``usage.cache_read_tokens`` when present; otherwise zero.
         """
         input_tokens = int(getattr(usage, "input_tokens", 0) or 0) if usage is not None else 0
         output_tokens = int(getattr(usage, "output_tokens", 0) or 0) if usage is not None else 0
@@ -1200,7 +1481,12 @@ class KimiSession(AgentSession):
         return CostRecord(
             provider_id=self._runtime.PROVIDER_ID,
             model_id=model_id,
-            cost_usd=None,
+            cost_usd=_compute_kimi_cost_usd(
+                model_id,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                cache_read_tokens=cache_read,
+            ),
             input_tokens=input_tokens,
             output_tokens=output_tokens,
             cache_read_tokens=cache_read,

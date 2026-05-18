@@ -162,9 +162,9 @@ def test_validate_binding_rejects_foreign_provider_id() -> None:
 # --- supports() ---------------------------------------------------------------
 
 
-def test_supports_iteration_d_feature_matrix() -> None:
-    """Iteration D adds PERMISSION_CALLBACK + TOOLS_MCP_STDIO/HTTP/SSE
-    on top of C.
+def test_supports_iteration_e_feature_matrix() -> None:
+    """Iteration E adds LIFECYCLE_HOOKS + BUDGET_USD_CAP +
+    BUDGET_TURN_CAP on top of D.
 
     ``STRUCTURED_OUTPUT_JSON_SCHEMA`` stays True (the conformance
     floor every airframe adapter declares), but
@@ -175,9 +175,7 @@ def test_supports_iteration_d_feature_matrix() -> None:
     ``TOOLS_FUNCTION`` stays **permanently** False — the kimi-agent-sdk
     Python surface has no programmatic Python-callable tool channel;
     wrap as MCP instead. ``TOOLS_MCP_IN_PROCESS`` stays permanently
-    False — no in-process MCP slot in the SDK. The remaining unflipped
-    flags (LIFECYCLE_HOOKS, BUDGET_*) flip on in Iteration E per
-    the plan.
+    False — no in-process MCP slot in the SDK.
     """
     rt = _make_runtime()
     expected_true = {
@@ -191,11 +189,14 @@ def test_supports_iteration_d_feature_matrix() -> None:
         Feature.TOOLS_MCP_STDIO,
         Feature.TOOLS_MCP_HTTP,
         Feature.TOOLS_MCP_SSE,
+        Feature.LIFECYCLE_HOOKS,
+        Feature.BUDGET_USD_CAP,
+        Feature.BUDGET_TURN_CAP,
     }
     for feature in Feature:
         want = feature in expected_true
         assert rt.supports(feature) is want, (
-            f"Iteration D: {feature} supports() should be {want}; got {rt.supports(feature)}"
+            f"Iteration E: {feature} supports() should be {want}; got {rt.supports(feature)}"
         )
 
 
@@ -287,13 +288,14 @@ def test_list_models_returns_fallback_catalogue() -> None:
     ids = {m.id for m in models}
     assert DEFAULT_KIMI_MODEL in ids
     # Every fallback entry must declare the kimi provider id so consumers
-    # filtering by provider see them.
+    # filtering by provider see them. Iteration E populates pricing from
+    # the in-tree _KIMI_PRICING table.
     for m in models:
         assert m.provider_id == "kimi"
-        # Iteration A leaves pricing as None — fallback catalogue has no
-        # vendor-confirmed rates. Populated alongside _KIMI_PRICING in E.
-        assert m.pricing_input_per_1k_usd is None
-        assert m.pricing_output_per_1k_usd is None
+        assert m.pricing_input_per_1k_usd is not None
+        assert m.pricing_output_per_1k_usd is not None
+        assert m.pricing_input_per_1k_usd > 0
+        assert m.pricing_output_per_1k_usd > 0
 
 
 # --- session() factory --------------------------------------------------------
@@ -364,12 +366,28 @@ def test_constructor_accepts_documented_kwargs() -> None:
     assert rt._api_key_override == "sk-test"
 
 
-# --- emittable hook kinds — empty in Iteration A ------------------------------
+# --- emittable hook kinds — populated in Iteration E -------------------------
 
 
-def test_emittable_hook_kinds_empty_in_iteration_a() -> None:
-    """No SDK events translated to HookEvent yet — Iteration E lands the six kinds."""
-    assert frozenset() == KimiRuntime.EMITTABLE_HOOK_KINDS
+def test_emittable_hook_kinds_iteration_e_set() -> None:
+    """Iteration E adds seven of the eight HookEventKind literals.
+
+    ``rate_limit`` stays unemitted — Moonshot raises 429s as
+    APIStatusError exceptions, not as wire events. Synthesising on
+    the exception path is additive in a later iteration.
+    """
+    expected = frozenset(
+        {
+            "session_start",
+            "session_end",
+            "user_prompt_submit",
+            "pre_tool_use",
+            "post_tool_use",
+            "tool_failure",
+            "pre_compact",
+        }
+    )
+    assert expected == KimiRuntime.EMITTABLE_HOOK_KINDS
 
 
 def _unused_helper_to_silence_any_import(_: Any) -> None:
