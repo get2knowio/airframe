@@ -156,6 +156,7 @@ from airframe.models import (
     CAPABILITY_VISION,
     ModelInfo,
 )
+from airframe.options import BedrockOptions
 from airframe.permission import PermissionRequest
 from airframe.protocol import (
     AgentRuntime,
@@ -166,6 +167,7 @@ from airframe.protocol import (
 )
 from airframe.sessions import (
     _check_budget_supported,
+    _check_provider_options,
     _enforce_budget_pre_turn,
     _fire_hook_event,
     _split_prompt_parts,
@@ -579,19 +581,32 @@ class BedrockRuntime(AgentRuntime):
                 feature=Feature.SESSION_RESUME,
             )
         if mcp_servers is not None and mcp_servers:
+            # The first ref's transport drives the feature= attribute on
+            # the decline so consumer code can branch on the specific
+            # transport that failed. (All three are permanent declines
+            # on Bedrock; the message body says so.)
+            transport = mcp_servers[0].transport
+            feature_map = {
+                "stdio": Feature.TOOLS_MCP_STDIO,
+                "http": Feature.TOOLS_MCP_HTTP,
+                "sse": Feature.TOOLS_MCP_SSE,
+            }
             raise UnsupportedFeatureError(
                 "BedrockSession: Bedrock Converse has no MCP slot — "
                 "TOOLS_MCP_* are permanent declines on this adapter. If you "
                 "need to bridge to an MCP server, reach the live aioboto3 "
                 "client via runtime.unwrap(BedrockRuntimeClient) and "
                 "hand-craft the shim.",
-                feature=Feature.TOOLS_MCP_STDIO,
+                feature=feature_map.get(transport, Feature.TOOLS_MCP_STDIO),
             )
-        if provider_options is not None:
-            raise UnsupportedFeatureError(
-                "BedrockSession: BedrockOptions namespace lands in Iteration F. "
-                "Pass provider_options=None for now."
-            )
+        _check_provider_options(
+            provider_options,
+            expected_type=BedrockOptions,
+            adapter_label=self.label,
+        )
+        bedrock_options = (
+            provider_options if isinstance(provider_options, BedrockOptions) else None
+        )
         model_id = self._resolve_model(model) if model is not None else self._default_model
         return BedrockSession(
             self,
@@ -600,6 +615,7 @@ class BedrockRuntime(AgentRuntime):
             tools=tools,
             on_permission=on_permission,
             on_event=on_event,
+            provider_options=bedrock_options,
         )
 
     async def list_models(self) -> list[ModelInfo]:
@@ -817,9 +833,18 @@ class BedrockSession:
         tools: list[FunctionTool] | None = None,
         on_permission: PermissionCallback | None = None,
         on_event: Callable[[HookEvent], None] | None = None,
+        provider_options: BedrockOptions | None = None,
     ) -> None:
         self._runtime = runtime
-        self._model_id = model_id
+        # ``inference_profile_arn`` (when set on provider_options)
+        # overrides the per-call ``modelId`` — handy for routing
+        # through a PT or cross-region inference profile without
+        # juggling the prefix in :class:`ProviderModel`.
+        self._provider_options = provider_options
+        if provider_options is not None and provider_options.inference_profile_arn:
+            self._model_id = provider_options.inference_profile_arn
+        else:
+            self._model_id = model_id
         self._system = system
         self._messages: list[dict[str, Any]] = []
         self._closed = False
@@ -845,6 +870,12 @@ class BedrockSession:
         # later via the cancel() plumbing.
         self._cumulative_cost_usd: float = 0.0
         self._turn_count: int = 0
+        # Per-session bedrock-runtime client, only built when a
+        # ``provider_options.region_name`` override forces this session
+        # to talk to a different region than the runtime's default.
+        # Otherwise sessions share the runtime's lazy client.
+        self._session_client_ctx: Any = None
+        self._session_client: Any = None
 
     # --- AgentSession interface --------------------------------------------
 
@@ -926,7 +957,7 @@ class BedrockSession:
         for ``schema=`` is captured along the way; the loop only
         terminates when no more *user* tools fire.
         """
-        client = await self._runtime._get_runtime_client()
+        client = await self._get_client()
         captured_submit_input: dict[str, Any] | None = None
         for _ in range(MAX_TOOL_ITERATIONS):
             call_kwargs = self._build_call_kwargs(schema=schema, thinking_field=thinking_field)
@@ -951,6 +982,7 @@ class BedrockSession:
 
             if not user_tool_uses:
                 stop_reason = response.get("stopReason")
+                _check_guardrail_intervention(stop_reason, label=self._runtime.label)
                 structured = None
                 if schema is not None:
                     structured = _validate_tool_payload(
@@ -1112,7 +1144,7 @@ class BedrockSession:
             payload={"prompt": _flatten_prompt_text(content), "blocks": len(content)},
         )
 
-        client = await self._runtime._get_runtime_client()
+        client = await self._get_client()
         full_text: list[str] = []
         captured_submit: dict[str, Any] | None = None
         final_stop: str | None = None
@@ -1148,6 +1180,7 @@ class BedrockSession:
 
                 if not state.user_tool_uses:
                     # No user tools requested — final turn.
+                    _check_guardrail_intervention(final_stop, label=self._runtime.label)
                     structured = None
                     if schema is not None:
                         structured = _validate_tool_payload(
@@ -1380,6 +1413,20 @@ class BedrockSession:
                     "cumulative_cost_usd": self._cumulative_cost_usd,
                 },
             )
+        # Tear down the per-session region-pinned client if we built one.
+        # Mirror BedrockRuntime.close — never raise from teardown.
+        ctx = self._session_client_ctx
+        self._session_client_ctx = None
+        self._session_client = None
+        if ctx is not None:
+            try:
+                await ctx.__aexit__(None, None, None)
+            except Exception as exc:  # noqa: BLE001 — teardown never raises
+                logger.debug(
+                    "%s.session_client_teardown_failed error=%s",
+                    self._runtime.label,
+                    exc,
+                )
         self._closed = True
         self._messages.clear()
 
@@ -1403,6 +1450,38 @@ class BedrockSession:
             session_id=None,
             payload={"model": self._model_id},
         )
+
+    async def _get_client(self) -> Any:
+        """Return the bedrock-runtime client this session should call.
+
+        When ``provider_options.region_name`` is set, this session owns
+        a private client pinned to that region; otherwise we share the
+        runtime's lazy client. The session-private client is built
+        lazily on first call and torn down by :meth:`close`.
+        """
+        po = self._provider_options
+        if po is None or po.region_name is None:
+            return await self._runtime._get_runtime_client()
+        if self._session_client is not None:
+            return self._session_client
+        try:
+            import aioboto3
+        except ImportError as exc:
+            raise ImportError(
+                "BedrockRuntime requires the 'aioboto3' package. "
+                "Install with: pip install airframe-agents[bedrock]"
+            ) from exc
+        try:
+            aws_session = aioboto3.Session(**self._runtime._resolve_aws_credentials())
+            self._session_client_ctx = aws_session.client(
+                "bedrock-runtime", region_name=po.region_name
+            )
+            self._session_client = await self._session_client_ctx.__aenter__()
+        except Exception as exc:
+            self._session_client_ctx = None
+            self._session_client = None
+            raise _classify_bedrock_error(exc) from exc
+        return self._session_client
 
     # --- Internals ----------------------------------------------------------
 
@@ -1435,8 +1514,26 @@ class BedrockSession:
                 # the model is allowed to call both within one turn.
                 tool_config["toolChoice"] = {"tool": {"name": SUBMIT_RESULT_TOOL}}
             call_kwargs["toolConfig"] = tool_config
+        # additionalModelRequestFields merges airframe's thinking field
+        # (Iteration C) with the user's pass-through dict (Iteration F).
+        # User keys win on collision — the pass-through is documented as
+        # the honest escape hatch, so airframe doesn't second-guess it.
+        amrf: dict[str, Any] = {}
         if thinking_field is not None:
-            call_kwargs["additionalModelRequestFields"] = {"thinking": thinking_field}
+            amrf["thinking"] = thinking_field
+        po = self._provider_options
+        if po is not None and po.additional_model_fields:
+            amrf.update(po.additional_model_fields)
+        if amrf:
+            call_kwargs["additionalModelRequestFields"] = amrf
+        if po is not None:
+            if po.guardrail_id is not None:
+                guardrail: dict[str, Any] = {"guardrailIdentifier": po.guardrail_id}
+                if po.guardrail_version is not None:
+                    guardrail["guardrailVersion"] = po.guardrail_version
+                call_kwargs["guardrailConfig"] = guardrail
+            if po.performance_latency is not None:
+                call_kwargs["performanceConfig"] = {"latency": po.performance_latency}
         return call_kwargs
 
 
@@ -1860,6 +1957,25 @@ def _build_tool_result_block(*, tool_use_id: str, output: Any, is_error: bool) -
             "status": "error" if is_error else "success",
         }
     }
+
+
+def _check_guardrail_intervention(stop_reason: str | None, *, label: str) -> None:
+    """Raise :class:`RuntimeProtocolError` on a guardrail intervention.
+
+    When Bedrock Guardrails blocks the response (because of a content
+    filter or sensitive-topic policy), Converse sets
+    ``stopReason == "guardrail_intervened"`` and ships a truncated /
+    empty payload. Surface that as a clean protocol error rather than
+    letting a downstream :func:`_validate_tool_payload` fail Pydantic
+    validation on a missing tool-use block — the *cause* is the
+    guardrail, not a bad schema.
+    """
+    if stop_reason == "guardrail_intervened":
+        raise RuntimeProtocolError(
+            f"{label}: Bedrock Guardrails intervened — the response was "
+            f"blocked by a guardrail policy. Adjust the guardrail config "
+            f"or the prompt; the model didn't produce a usable answer."
+        )
 
 
 def _validate_tool_payload(

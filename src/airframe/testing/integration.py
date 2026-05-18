@@ -87,6 +87,13 @@ _PROVIDER_AUTH: dict[str, list[str]] = {
     "opencode-zen": ["OPENCODE_API_KEY"],
     "opencode-go": ["OPENCODE_API_KEY"],
     "openrouter": ["OPENROUTER_API_KEY"],
+    # Bedrock resolves via the boto3 four-step chain: explicit args →
+    # env keys → AWS_PROFILE → IAM-instance / IRSA. The env-var probe
+    # here looks for the access key or the profile name; a live call
+    # under IAM-only auth still works (the fixture catches the auth
+    # error and skips). AWS_REGION must also be set — Bedrock is
+    # region-pinned.
+    "bedrock": ["AWS_ACCESS_KEY_ID", "AWS_PROFILE"],
 }
 
 

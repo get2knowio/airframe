@@ -6,6 +6,136 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### BedrockRuntime — AWS Bedrock Converse API adapter
+
+New built-in adapter wrapping AWS Bedrock's
+[Converse API](https://docs.aws.amazon.com/bedrock/latest/userguide/conversation-inference.html)
+— the vendor-normalised model-invocation endpoint that fronts
+Anthropic Claude, Meta Llama, Mistral, Cohere, Amazon Nova, and
+AI21 Jamba behind one AWS-billed envelope with IAM-rooted auth and
+region pinning. Closes the fourth and last adapter bucket — the
+enterprise / managed-cloud path that the existing
+subscription-style and per-token-gateway adapters can't reach (they
+depend on creds / endpoints that aren't reachable from regulated /
+VPC-only environments).
+
+#### Added
+
+- **`BedrockRuntime`** at `airframe.adapters.bedrock` —
+  `PROVIDER_ID="bedrock"`, `REQUIRES_PACKAGE="aioboto3"`,
+  `EXTRA_NAME="bedrock"`. Lazy-imports `aioboto3` so plain
+  `import airframe` doesn't pull boto3 in.
+- **`BedrockSession`** — bespoke session with a client-side
+  `messages=[]` buffer, multi-turn rollback-on-failure discipline,
+  cooperative cancellation, and a client-side tool loop capped at
+  `MAX_TOOL_ITERATIONS=20` matching the OpenAI-compat bound.
+- **`BedrockOptions`** — per-session `region_name` override
+  (opens a session-private client), `inference_profile_arn`
+  (replaces the call-time `modelId`), `guardrail_id` /
+  `guardrail_version`, `performance_latency`, and
+  `additional_model_fields` (pass-through to Converse's
+  `additionalModelRequestFields`).
+- **Twelve `Feature` flags True**: `STRUCTURED_OUTPUT_JSON_SCHEMA`,
+  `STREAMING`, `CANCEL`, `REASONING_EFFORT`,
+  `REASONING_BUDGET_TOKENS` (both Anthropic-on-Bedrock only),
+  `VISION_INPUT`, `FILE_INPUT`, `TOOLS_FUNCTION`,
+  `PERMISSION_CALLBACK`, `LIFECYCLE_HOOKS`, `BUDGET_USD_CAP`,
+  `BUDGET_TURN_CAP`.
+- **`EMITTABLE_HOOK_KINDS`** — six of airframe's eight canonical
+  kinds. `pre_compact` (Converse has no compaction) and
+  `rate_limit` (botocore's transient-retry chain swallows throttle
+  events) stay unemittable.
+- **In-tree `_BEDROCK_PRICING`** — point-in-time `us-east-1`
+  per-1k-token rates for the curated catalog (Claude 3.5
+  Haiku/Sonnet/Opus, Nova Micro/Lite/Pro, Llama 3.1
+  8B/70B/405B Instruct, Mistral Large 2, Cohere Command R+).
+  Unknown model IDs report `cost_usd=None` rather than guess.
+- **Structured output via forced `submit_result` tool** in
+  Converse's `toolConfig` slot. User `FunctionTool` entries coexist
+  with the forced tool — both ride `toolConfig.tools`.
+- **Guardrail intervention handling** — `stopReason ==
+  "guardrail_intervened"` surfaces as `RuntimeProtocolError` with a
+  clear message rather than failing structured-output validation on
+  a truncated payload.
+- **Redacted reasoning safety** — `reasoningContent` chunks with
+  only a `redactedContent` field (Anthropic-on-Bedrock safety
+  redaction) are skipped without crashing.
+- **`examples/probe_bedrock.py`** — minimal live probe; skips
+  cleanly when `AWS_REGION` is unset.
+- **`docs/adapters/bedrock.md`** — full adapter page covering
+  install, auth, model catalog, supported features, `BedrockOptions`
+  reference, vendor quirks, and the inference-profile / PT-ARN
+  gotcha.
+- **`docs/auth.md`** gains a `BedrockRuntime` section covering the
+  boto3 four-step chain and region resolution.
+- **`docs/capabilities.md`** matrix gains a Bedrock column.
+- **`docs/reference.md`** adapter table and top-level-exports
+  snippet include Bedrock.
+- **`tests/test_bedrock_conformance.py`** — wires the structural
+  contract suite at `airframe.testing.contracts` against
+  `BedrockRuntime`.
+- **`tests/test_bedrock_integration.py`** — pytest-marker-gated
+  behavioural tests against live AWS, mirroring
+  `test_opencode_zen_integration.py`.
+- **`airframe.testing.integration._PROVIDER_AUTH`** entry for
+  `bedrock` so the integration suite self-skips when no AWS
+  credentials are detectable.
+- **`airframe.testing.contracts._check_provider_options` matching**
+  dict now covers `bedrock → BedrockOptions` so the cross-namespace
+  rejection contract holds for the new adapter.
+
+#### Permanent declines (pinned with their own tests)
+
+- `TOOLS_MCP_STDIO` / `TOOLS_MCP_HTTP` / `TOOLS_MCP_SSE` —
+  Bedrock Converse has no MCP slot. The decline message points
+  callers at `runtime.unwrap(BedrockRuntimeClient)` for
+  hand-crafted MCP shims.
+- `SESSION_RESUME` — Converse is stateless from the client side;
+  the messages buffer doesn't survive process restart.
+- `STRUCTURED_OUTPUT_STRICT` — Converse has no equivalent of
+  OpenAI's strict tool-schema mode.
+
+#### Changed
+
+- `pyproject.toml` gains a `[bedrock]` extra
+  (`aioboto3>=13`); also added to the `all = [...]` list and the
+  `dependency-groups.test` block so the unit suite can mock at the
+  `aioboto3` boundary.
+- `airframe.__init__` re-exports `BedrockRuntime` + `BedrockOptions`;
+  `airframe.discovery._builtin_runtime_classes` registers the new
+  adapter so `list_providers()` includes `"bedrock"` when the
+  extra is installed.
+- `airframe.options.ProviderOptions` is now a five-way union
+  (`ClaudeOptions | CopilotOptions | CodexOptions |
+  OpenAICompatOptions | BedrockOptions`).
+- `README.md` + `CLAUDE.md` provider lists include `bedrock`;
+  README capability matrix gains a Bedrock column.
+
+#### Iteration history
+
+Landed as six independently-mergeable commits per
+[`dev-docs/bedrock-adapter-plan.md`](dev-docs/bedrock-adapter-plan.md):
+
+- **A.** Scaffolding — discovery, capability predicates, AWS
+  credential + region resolution chains, `list_models()` via
+  `bedrock.list_foundation_models(byOutputModality="TEXT")`,
+  boundary error classification.
+- **B.** `BedrockSession`, `execute()` / `stream()` / `cancel()`,
+  forced-`submit_result`-tool structured output;
+  `STRUCTURED_OUTPUT_JSON_SCHEMA` / `STREAMING` / `CANCEL` flipped
+  True.
+- **C.** Polymorphic prompts (image / file content blocks) and
+  Anthropic-on-Bedrock thinking budget via
+  `additionalModelRequestFields`; `VISION_INPUT` / `FILE_INPUT` /
+  `REASONING_EFFORT` / `REASONING_BUDGET_TOKENS` flipped True.
+- **D.** Function tools + client-side tool loop with permission
+  gating; `TOOLS_FUNCTION` / `PERMISSION_CALLBACK` flipped True.
+- **E.** Lifecycle hook emission (six kinds), per-session budget
+  caps, in-tree pricing table; `LIFECYCLE_HOOKS` /
+  `BUDGET_USD_CAP` / `BUDGET_TURN_CAP` flipped True.
+- **F.** `BedrockOptions` wrap-up, conformance + integration test
+  wrappers, docs, README / CHANGELOG / capability-matrix updates.
+
 ### v1.0-readiness docs sprint
 
 Documentation-focused follow-up to the v1.0-readiness work below.

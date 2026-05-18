@@ -732,6 +732,7 @@ def test_session_rejects_wrong_provider_options_namespace(adapter_runtime: Any) 
     """
     from airframe.errors import UnsupportedFeatureError
     from airframe.options import (
+        BedrockOptions,
         ClaudeOptions,
         CodexOptions,
         CopilotOptions,
@@ -745,10 +746,17 @@ def test_session_rejects_wrong_provider_options_namespace(adapter_runtime: Any) 
         "opencode-zen": OpenAICompatOptions,
         "opencode-go": OpenAICompatOptions,
         "openrouter": OpenAICompatOptions,
+        "bedrock": BedrockOptions,
     }
     own = matching.get(adapter_runtime.PROVIDER_ID)
     # Pick any namespace that isn't ours.
-    all_namespaces = (ClaudeOptions, CopilotOptions, CodexOptions, OpenAICompatOptions)
+    all_namespaces = (
+        ClaudeOptions,
+        CopilotOptions,
+        CodexOptions,
+        OpenAICompatOptions,
+        BedrockOptions,
+    )
     others = [c for c in all_namespaces if c is not own]
     assert others, "test fixture must have at least one foreign namespace"
     foreign = others[0]

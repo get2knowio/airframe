@@ -74,6 +74,7 @@ from airframe.models import (
     ModelInfo,
 )
 from airframe.options import (
+    BedrockOptions,
     ClaudeOptions,
     CodexOptions,
     CopilotOptions,
@@ -109,6 +110,7 @@ __all__ = [
     "AgentRuntime",
     "AgentRuntimeError",
     "AgentSession",
+    "BedrockOptions",
     "BedrockRuntime",
     "CAPABILITY_REASONING_EFFORT",
     "CAPABILITY_STREAMING",

@@ -25,7 +25,7 @@ class Brief(BaseModel):
     risks: list[str]
 
 # Provider ID comes from config — YAML, env, CLI flag, whatever.
-provider_id = "claude"  # or github-copilot / codex / opencode-zen / opencode-go / openrouter
+provider_id = "claude"  # or github-copilot / codex / opencode-zen / opencode-go / openrouter / bedrock
 
 cls = runtime_for(provider_id)       # discovery lookup by ID
 runtime = cls()                      # auth resolves from env / credential files
@@ -71,6 +71,7 @@ is `airframe`.
 | [`OpenCodeZenRuntime`](docs/adapters/opencode-zen.md) | `opencode-zen` | `openai` (HTTP) | `OPENCODE_API_KEY` → opencode `auth.json::opencode.key` | no (direct HTTP) |
 | [`OpenCodeGoRuntime`](docs/adapters/opencode-go.md) | `opencode-go` | `openai` (HTTP) | `OPENCODE_API_KEY` → opencode `auth.json::opencode-go.key` | no (direct HTTP) |
 | [`OpenRouterRuntime`](docs/adapters/openrouter.md) | `openrouter` | `openai` (HTTP) | `OPENROUTER_API_KEY` | no (direct HTTP) |
+| [`BedrockRuntime`](docs/adapters/bedrock.md) | `bedrock` | `aioboto3` (HTTP) | boto3 chain (env / `AWS_PROFILE` / IAM role) + `AWS_REGION` | no (direct HTTP) |
 
 The OpenAI-compatible family (`OpenCodeZenRuntime` per-token,
 `OpenCodeGoRuntime` subscription, `OpenRouterRuntime` multi-vendor
@@ -78,11 +79,18 @@ gateway today; Together / Groq / Fireworks as future siblings) shares
 the `OpenAICompatibleRuntime` base — subclasses are ~30 lines. See
 [`docs/adapters/third-party.md`](docs/adapters/third-party.md).
 
+`BedrockRuntime` is the enterprise / managed-cloud path —
+AWS-billed access to a multi-vendor catalog (Anthropic, Meta,
+Mistral, Cohere, Amazon Nova) behind IAM-rooted auth and region
+pinning. Distinct from the OpenAI-compatible family because Bedrock
+speaks Converse, not Chat Completions.
+
 Each adapter has one canonical provider ID. `"anthropic"` is
 reserved for a future direct-API `AnthropicRuntime`; `"openai"`
 for a future `OpenAIRuntime`. Current adapters cover the
 *subscription* paths (Claude Max, Copilot, ChatGPT Plus,
-opencode-go).
+opencode-go), the *per-token gateways* (OpenCode Zen, OpenRouter),
+and the *AWS-billed managed* path (Bedrock).
 
 `ClaudeCodeRuntime` is the only adapter that accepts Claude
 bindings. `CopilotRuntime` declines them — Claude served via
@@ -95,22 +103,22 @@ contract.
 Current snapshot (run
 `uv run python examples/probe_supports.py` for the live version):
 
-| Feature | Claude | Copilot | Codex | OpenAI-compat |
-|---|---|---|---|---|
-| `STRUCTURED_OUTPUT_JSON_SCHEMA` | ✓ | ✓ | ✓ | ✓ |
-| `STREAMING` / `CANCEL` | ✓ | ✓ | ✓ | ✓ |
-| `SESSION_RESUME` | ✓ | ✓ | ✓ | ✗ |
-| `REASONING_EFFORT` | ✓ | ✓ | ✓ | ✓ |
-| `REASONING_BUDGET_TOKENS` | ✓ | ✗ | ✗ | ✗ |
-| `VISION_INPUT` | ✓ | ✓ | ✓ | ✓ |
-| `FILE_INPUT` | ✓ | ✓ | ✓ | ✗ |
-| `TOOLS_FUNCTION` | ✓ | ✓ | ✗ | ✓ |
-| `TOOLS_MCP_STDIO` / `_HTTP` | ✓ | ✓ | ✗ | ✗ |
-| `TOOLS_MCP_SSE` | ✓ | ✗ | ✗ | ✗ |
-| `PERMISSION_CALLBACK` | ✓ | ✓ | ✓ (session-wide) | ✗ |
-| `LIFECYCLE_HOOKS` | ✓ (8 kinds) | ✓ (7 kinds) | ✓ (6 kinds) | ✓ (6 kinds) |
-| `BUDGET_USD_CAP` | ✓ | ✓ | ✓ | ✓ |
-| `BUDGET_TURN_CAP` | ✓ | ✗ | ✓ | ✓ |
+| Feature | Claude | Copilot | Codex | OpenAI-compat | Bedrock |
+|---|---|---|---|---|---|
+| `STRUCTURED_OUTPUT_JSON_SCHEMA` | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `STREAMING` / `CANCEL` | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `SESSION_RESUME` | ✓ | ✓ | ✓ | ✗ | ✗ |
+| `REASONING_EFFORT` | ✓ | ✓ | ✓ | ✓ | ✓ (Anthropic) |
+| `REASONING_BUDGET_TOKENS` | ✓ | ✗ | ✗ | ✗ | ✓ (Anthropic) |
+| `VISION_INPUT` | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `FILE_INPUT` | ✓ | ✓ | ✓ | ✗ | ✓ (Anthropic) |
+| `TOOLS_FUNCTION` | ✓ | ✓ | ✗ | ✓ | ✓ |
+| `TOOLS_MCP_STDIO` / `_HTTP` | ✓ | ✓ | ✗ | ✗ | ✗ |
+| `TOOLS_MCP_SSE` | ✓ | ✗ | ✗ | ✗ | ✗ |
+| `PERMISSION_CALLBACK` | ✓ | ✓ | ✓ (session-wide) | ✗ | ✓ |
+| `LIFECYCLE_HOOKS` | ✓ (8 kinds) | ✓ (7 kinds) | ✓ (6 kinds) | ✓ (6 kinds) | ✓ (6 kinds) |
+| `BUDGET_USD_CAP` | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `BUDGET_TURN_CAP` | ✓ | ✗ | ✓ | ✓ | ✓ |
 
 Capability flags are statically declared per adapter. Check
 `runtime.supports(Feature.X)` before invoking a feature; declined

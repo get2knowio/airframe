@@ -6,7 +6,7 @@ Vercel AI SDK's ``providerOptions`` pattern and the Spring Cloud
 Stream binder namespace convention: portable kwargs on the protocol
 core, typed-but-optional per-vendor namespaces for everything else.
 
-The four namespaces:
+The five namespaces:
 
 * :class:`ClaudeOptions` — knobs honoured by
   :class:`airframe.adapters.claude_code.ClaudeCodeRuntime`.
@@ -17,6 +17,12 @@ The four namespaces:
 * :class:`OpenAICompatOptions` — knobs honoured by every subclass of
   :class:`airframe.adapters.openai_compatible.OpenAICompatibleRuntime`
   (today: :class:`~airframe.adapters.opencode_zen.OpenCodeZenRuntime`).
+* :class:`BedrockOptions` — knobs honoured by
+  :class:`airframe.adapters.bedrock.BedrockRuntime` (per-session
+  region override, Bedrock Guardrails policy, performance latency
+  hint, and a pass-through to Converse's
+  ``additionalModelRequestFields`` for vendor-specific knobs
+  airframe doesn't expose first-class).
 
 Each dataclass is :func:`frozen <dataclasses.dataclass>` /
 ``slots=True`` — same discipline as :class:`~airframe.cost.CostRecord`,
@@ -48,6 +54,7 @@ kwarg on :meth:`AgentSession.execute` / :meth:`AgentSession.stream`.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 
 @dataclass(frozen=True, slots=True)
@@ -179,13 +186,68 @@ class OpenAICompatOptions:
     store: bool | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class BedrockOptions:
+    """Vendor-specific options for :class:`BedrockRuntime`.
+
+    Attributes:
+        region_name: Override the runtime-level AWS region for this
+            session. Bedrock catalogs are per-region, so a session
+            that targets a model only available in ``us-west-2``
+            can override an ``us-east-1`` runtime without rebuilding
+            it. When set, the session opens its own
+            :class:`aioboto3.Session` client; otherwise sessions
+            share the runtime's lazy client.
+        inference_profile_arn: When set, replaces the session's
+            ``modelId`` on every Converse call with the full
+            inference-profile ARN. Lets callers route through
+            provisioned-throughput or cross-region inference profiles
+            without juggling the prefix in :class:`ProviderModel`.
+        guardrail_id: Bedrock Guardrails policy identifier the model
+            should run under. Lands as
+            ``guardrailConfig.guardrailIdentifier`` on each
+            ``converse`` / ``converse_stream`` call.
+        guardrail_version: Optional companion version pinned for the
+            ``guardrail_id``. Defaults to AWS's "DRAFT" when omitted
+            but the field is set; only meaningful when
+            ``guardrail_id`` is also set.
+        performance_latency: ``"standard"`` or ``"optimized"``.
+            Lands as ``performanceConfig.latency``; ``"optimized"``
+            opts into Bedrock's latency-optimised inference path
+            (limited model availability — silently ignored on
+            unsupported models per Bedrock's per-vendor field
+            handling).
+        additional_model_fields: Pass-through into Converse's
+            ``additionalModelRequestFields`` for vendor knobs
+            airframe doesn't have first-class support for (Anthropic
+            ``top_k``, Meta ``top_p``, Cohere ``search_result_format``,
+            etc.). Merged with any ``thinking`` field airframe builds
+            from ``thinking=`` — user keys win on collision.
+            Document field validity per-vendor: this is the honest
+            escape hatch, validation is the caller's problem.
+
+    All fields default to ``None`` / empty — passing
+    :class:`BedrockOptions()` is a no-op.
+    """
+
+    region_name: str | None = None
+    inference_profile_arn: str | None = None
+    guardrail_id: str | None = None
+    guardrail_version: str | None = None
+    performance_latency: str | None = None
+    additional_model_fields: dict[str, Any] | None = None
+
+
 #: Tagged union of provider-specific options. Adapters
 #: :func:`isinstance`-match to decide whether they accept the value
 #: passed in. No common base class on purpose — see module docstring.
-ProviderOptions = ClaudeOptions | CopilotOptions | CodexOptions | OpenAICompatOptions
+ProviderOptions = (
+    ClaudeOptions | CopilotOptions | CodexOptions | OpenAICompatOptions | BedrockOptions
+)
 
 
 __all__ = [
+    "BedrockOptions",
     "ClaudeOptions",
     "CodexOptions",
     "CopilotOptions",

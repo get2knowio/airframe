@@ -834,6 +834,195 @@ def test_submit_result_tool_config_is_json_serialisable() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Iteration F — BedrockOptions wiring
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_provider_options_guardrail_config_lands_on_call(
+    runtime_with_mock_client: tuple[BedrockRuntime, MagicMock],
+) -> None:
+    from airframe.options import BedrockOptions
+
+    rt, client = runtime_with_mock_client
+    opts = BedrockOptions(guardrail_id="gd-123", guardrail_version="DRAFT")
+    sess = rt.session(provider_options=opts)
+    await sess.execute("hi")
+    call_kwargs = client.converse.await_args.kwargs
+    assert call_kwargs["guardrailConfig"] == {
+        "guardrailIdentifier": "gd-123",
+        "guardrailVersion": "DRAFT",
+    }
+
+
+@pytest.mark.asyncio
+async def test_provider_options_guardrail_version_optional(
+    runtime_with_mock_client: tuple[BedrockRuntime, MagicMock],
+) -> None:
+    from airframe.options import BedrockOptions
+
+    rt, client = runtime_with_mock_client
+    sess = rt.session(provider_options=BedrockOptions(guardrail_id="gd-only"))
+    await sess.execute("hi")
+    cfg = client.converse.await_args.kwargs["guardrailConfig"]
+    assert cfg == {"guardrailIdentifier": "gd-only"}
+
+
+@pytest.mark.asyncio
+async def test_provider_options_performance_latency_lands_on_call(
+    runtime_with_mock_client: tuple[BedrockRuntime, MagicMock],
+) -> None:
+    from airframe.options import BedrockOptions
+
+    rt, client = runtime_with_mock_client
+    sess = rt.session(provider_options=BedrockOptions(performance_latency="optimized"))
+    await sess.execute("hi")
+    assert client.converse.await_args.kwargs["performanceConfig"] == {"latency": "optimized"}
+
+
+@pytest.mark.asyncio
+async def test_provider_options_additional_model_fields_merge_with_thinking(
+    runtime_with_mock_client: tuple[BedrockRuntime, MagicMock],
+) -> None:
+    """User pass-through merges with airframe's thinking field; user keys win."""
+    from airframe.options import BedrockOptions
+
+    rt, client = runtime_with_mock_client
+    sess = rt.session(provider_options=BedrockOptions(additional_model_fields={"top_k": 40}))
+    await sess.execute("hi", thinking="low")
+    amrf = client.converse.await_args.kwargs["additionalModelRequestFields"]
+    assert amrf["thinking"] == {"type": "enabled", "budget_tokens": 1024}
+    assert amrf["top_k"] == 40
+
+
+@pytest.mark.asyncio
+async def test_provider_options_additional_fields_can_override_thinking(
+    runtime_with_mock_client: tuple[BedrockRuntime, MagicMock],
+) -> None:
+    """The pass-through is the honest escape hatch — user keys win on collision."""
+    from airframe.options import BedrockOptions
+
+    rt, client = runtime_with_mock_client
+    sess = rt.session(
+        provider_options=BedrockOptions(additional_model_fields={"thinking": {"type": "disabled"}})
+    )
+    await sess.execute("hi", thinking="high")
+    amrf = client.converse.await_args.kwargs["additionalModelRequestFields"]
+    assert amrf["thinking"] == {"type": "disabled"}
+
+
+@pytest.mark.asyncio
+async def test_provider_options_inference_profile_arn_overrides_model_id(
+    runtime_with_mock_client: tuple[BedrockRuntime, MagicMock],
+) -> None:
+    from airframe.options import BedrockOptions
+
+    rt, client = runtime_with_mock_client
+    arn = "arn:aws:bedrock:us-east-1:123456789012:inference-profile/probe"
+    sess = rt.session(provider_options=BedrockOptions(inference_profile_arn=arn))
+    await sess.execute("hi")
+    assert client.converse.await_args.kwargs["modelId"] == arn
+
+
+def test_provider_options_foreign_namespace_raises() -> None:
+    """Passing the wrong ProviderOptions dataclass is a clear decline."""
+    from airframe.errors import UnsupportedFeatureError
+    from airframe.options import ClaudeOptions
+
+    rt = BedrockRuntime(region_name="us-east-1")
+    with pytest.raises(UnsupportedFeatureError):
+        rt.session(provider_options=ClaudeOptions())
+
+
+@pytest.mark.asyncio
+async def test_provider_options_empty_is_noop(
+    runtime_with_mock_client: tuple[BedrockRuntime, MagicMock],
+) -> None:
+    """``BedrockOptions()`` (all defaults) doesn't add any Converse fields."""
+    from airframe.options import BedrockOptions
+
+    rt, client = runtime_with_mock_client
+    sess = rt.session(provider_options=BedrockOptions())
+    await sess.execute("hi")
+    kwargs = client.converse.await_args.kwargs
+    assert "guardrailConfig" not in kwargs
+    assert "performanceConfig" not in kwargs
+    assert "additionalModelRequestFields" not in kwargs
+
+
+@pytest.mark.asyncio
+async def test_provider_options_region_override_builds_session_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When region_name is set, the session opens its own aioboto3 client."""
+    import aioboto3
+
+    from airframe.options import BedrockOptions
+
+    rt = BedrockRuntime(region_name="us-east-1")
+    session_client = MagicMock()
+    session_client.converse = AsyncMock(return_value=_converse_response(text="ok"))
+    client_cm = MagicMock()
+    client_cm.__aenter__ = AsyncMock(return_value=session_client)
+    client_cm.__aexit__ = AsyncMock(return_value=None)
+    aws_session = MagicMock()
+    aws_session.client = MagicMock(return_value=client_cm)
+    factory = MagicMock(return_value=aws_session)
+    monkeypatch.setattr(aioboto3, "Session", factory)
+
+    sess = rt.session(provider_options=BedrockOptions(region_name="ap-southeast-2"))
+    await sess.execute("hi")
+    # The session's private client was constructed pinned to ap-southeast-2.
+    aws_session.client.assert_called_once_with("bedrock-runtime", region_name="ap-southeast-2")
+    # And torn down on session.close().
+    await sess.close()
+    client_cm.__aexit__.assert_awaited_once()
+
+
+# --- guardrail intervention --------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_guardrail_intervention_raises_protocol_error(
+    runtime_with_mock_client: tuple[BedrockRuntime, MagicMock],
+) -> None:
+    """stopReason='guardrail_intervened' surfaces as RuntimeProtocolError —
+    not as a Pydantic validation failure on a truncated payload."""
+    from airframe.errors import RuntimeProtocolError
+
+    rt, client = runtime_with_mock_client
+    client.converse = AsyncMock(
+        return_value={
+            "output": {"message": {"role": "assistant", "content": []}},
+            "usage": {"inputTokens": 0, "outputTokens": 0},
+            "stopReason": "guardrail_intervened",
+        }
+    )
+    sess = rt.session()
+    with pytest.raises(RuntimeProtocolError) as exc:
+        await sess.execute("triggers guardrail")
+    assert "guardrail" in str(exc.value).lower()
+
+
+@pytest.mark.asyncio
+async def test_guardrail_intervention_in_stream_raises_protocol_error(
+    runtime_with_mock_client: tuple[BedrockRuntime, MagicMock],
+) -> None:
+    from airframe.errors import RuntimeProtocolError
+
+    rt, client = runtime_with_mock_client
+    chunks = [
+        {"messageStop": {"stopReason": "guardrail_intervened"}},
+        {"metadata": {"usage": {"inputTokens": 0, "outputTokens": 0}}},
+    ]
+    client.converse_stream = AsyncMock(return_value=_converse_stream_response(chunks))
+    sess = rt.session()
+    with pytest.raises(RuntimeProtocolError):
+        async for _ in sess.stream("triggers"):
+            pass
+
+
+# ---------------------------------------------------------------------------
 # Iteration D — function tools + permission gating
 # ---------------------------------------------------------------------------
 
