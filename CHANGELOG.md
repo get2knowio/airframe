@@ -6,7 +6,66 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-_Nothing yet — work toward v0.7.0 begins after the v0.6.2 cut._
+_Nothing yet — work toward v0.7.0 begins after the v0.6.3 cut._
+
+---
+
+## [0.6.3] — 2026-05-18
+
+Bug fix release: `CodexRuntime` no longer reads opencode's
+credentials file, and now correctly reads the Codex CLI's own
+`~/.codex/auth.json`.
+
+### Fixed
+
+- **`CodexRuntime._resolve_api_key()` opencode credential leak.** The
+  on-disk auth fallback was reading
+  `~/.local/share/opencode/auth.json::openai.key` — opencode's
+  credentials file, not Codex's. That meant `CodexRuntime` would
+  silently surface an opencode-minted key for a user who had never
+  run `codex login`, and it ignored the perfectly good key (or
+  ChatGPT-OAuth bundle) that Codex itself writes to
+  `~/.codex/auth.json`. The fix replaces the opencode read with a
+  Codex-only resolver that handles both shapes Codex writes:
+  - **Static key** (`{"OPENAI_API_KEY": "sk-..."}` from
+    `codex login --api-key=…`) → lifted into `Codex({"apiKey": ...})`.
+  - **ChatGPT OAuth bundle** (`{"OPENAI_API_KEY": null, "auth_mode":
+    "...", "tokens": {"access_token", "refresh_token", "id_token",
+    "account_id"}}` from `codex login` against a ChatGPT
+    Plus/Pro subscription) → deliberately *not* lifted. The Codex CLI
+    subprocess reads the file itself and refreshes those tokens;
+    airframe stays out of that path.
+- **`CodexRuntime.list_models()` OAuth-tailored error.** ChatGPT
+  OAuth access tokens aren't valid against `api.openai.com/v1/models`.
+  When `list_models()` detects the OAuth bundle but no static key
+  surfaces, it now raises a tailored `RuntimeAuthError` pointing the
+  user at `codex login --api-key=…` or `OPENAI_API_KEY=` rather than
+  surfacing a generic 401 from the OpenAI SDK.
+
+### Changed
+
+- **Env-var override renamed**: `OPENCODE_AUTH_PATH` →
+  `CODEX_AUTH_PATH` on the Codex adapter. The opencode env override
+  never made sense on `CodexRuntime`; keeping it would perpetuate the
+  leak. `OPENCODE_AUTH_PATH` remains in force on `OpenCodeZenRuntime`
+  and `OpenCodeGoRuntime`, where it correctly points at opencode's
+  own credentials file.
+- **Cross-adapter audit.** Confirmed no other adapter reads opencode
+  credentials. `claude_code.py`, `copilot.py`, `bedrock.py`,
+  `kimi.py`, and `openrouter.py` are all clean. `opencode_zen.py` and
+  `opencode_go.py` legitimately read opencode's auth.json — those
+  *are* the opencode adapters.
+
+### Tests
+
+- New regression guard `test_resolve_api_key_ignores_opencode_auth_json`
+  asserts that even pointing `CODEX_AUTH_PATH` at an opencode-shaped
+  file (`{"openai": {"key": "..."}}`) returns `None` — the wrong
+  schema is silently rejected.
+- New `test_resolve_api_key_returns_none_for_oauth_only_auth_json`
+  asserts the OAuth bundle is **not** lifted into `apiKey`.
+- New `test_codex_list_models_oauth_only_auth_json_raises_tailored_error`
+  asserts the tailored ChatGPT-OAuth error from `list_models()`.
 
 ---
 
