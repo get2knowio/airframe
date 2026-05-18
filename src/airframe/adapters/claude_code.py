@@ -136,6 +136,59 @@ class _ModelMeta:
     capabilities: frozenset[str] = field(default_factory=frozenset)
 
 
+#: Path to the interactive Claude Code OAuth credentials file. Set
+#: per the documented auth chain — overridden by ``CLAUDE_CODE_OAUTH_TOKEN``
+#: env var on machines where the file isn't reachable.
+DEFAULT_CLAUDE_CREDENTIALS_PATH = "~/.claude/.credentials.json"
+
+
+def _read_claude_credentials_oauth_token() -> str | None:
+    """Extract the OAuth bearer token from ``~/.claude/.credentials.json``.
+
+    The interactive Claude Code login writes a file of the shape::
+
+        {
+          "claudeAiOauth": {
+            "accessToken": "sk-ant-oat...",
+            "refreshToken": "...",
+            "expiresAt": 1234567890,
+            "scopes": [...],
+            "subscriptionType": "max"
+          }
+        }
+
+    This helper reads the file, validates the expected shape, and
+    returns the access token. Returns ``None`` for every "this isn't
+    a usable token" case (missing file, malformed JSON, missing keys,
+    empty string) so the caller can fall through cleanly to the
+    "no credentials anywhere" branch. The file path is overridable
+    via the ``CLAUDE_CREDENTIALS_PATH`` env var (useful for tests).
+
+    Refresh-token handling lives in the Anthropic SDK once the access
+    token is passed via ``auth_token=`` — when the token expires
+    mid-call the SDK refreshes against ``/v1/oauth/token`` using the
+    refresh token from its own config store, not this file.
+    """
+    import json
+
+    path_str = os.environ.get("CLAUDE_CREDENTIALS_PATH") or DEFAULT_CLAUDE_CREDENTIALS_PATH
+    path = os.path.expanduser(path_str)
+    try:
+        with open(path, encoding="utf-8") as fh:
+            payload = json.load(fh)
+    except (FileNotFoundError, PermissionError, json.JSONDecodeError, OSError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    oauth = payload.get("claudeAiOauth")
+    if not isinstance(oauth, dict):
+        return None
+    token = oauth.get("accessToken")
+    if not isinstance(token, str) or not token:
+        return None
+    return token
+
+
 #: Curated metadata for known Claude models. The live API returns IDs
 #: and display names; this table layers context window + pricing on
 #: top. Unknown IDs come back without enrichment.
@@ -504,37 +557,96 @@ class ClaudeCodeRuntime(AgentRuntime):
     async def list_models(self) -> list[ModelInfo]:
         """Return live Claude models from Anthropic's ``/v1/models``.
 
-        Hits ``GET https://api.anthropic.com/v1/models`` directly via
-        :mod:`httpx`. The Claude Agent SDK doesn't surface this; we use
-        the API key the SDK would have used (``ANTHROPIC_API_KEY``).
-        OAuth bearer tokens (Claude Max subscription) work for the
-        Messages API but not for ``/v1/models``, so we require an API
-        key here.
-        """
-        import httpx
+        Delegates to the official ``anthropic`` Python SDK's
+        :meth:`AsyncAnthropic.models.list` rather than rolling an
+        :mod:`httpx` GET ourselves. The SDK handles two auth modes
+        airframe would otherwise have to track separately:
 
-        api_key = self._api_key_override or os.environ.get("ANTHROPIC_API_KEY")
-        if not api_key:
-            raise RuntimeAuthError(
-                "ClaudeCodeRuntime.list_models() needs ANTHROPIC_API_KEY. "
-                "OAuth subscription tokens don't work for /v1/models."
-            )
-        headers = {"x-api-key": api_key, "anthropic-version": "2023-06-01"}
+        * **API key** (``x-api-key`` header) — historical default.
+          Pay-per-token API access.
+        * **OAuth Bearer** (``Authorization: Bearer …`` +
+          ``anthropic-beta: oauth-2025-04-20``) — Claude Max
+          subscription. The Bearer path is gated by the beta header;
+          omitting it makes ``/v1/models`` reject the token. Earlier
+          versions of this adapter hand-rolled the request and missed
+          the header, so subscription users saw 401s.
+
+        Auth resolution (delegated to the SDK once we pick a slot):
+
+        1. Explicit ``api_key=`` constructor arg → ``api_key=`` on
+           :class:`AsyncAnthropic`.
+        2. ``CLAUDE_CODE_OAUTH_TOKEN`` env var → ``auth_token=`` on
+           :class:`AsyncAnthropic`.
+        3. ``ANTHROPIC_API_KEY`` env var → ``api_key=`` (SDK reads
+           this from env on its own when we pass nothing).
+        4. ``~/.claude/.credentials.json`` (the interactive Claude
+           Code OAuth flow's stored token) → ``auth_token=``.
+
+        Raises:
+            RuntimeAuthError: no credential resolved through any layer.
+            RuntimeTransientError: SDK reported a 429 / 5xx / connection
+                error.
+            RuntimeProtocolError: SDK reported an unexpected status.
+        """
+        # Late import to avoid pulling `anthropic` during module load.
+        # Surfaced as a clear ImportError when the [claude] extra
+        # isn't installed (mirrors the SDK-not-installed pattern the
+        # rest of the adapter uses).
+        from anthropic import (
+            APIConnectionError as _AnthropicConnError,
+        )
+        from anthropic import (
+            APIStatusError as _AnthropicAPIError,
+        )
+        from anthropic import AsyncAnthropic
+
+        # Pick the auth slot before constructing the client. The
+        # SDK's own env auto-discovery handles ANTHROPIC_API_KEY /
+        # ANTHROPIC_AUTH_TOKEN when we pass nothing; we step in for
+        # the explicit-kwarg case and the Claude-Code-specific
+        # CLAUDE_CODE_OAUTH_TOKEN env / credentials.json paths the
+        # SDK doesn't know about. Annotated as ``dict[str, Any]``
+        # because AsyncAnthropic's typed kwargs widen beyond ``str``
+        # (httpx.Client, NotGiven, etc.) and the ``**unpack`` would
+        # otherwise trip mypy on the union.
+        kwargs: dict[str, Any] = {}
+        if self._api_key_override:
+            kwargs["api_key"] = self._api_key_override
+        elif oauth := os.environ.get("CLAUDE_CODE_OAUTH_TOKEN"):
+            kwargs["auth_token"] = oauth
+        elif os.environ.get("ANTHROPIC_API_KEY"):
+            # Let the SDK pick this up itself — no kwargs needed.
+            pass
+        else:
+            # Last-resort: read the interactive Claude Code credentials
+            # file. The SDK doesn't know about this path, so airframe
+            # extracts the token and passes it as auth_token=.
+            oauth_from_file = _read_claude_credentials_oauth_token()
+            if oauth_from_file:
+                kwargs["auth_token"] = oauth_from_file
+            else:
+                raise RuntimeAuthError(
+                    "ClaudeCodeRuntime.list_models(): no credentials found. "
+                    "Set CLAUDE_CODE_OAUTH_TOKEN (Claude Max subscription), "
+                    "ANTHROPIC_API_KEY (pay-per-token API), or run "
+                    "`claude setup-token` to populate ~/.claude/.credentials.json."
+                )
+
         try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                response = await client.get("https://api.anthropic.com/v1/models", headers=headers)
-                response.raise_for_status()
-                payload = response.json()
-        except httpx.HTTPStatusError as exc:
-            status = exc.response.status_code
+            async with AsyncAnthropic(**kwargs) as client:
+                page = await client.models.list()
+                entries = list(page.data)
+        except _AnthropicAPIError as exc:
+            status = exc.status_code
             if status in (401, 403):
                 raise RuntimeAuthError(f"claude_code: auth: {exc}") from exc
             if status in (429, 502, 503, 504):
                 raise RuntimeTransientError(f"claude_code: transient {status}") from exc
             raise RuntimeProtocolError(
-                f"claude_code: /v1/models returned {status}", body=exc.response.text[:500]
+                f"claude_code: /v1/models returned {status}",
+                body=str(exc)[:500],
             ) from exc
-        except httpx.HTTPError as exc:
+        except _AnthropicConnError as exc:
             raise RuntimeTransientError(f"claude_code: network: {exc}") from exc
 
         from airframe.models import (
@@ -545,9 +657,10 @@ class ClaudeCodeRuntime(AgentRuntime):
         )
 
         out: list[ModelInfo] = []
-        for entry in payload.get("data", []):
-            model_id = entry["id"]
-            meta = _METADATA.get(model_id, _ModelMeta(entry.get("display_name", model_id)))
+        for entry in entries:
+            model_id = entry.id
+            display = getattr(entry, "display_name", model_id) or model_id
+            meta = _METADATA.get(model_id, _ModelMeta(display))
             out.append(
                 ModelInfo(
                     id=model_id,

@@ -50,6 +50,20 @@ memory, orchestration) is consumer responsibility.
 
 Key invariants when editing:
 
+- **Wrap vendor SDKs; don't rewrite them.** Airframe's job is to
+  expose a vendor-neutral protocol over each vendor's official SDK,
+  not to reimplement the vendor's wire format. Before hand-rolling
+  HTTP, headers, retry policy, error parsing, or auth handling
+  against a vendor endpoint, check whether the official SDK already
+  exposes that surface — and use it if it does. Concrete examples:
+  call `anthropic.AsyncAnthropic.models.list()` rather than
+  `httpx.get("https://api.anthropic.com/v1/models", headers={...})`;
+  let the SDK pick the right header set (`x-api-key` vs
+  `Authorization: Bearer` + the `oauth-2025-04-20` beta header) and
+  handle refresh, retries, and rate-limit telemetry. Local on-disk
+  credential helpers (reading `~/.claude/.credentials.json` etc.)
+  are a legitimate exception because no SDK exposes them; the rest
+  of the auth dance still belongs to the SDK.
 - **`close()` is idempotent and never raises.** It runs from
   `finally`/`__aexit__`; shadowing the original exception would be
   catastrophic. `reset()` is also idempotent — it drops scope-bound

@@ -33,8 +33,12 @@ dependencies = [
 
 [project.optional-dependencies]
 # Each adapter family pulls only the SDK it needs.
-# httpx is in the core deps (needed by ClaudeCodeRuntime.list_models()).
-claude = ["claude-agent-sdk>=0.2.0,<1"]
+# `claude` pulls both the Agent SDK (subprocess + JSON-RPC) and the
+# Anthropic Python client. The latter is used by `list_models()` so
+# OAuth subscription auth (Bearer token + `oauth-2025-04-20` beta
+# header) works — `/v1/models` doesn't accept the OAuth bearer
+# without that header, and the Anthropic SDK manages the dance.
+claude = ["claude-agent-sdk>=0.2.0,<1", "anthropic>=0.40,<1"]
 copilot = ["github-copilot-sdk>=0.3.0"]
 codex = ["openai-codex-sdk>=0.1.11"]
 # `openai-compat` covers every OpenAI-compatible HTTP adapter:
@@ -56,6 +60,7 @@ testing = [
 # "Batteries included" — installs every adapter family's SDK.
 all = [
     "claude-agent-sdk>=0.2.0,<1",
+    "anthropic>=0.40,<1",
     "github-copilot-sdk>=0.3.0",
     "openai-codex-sdk>=0.1.11",
     "openai>=1.50,<3",
@@ -80,6 +85,7 @@ test = [
     # SDKs needed for the test suite (mocked at the boundary, but
     # tests import names like `claude_agent_sdk.ResultMessage`).
     "claude-agent-sdk>=0.2.0,<1",
+    "anthropic>=0.40,<1",
     "github-copilot-sdk>=0.3.0",
     "openai-codex-sdk>=0.1.11",
     "openai>=1.50,<3",
