@@ -6,7 +6,31 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-_Nothing yet — work toward v0.7.0 begins after the v0.6.0 cut._
+_Nothing yet — work toward v0.7.0 begins after the v0.6.1 cut._
+
+---
+
+## [0.6.1] — 2026-05-18
+
+README-only patch release. The v0.6.0 README had two gaps surfaced by
+the PyPI-rendered project page:
+
+- **Bedrock missing from end-user-facing surfaces** despite shipping
+  as a first-class adapter. Added to the tagline, the `Why?` per-SDK
+  description, the `## Install` extras list (between alphabetised
+  sibling lines), and the `## Documentation` per-adapter-notes link
+  list.
+- **Relative repo links 404 on PyPI.** Every link to `docs/*.md`,
+  `CHANGELOG.md`, `CONTRIBUTING.md`, `SECURITY.md`, and `LICENSE`
+  resolved against `pypi.org` instead of the GitHub repo. All
+  converted to absolute `https://github.com/get2knowio/airframe/blob/main/...`
+  URLs so the PyPI-rendered README links work end-to-end. (GitHub
+  resolves the absolute URLs identically; no regression for users
+  reading the README on github.com.)
+
+No code changes; no behaviour changes; the published wheel/sdist
+contents are identical to v0.6.0 except for the README and version
+strings.
 
 ---
 

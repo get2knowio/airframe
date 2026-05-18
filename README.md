@@ -2,13 +2,14 @@
 
 [![PyPI version](https://img.shields.io/pypi/v/airframe-agents.svg)](https://pypi.org/project/airframe-agents/)
 [![Python versions](https://img.shields.io/pypi/pyversions/airframe-agents.svg)](https://pypi.org/project/airframe-agents/)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/get2knowio/airframe/blob/main/LICENSE)
 [![CI](https://github.com/get2knowio/airframe/actions/workflows/ci.yml/badge.svg)](https://github.com/get2knowio/airframe/actions/workflows/ci.yml)
 
 **One protocol, every agent SDK.** Vendor-neutral runtime for
 Python AI agents — write once against a small `AgentRuntime`
-protocol and run on Claude Code, GitHub Copilot, OpenAI Codex, or
-OpenCode Zen by changing a single config value.
+protocol and run on AWS Bedrock, Claude Code, OpenAI Codex,
+GitHub Copilot, OpenCode Go, OpenCode Zen, or OpenRouter by
+changing a single config value.
 
 ## Quickstart
 
@@ -65,19 +66,19 @@ is `airframe`.
 
 | Adapter | `PROVIDER_ID` | Vendor SDK | Auth |
 |---|---|---|---|
-| [`BedrockRuntime`](docs/adapters/bedrock.md) | `bedrock` | `aioboto3` | boto3 chain (env / `AWS_PROFILE` / IAM role) + `AWS_REGION` |
-| [`ClaudeCodeRuntime`](docs/adapters/claude.md) | `claude` | `claude-agent-sdk` | Claude Max OAuth → `~/.claude/credentials.json` → `ANTHROPIC_API_KEY` |
-| [`CodexRuntime`](docs/adapters/codex.md) | `codex` | `openai-codex-sdk` | `OPENAI_API_KEY` → opencode `auth.json` → `~/.codex/auth.json` |
-| [`CopilotRuntime`](docs/adapters/copilot.md) | `github-copilot` | `github-copilot-sdk` | `GITHUB_TOKEN` → `gh auth` |
-| [`OpenCodeGoRuntime`](docs/adapters/opencode-go.md) | `opencode-go` | OpenAI compatible | `OPENCODE_API_KEY` → opencode `auth.json::opencode-go.key` |
-| [`OpenCodeZenRuntime`](docs/adapters/opencode-zen.md) | `opencode-zen` | OpenAI compatible | `OPENCODE_API_KEY` → opencode `auth.json::opencode.key` |
-| [`OpenRouterRuntime`](docs/adapters/openrouter.md) | `openrouter` | OpenAI compatible | `OPENROUTER_API_KEY` |
+| [`BedrockRuntime`](https://github.com/get2knowio/airframe/blob/main/docs/adapters/bedrock.md) | `bedrock` | `aioboto3` | boto3 chain (env / `AWS_PROFILE` / IAM role) + `AWS_REGION` |
+| [`ClaudeCodeRuntime`](https://github.com/get2knowio/airframe/blob/main/docs/adapters/claude.md) | `claude` | `claude-agent-sdk` | Claude Max OAuth → `~/.claude/credentials.json` → `ANTHROPIC_API_KEY` |
+| [`CodexRuntime`](https://github.com/get2knowio/airframe/blob/main/docs/adapters/codex.md) | `codex` | `openai-codex-sdk` | `OPENAI_API_KEY` → opencode `auth.json` → `~/.codex/auth.json` |
+| [`CopilotRuntime`](https://github.com/get2knowio/airframe/blob/main/docs/adapters/copilot.md) | `github-copilot` | `github-copilot-sdk` | `GITHUB_TOKEN` → `gh auth` |
+| [`OpenCodeGoRuntime`](https://github.com/get2knowio/airframe/blob/main/docs/adapters/opencode-go.md) | `opencode-go` | OpenAI compatible | `OPENCODE_API_KEY` → opencode `auth.json::opencode-go.key` |
+| [`OpenCodeZenRuntime`](https://github.com/get2knowio/airframe/blob/main/docs/adapters/opencode-zen.md) | `opencode-zen` | OpenAI compatible | `OPENCODE_API_KEY` → opencode `auth.json::opencode.key` |
+| [`OpenRouterRuntime`](https://github.com/get2knowio/airframe/blob/main/docs/adapters/openrouter.md) | `openrouter` | OpenAI compatible | `OPENROUTER_API_KEY` |
 
 The OpenAI-compatible family (`OpenCodeZenRuntime` per-token,
 `OpenCodeGoRuntime` subscription, `OpenRouterRuntime` multi-vendor
 gateway today; Together / Groq / Fireworks as future siblings) shares
 the `OpenAICompatibleRuntime` base — subclasses are ~30 lines. See
-[`docs/adapters/third-party.md`](docs/adapters/third-party.md).
+[`docs/adapters/third-party.md`](https://github.com/get2knowio/airframe/blob/main/docs/adapters/third-party.md).
 
 `BedrockRuntime` is the enterprise / managed-cloud path —
 AWS-billed access to a multi-vendor catalog (Anthropic, Meta,
@@ -125,8 +126,8 @@ Capability flags are statically declared per adapter. Check
 capabilities raise `UnsupportedFeatureError` with a `feature=`
 attribute so the call fails fast.
 
-Full per-feature semantics in [`docs/capabilities.md`](docs/capabilities.md);
-per-adapter quirks under [`docs/adapters/`](docs/adapters/).
+Full per-feature semantics in [`docs/capabilities.md`](https://github.com/get2knowio/airframe/blob/main/docs/capabilities.md);
+per-adapter quirks under [`docs/adapters/`](https://github.com/get2knowio/airframe/tree/main/docs/adapters).
 
 ## Why?
 
@@ -134,9 +135,12 @@ Each vendor ships a Python SDK that does something subtly different:
 the Claude Agent SDK exposes a subprocess + JSON-RPC interface;
 GitHub's Copilot SDK exposes a session + tool registration model;
 OpenAI's Codex SDK passes a JSON Schema flag to a CLI subprocess;
-the opencode-go Zen gateway speaks OpenAI-compatible HTTP. Each
-has its own auth chain, error taxonomy, cost-reporting shape,
-structured-output mechanism, and models-endpoint shape. Airframe
+AWS Bedrock's `aioboto3` client fronts a multi-vendor model
+catalog behind the Converse envelope and IAM auth; the
+OpenAI-compatible gateways (OpenCode Zen, OpenCode Go, OpenRouter)
+speak Chat Completions HTTP. Each has its own auth chain, error
+taxonomy, cost-reporting shape, structured-output mechanism, and
+models-endpoint shape. Airframe
 collapses those differences behind one
 `execute / session / reset / close / validate_binding / list_models /
 supports / unwrap` interface, classifies every vendor's failures
@@ -162,10 +166,11 @@ absorbs its vendor's quirks.
 ## Install
 
 ```bash
+pip install airframe-agents[bedrock]        # BedrockRuntime
 pip install airframe-agents[claude]         # ClaudeCodeRuntime
-pip install airframe-agents[copilot]        # CopilotRuntime
 pip install airframe-agents[codex]          # CodexRuntime
-pip install airframe-agents[openai-compat]  # OpenCodeZenRuntime + OpenCodeGoRuntime + OpenRouterRuntime (+ future siblings)
+pip install airframe-agents[copilot]        # CopilotRuntime
+pip install airframe-agents[openai-compat]  # OpenCodeGoRuntime + OpenCodeZenRuntime + OpenRouterRuntime (+ future siblings)
 pip install airframe-agents[all]            # Everything
 pip install airframe-agents[testing]        # Conformance contract suite (pytest)
 ```
@@ -230,8 +235,8 @@ variants: `TextDelta`, `ReasoningDelta`, `ToolCallStart`,
 `ToolCallResult`, `TurnComplete`. The variant set is shape-locked.
 
 Per-kwarg semantics live in
-[`docs/capabilities.md`](docs/capabilities.md); per-adapter quirks
-in each [`docs/adapters/`](docs/adapters/) page.
+[`docs/capabilities.md`](https://github.com/get2knowio/airframe/blob/main/docs/capabilities.md); per-adapter quirks
+in each [`docs/adapters/`](https://github.com/get2knowio/airframe/tree/main/docs/adapters) page.
 
 ## Errors
 
@@ -247,7 +252,7 @@ Adapters classify vendor failures into a small hierarchy:
 | `UnsupportedFeatureError` | Capability declined (carries `feature=` attr) |
 
 Full list and the rest of the hierarchy in
-[`docs/reference.md#errors`](docs/reference.md#errors).
+[`docs/reference.md#errors`](https://github.com/get2knowio/airframe/blob/main/docs/reference.md#errors).
 
 ## Escape hatch: `unwrap()`
 
@@ -284,31 +289,32 @@ uv run python examples/probe_budget.py          # max_turns / max_budget_usd
 ```
 
 Full list with one-line descriptions in
-[`docs/cookbook.md`](docs/cookbook.md).
+[`docs/cookbook.md`](https://github.com/get2knowio/airframe/blob/main/docs/cookbook.md).
 
 ## Documentation
 
-- **[Architecture & design](docs/architecture.md)** — protocol
+- **[Architecture & design](https://github.com/get2knowio/airframe/blob/main/docs/architecture.md)** — protocol
   shape, runtime-vs-session split, streaming event taxonomy.
-- **[Capabilities](docs/capabilities.md)** — per-`Feature`
+- **[Capabilities](https://github.com/get2knowio/airframe/blob/main/docs/capabilities.md)** — per-`Feature`
   semantics across adapters.
-- **[Authentication](docs/auth.md)** — per-adapter credential
+- **[Authentication](https://github.com/get2knowio/airframe/blob/main/docs/auth.md)** — per-adapter credential
   resolution chains and CI patterns.
-- **[API reference](docs/reference.md)** — every public name with
+- **[API reference](https://github.com/get2knowio/airframe/blob/main/docs/reference.md)** — every public name with
   cross-links into the source.
-- **[Cookbook](docs/cookbook.md)** — runnable recipes via the
+- **[Cookbook](https://github.com/get2knowio/airframe/blob/main/docs/cookbook.md)** — runnable recipes via the
   probe scripts.
-- **[Per-adapter notes](docs/adapters/)** —
-  [Claude](docs/adapters/claude.md) ·
-  [Copilot](docs/adapters/copilot.md) ·
-  [Codex](docs/adapters/codex.md) ·
-  [OpenCode Zen](docs/adapters/opencode-zen.md) ·
-  [OpenCode Go](docs/adapters/opencode-go.md) ·
-  [OpenRouter](docs/adapters/openrouter.md).
-- **[Writing your own adapter](docs/adapters/third-party.md)** —
+- **[Per-adapter notes](https://github.com/get2knowio/airframe/tree/main/docs/adapters)** —
+  [Bedrock](https://github.com/get2knowio/airframe/blob/main/docs/adapters/bedrock.md) ·
+  [Claude](https://github.com/get2knowio/airframe/blob/main/docs/adapters/claude.md) ·
+  [Codex](https://github.com/get2knowio/airframe/blob/main/docs/adapters/codex.md) ·
+  [Copilot](https://github.com/get2knowio/airframe/blob/main/docs/adapters/copilot.md) ·
+  [OpenCode Go](https://github.com/get2knowio/airframe/blob/main/docs/adapters/opencode-go.md) ·
+  [OpenCode Zen](https://github.com/get2knowio/airframe/blob/main/docs/adapters/opencode-zen.md) ·
+  [OpenRouter](https://github.com/get2knowio/airframe/blob/main/docs/adapters/openrouter.md).
+- **[Writing your own adapter](https://github.com/get2knowio/airframe/blob/main/docs/adapters/third-party.md)** —
   the `airframe.adapters` entry-point group + conformance
   contracts.
-- **[Changelog](CHANGELOG.md)** · **[Contributing](CONTRIBUTING.md)** · **[Security](SECURITY.md)**.
+- **[Changelog](https://github.com/get2knowio/airframe/blob/main/CHANGELOG.md)** · **[Contributing](https://github.com/get2knowio/airframe/blob/main/CONTRIBUTING.md)** · **[Security](https://github.com/get2knowio/airframe/blob/main/SECURITY.md)**.
 
 ## Development
 
@@ -322,8 +328,8 @@ make ci            # lint + format + typecheck + test
 ```
 
 Integration tests run automatically when credentials for an
-adapter are configured (see [auth.md](docs/auth.md)).
+adapter are configured (see [auth.md](https://github.com/get2knowio/airframe/blob/main/docs/auth.md)).
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT — see [LICENSE](https://github.com/get2knowio/airframe/blob/main/LICENSE).
