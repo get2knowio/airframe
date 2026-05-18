@@ -67,6 +67,7 @@ def _builtin_runtime_classes() -> list[type[AgentRuntime]]:
     adapter modules (which themselves lazy-import vendor SDKs) into
     memory.
     """
+    from airframe.adapters.bedrock import BedrockRuntime
     from airframe.adapters.claude_code import ClaudeCodeRuntime
     from airframe.adapters.codex import CodexRuntime
     from airframe.adapters.copilot import CopilotRuntime
@@ -81,6 +82,7 @@ def _builtin_runtime_classes() -> list[type[AgentRuntime]]:
         OpenCodeZenRuntime,
         OpenCodeGoRuntime,
         OpenRouterRuntime,
+        BedrockRuntime,
     ]
 
 

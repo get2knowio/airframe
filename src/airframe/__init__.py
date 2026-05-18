@@ -97,6 +97,7 @@ __version__ = "0.5.0"
 # adapter modules themselves lazy-import their underlying SDK so
 # `import airframe` doesn't pull in claude-agent-sdk / codex / copilot
 # / openai unless the consumer actually instantiates the adapter.
+from airframe.adapters.bedrock import BedrockRuntime
 from airframe.adapters.claude_code import ClaudeCodeRuntime
 from airframe.adapters.codex import CodexRuntime
 from airframe.adapters.copilot import CopilotRuntime
@@ -108,6 +109,7 @@ __all__ = [
     "AgentRuntime",
     "AgentRuntimeError",
     "AgentSession",
+    "BedrockRuntime",
     "CAPABILITY_REASONING_EFFORT",
     "CAPABILITY_STREAMING",
     "CAPABILITY_STRUCTURED_OUTPUT",
