@@ -162,14 +162,16 @@ def test_validate_binding_rejects_foreign_provider_id() -> None:
 # --- supports() ---------------------------------------------------------------
 
 
-def test_supports_iteration_b_feature_matrix() -> None:
-    """Iteration B flips STREAMING / CANCEL / SESSION_RESUME on.
+def test_supports_iteration_c_feature_matrix() -> None:
+    """Iteration C adds REASONING_EFFORT + VISION_INPUT on top of B.
 
     ``STRUCTURED_OUTPUT_JSON_SCHEMA`` stays True (the conformance
     floor every airframe adapter declares), but
     ``execute(schema=...)`` raises :class:`NotImplementedError` until
-    Iteration D wires the MCP-based forced-tool path. The rest of
-    the matrix flips on in Iterations C–F per the plan.
+    Iteration D wires the MCP-based forced-tool path. ``FILE_INPUT``
+    stays False — the SDK has no prompt-side file slot; files reach
+    Kimi tools via the session's ``work_dir`` instead. The rest of
+    the matrix flips on in Iterations D–F per the plan.
     """
     rt = _make_runtime()
     expected_true = {
@@ -177,11 +179,13 @@ def test_supports_iteration_b_feature_matrix() -> None:
         Feature.STREAMING,
         Feature.CANCEL,
         Feature.SESSION_RESUME,
+        Feature.REASONING_EFFORT,
+        Feature.VISION_INPUT,
     }
     for feature in Feature:
         want = feature in expected_true
         assert rt.supports(feature) is want, (
-            f"Iteration B: {feature} supports() should be {want}; got {rt.supports(feature)}"
+            f"Iteration C: {feature} supports() should be {want}; got {rt.supports(feature)}"
         )
 
 

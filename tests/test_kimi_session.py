@@ -1,4 +1,4 @@
-"""Behavioural unit tests for :class:`KimiSession` — Iteration B.
+"""Behavioural unit tests for :class:`KimiSession` — Iterations B + C.
 
 The kimi-agent-sdk package can't be installed in the airframe dev
 environment (its ``kimi-cli`` transitive pulls ``fastmcp 2.12.5``
@@ -27,6 +27,14 @@ Coverage:
 * Exception classification — every documented kimi-agent-sdk error
   maps to the airframe ``Runtime*Error`` hierarchy.
 * ``KimiOptions.working_directory`` threads into ``Session.create``.
+* Iteration C: ``thinking=`` → ``Session.create(thinking: bool)``
+  mapping; session rebuild on toggle between turns; reuse when
+  unchanged; ``thinking={"budget_tokens": …}`` raises
+  :class:`UnsupportedFeatureError`.
+* Iteration C: polymorphic prompt — ``ImageInput(url=…)`` /
+  ``(bytes_=…)`` / ``(path=…)`` translate to
+  :class:`ImageURLPart`; ``FileInput`` declined; system prompt
+  prepends to the ``TextPart``.
 * Live integration coverage will land alongside Iteration F's
   ``tests/test_kimi_integration.py`` once we have a separate-venv
   story for the kimi-agent-sdk's mcp-version conflict.
@@ -48,7 +56,10 @@ from airframe.errors import (
     RuntimeCancelledError,
     RuntimeProtocolError,
     RuntimeTransientError,
+    UnsupportedFeatureError,
 )
+from airframe.features import Feature
+from airframe.inputs import ImageInput
 
 # ---------------------------------------------------------------------------
 # Stand-in SDK + KaosPath modules
@@ -112,11 +123,16 @@ class _FakeSdkSession:
         self._raise_on_prompt = raise_on_prompt
         self.closed = False
         self.cancel_calls = 0
+        # Iteration C: tests assert on the polymorphic user_input the
+        # adapter passes through (TextPart + ImageURLPart shape vs
+        # plain str). Capture each prompt() call here.
+        self.prompt_calls: list[Any] = []
 
     async def prompt(
-        self, user_input: str, *, merge_wire_messages: bool = False
+        self, user_input: Any, *, merge_wire_messages: bool = False
     ) -> AsyncIterator[Any]:
-        del user_input, merge_wire_messages
+        del merge_wire_messages
+        self.prompt_calls.append(user_input)
         if self._raise_on_prompt is not None:
             raise self._raise_on_prompt
         for wire in self._wire_messages:
@@ -175,6 +191,28 @@ def patch_sdk(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
 
     sdk_module = ModuleType("kimi_agent_sdk")
     sdk_module.Session = fake_session_cls  # type: ignore[attr-defined]
+    # Iteration C: content-part shapes the adapter reaches into for
+    # polymorphic prompts. Mirror kosong.message's structure closely
+    # enough that round-tripping a value through the adapter's
+    # ``_build_kimi_user_input`` helper produces the expected types.
+
+    class _FakeTextPart:
+        def __init__(self, *, text: str) -> None:
+            self.text = text
+
+    class _FakeImageURL:
+        def __init__(self, *, url: str, id: str | None = None) -> None:
+            self.url = url
+            self.id = id
+
+    class _FakeImageURLPart:
+        ImageURL = _FakeImageURL
+
+        def __init__(self, *, image_url: _FakeImageURL) -> None:
+            self.image_url = image_url
+
+    sdk_module.TextPart = _FakeTextPart  # type: ignore[attr-defined]
+    sdk_module.ImageURLPart = _FakeImageURLPart  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "kimi_agent_sdk", sdk_module)
 
     class _FakeKaosPath:
@@ -587,3 +625,314 @@ def test_api_key_constructor_arg_sets_env_for_sdk_call(
     # And it's restored after close.
     asyncio.run(sess.close())
     assert os.environ.get("KIMI_API_KEY") is None
+
+
+# ---------------------------------------------------------------------------
+# Iteration C: reasoning (thinking=)
+# ---------------------------------------------------------------------------
+
+
+def test_thinking_disabled_passes_false_to_session_create(
+    patch_sdk: dict[str, Any],
+) -> None:
+    """``thinking=None`` (default) and ``thinking="disabled"`` both
+    pass ``thinking=False`` to ``Session.create``."""
+    from airframe import KimiRuntime
+
+    patch_sdk["sdk_session"] = _FakeSdkSession(
+        wire_messages=[_wire("TextPart", text="ok")],
+    )
+
+    rt = KimiRuntime(api_key="sk-test")
+    sess = rt.session()
+    asyncio.run(sess.execute("hi"))  # thinking= defaults to None
+
+    assert len(patch_sdk["create_calls"]) == 1
+    assert patch_sdk["create_calls"][0]["thinking"] is False
+    asyncio.run(sess.close())
+
+
+@pytest.mark.parametrize("effort", ["minimal", "low", "medium", "high"])
+def test_thinking_effort_literal_passes_true_to_session_create(
+    patch_sdk: dict[str, Any], effort: str
+) -> None:
+    """Every effort literal collapses to ``thinking=True`` — kimi-agent-sdk
+    has no effort granularity; the model decides depth itself."""
+    from airframe import KimiRuntime
+
+    patch_sdk["sdk_session"] = _FakeSdkSession(
+        wire_messages=[_wire("TextPart", text="ok")],
+    )
+
+    rt = KimiRuntime(api_key="sk-test")
+    sess = rt.session()
+    asyncio.run(sess.execute("hi", thinking=effort))
+
+    assert len(patch_sdk["create_calls"]) == 1
+    assert patch_sdk["create_calls"][0]["thinking"] is True
+    asyncio.run(sess.close())
+
+
+def test_thinking_dict_shape_raises_unsupported_feature(
+    patch_sdk: dict[str, Any],
+) -> None:
+    """``thinking={"budget_tokens": N}`` is Claude-only — Kimi has no
+    token-budget knob. Raise :class:`UnsupportedFeatureError` with
+    :data:`Feature.REASONING_BUDGET_TOKENS`."""
+    from airframe import KimiRuntime
+
+    rt = KimiRuntime(api_key="sk-test")
+    sess = rt.session()
+    with pytest.raises(UnsupportedFeatureError) as excinfo:
+        asyncio.run(sess.execute("hi", thinking={"budget_tokens": 8192}))
+    assert excinfo.value.feature is Feature.REASONING_BUDGET_TOKENS
+    asyncio.run(sess.close())
+
+
+def test_thinking_toggle_between_turns_rebuilds_session(
+    patch_sdk: dict[str, Any],
+) -> None:
+    """Switching ``thinking=`` between turns must close the existing
+    SDK session and rebuild — :meth:`Session.create` bakes the flag
+    at creation and never re-evaluates."""
+    from airframe import KimiRuntime
+
+    first = _FakeSdkSession(
+        session_id="sess-1",
+        wire_messages=[_wire("TextPart", text="a")],
+    )
+    second = _FakeSdkSession(
+        session_id="sess-1",  # same ID — rebuild resumes by ID
+        wire_messages=[_wire("TextPart", text="b")],
+    )
+    sessions = iter([first, second])
+
+    async def fake_create(**kwargs: Any) -> Any:
+        patch_sdk["create_calls"].append(kwargs)
+        return next(sessions)
+
+    async def fake_resume(**kwargs: Any) -> Any:
+        patch_sdk["resume_calls"].append(kwargs)
+        return next(sessions)
+
+    sdk_module = sys.modules["kimi_agent_sdk"]
+    sdk_module.Session.create = fake_create
+    sdk_module.Session.resume = fake_resume
+
+    rt = KimiRuntime(api_key="sk-test")
+    sess = rt.session()
+
+    # Turn 1: thinking=disabled → Session.create(thinking=False).
+    asyncio.run(sess.execute("first", thinking="disabled"))
+    assert len(patch_sdk["create_calls"]) == 1
+    assert patch_sdk["create_calls"][0]["thinking"] is False
+    assert not first.closed
+
+    # Turn 2: thinking=high → first session closed, rebuild via
+    # Session.resume (carries the session id from turn 1) with
+    # thinking=True.
+    asyncio.run(sess.execute("second", thinking="high"))
+    assert first.closed, "first SDK session must be closed on rebuild"
+    assert len(patch_sdk["resume_calls"]) == 1
+    assert patch_sdk["resume_calls"][0]["thinking"] is True
+    assert patch_sdk["resume_calls"][0]["session_id"] == "sess-1"
+    asyncio.run(sess.close())
+
+
+def test_thinking_unchanged_between_turns_reuses_session(
+    patch_sdk: dict[str, Any],
+) -> None:
+    """No rebuild when consecutive turns share the same ``thinking=``."""
+    from airframe import KimiRuntime
+
+    patch_sdk["sdk_session"] = _FakeSdkSession(
+        wire_messages=[_wire("TextPart", text="ok")],
+    )
+
+    rt = KimiRuntime(api_key="sk-test")
+    sess = rt.session()
+    asyncio.run(sess.execute("first", thinking="medium"))
+    asyncio.run(sess.execute("second", thinking="medium"))
+
+    # One create call, no resume call — the SDK session was reused.
+    assert len(patch_sdk["create_calls"]) == 1
+    assert len(patch_sdk["resume_calls"]) == 0
+    asyncio.run(sess.close())
+
+
+# ---------------------------------------------------------------------------
+# Iteration C: polymorphic prompt (vision)
+# ---------------------------------------------------------------------------
+
+
+def test_plain_string_prompt_passes_through_as_string(
+    patch_sdk: dict[str, Any],
+) -> None:
+    """No images → user_input is the bare ``str`` (no list-wrap)."""
+    from airframe import KimiRuntime
+
+    sdk_session = _FakeSdkSession(wire_messages=[_wire("TextPart", text="ok")])
+    patch_sdk["sdk_session"] = sdk_session
+
+    rt = KimiRuntime(api_key="sk-test")
+    sess = rt.session()
+    asyncio.run(sess.execute("hello"))
+
+    assert sdk_session.prompt_calls == ["hello"]
+    asyncio.run(sess.close())
+
+
+def test_image_input_url_passes_through_as_image_url_part(
+    patch_sdk: dict[str, Any],
+) -> None:
+    """``ImageInput(url=…)`` lands as an :class:`ImageURLPart` with
+    the URL forwarded verbatim — no data-URI conversion."""
+    from airframe import KimiRuntime
+
+    sdk_session = _FakeSdkSession(wire_messages=[_wire("TextPart", text="ok")])
+    patch_sdk["sdk_session"] = sdk_session
+
+    rt = KimiRuntime(api_key="sk-test")
+    sess = rt.session()
+    asyncio.run(
+        sess.execute(
+            [
+                "What's in this image?",
+                ImageInput(url="https://example.com/cat.png"),
+            ]
+        )
+    )
+
+    assert len(sdk_session.prompt_calls) == 1
+    parts = sdk_session.prompt_calls[0]
+    # Expect [TextPart, ImageURLPart].
+    assert len(parts) == 2
+    assert type(parts[0]).__name__ == "_FakeTextPart"
+    assert parts[0].text == "What's in this image?"
+    assert type(parts[1]).__name__ == "_FakeImageURLPart"
+    assert parts[1].image_url.url == "https://example.com/cat.png"
+    asyncio.run(sess.close())
+
+
+def test_image_input_bytes_becomes_data_uri(patch_sdk: dict[str, Any]) -> None:
+    """``ImageInput(bytes_=…)`` is base64-encoded into a ``data:`` URI."""
+    from airframe import KimiRuntime
+
+    sdk_session = _FakeSdkSession(wire_messages=[_wire("TextPart", text="ok")])
+    patch_sdk["sdk_session"] = sdk_session
+
+    rt = KimiRuntime(api_key="sk-test")
+    sess = rt.session()
+    asyncio.run(
+        sess.execute(
+            [
+                "Describe.",
+                ImageInput(bytes_=b"\x89PNG fake png bytes", media_type="image/png"),
+            ]
+        )
+    )
+
+    parts = sdk_session.prompt_calls[0]
+    url = parts[1].image_url.url
+    assert url.startswith("data:image/png;base64,")
+    # The base64 portion decodes back to our input bytes.
+    import base64
+
+    payload = url.split(",", 1)[1]
+    assert base64.b64decode(payload) == b"\x89PNG fake png bytes"
+    asyncio.run(sess.close())
+
+
+def test_image_input_path_becomes_data_uri(patch_sdk: dict[str, Any], tmp_path: Any) -> None:
+    """``ImageInput(path=…)`` reads the file, sniffs media type from
+    the extension, and encodes as a ``data:`` URI."""
+    from airframe import KimiRuntime
+
+    img_bytes = b"PNG-on-disk-content"
+    img_path = tmp_path / "screenshot.png"
+    img_path.write_bytes(img_bytes)
+
+    sdk_session = _FakeSdkSession(wire_messages=[_wire("TextPart", text="ok")])
+    patch_sdk["sdk_session"] = sdk_session
+
+    rt = KimiRuntime(api_key="sk-test")
+    sess = rt.session()
+    asyncio.run(
+        sess.execute(["Look:", ImageInput(path=str(img_path))]),
+    )
+
+    url = sdk_session.prompt_calls[0][1].image_url.url
+    assert url.startswith("data:image/png;base64,")
+    import base64
+
+    payload = url.split(",", 1)[1]
+    assert base64.b64decode(payload) == img_bytes
+    asyncio.run(sess.close())
+
+
+def test_image_input_missing_file_raises_unsupported_feature(
+    patch_sdk: dict[str, Any], tmp_path: Any
+) -> None:
+    """``ImageInput(path=…)`` where the file doesn't exist surfaces as
+    :class:`UnsupportedFeatureError` (a configuration error — better
+    than silently bubbling an :class:`OSError` from inside the SDK)."""
+    from airframe import KimiRuntime
+
+    rt = KimiRuntime(api_key="sk-test")
+    sess = rt.session()
+    with pytest.raises(UnsupportedFeatureError) as excinfo:
+        asyncio.run(
+            sess.execute(
+                ["x", ImageInput(path=str(tmp_path / "nope.png"))],
+            )
+        )
+    assert excinfo.value.feature is Feature.VISION_INPUT
+    assert "file not found" in str(excinfo.value)
+    asyncio.run(sess.close())
+
+
+def test_file_input_declined_via_split_prompt_parts(
+    patch_sdk: dict[str, Any], tmp_path: Any
+) -> None:
+    """``FileInput`` is declined — Kimi has no prompt-side file slot.
+    The shared ``_split_prompt_parts`` helper raises
+    :class:`UnsupportedFeatureError` with :data:`Feature.FILE_INPUT`."""
+    from airframe import KimiRuntime
+    from airframe.inputs import FileInput
+
+    f = tmp_path / "doc.md"
+    f.write_text("# doc")
+
+    rt = KimiRuntime(api_key="sk-test")
+    sess = rt.session()
+    with pytest.raises(UnsupportedFeatureError) as excinfo:
+        asyncio.run(sess.execute(["read this:", FileInput(path=str(f))]))
+    assert excinfo.value.feature is Feature.FILE_INPUT
+    asyncio.run(sess.close())
+
+
+def test_system_prompt_prepends_to_textpart_when_images_present(
+    patch_sdk: dict[str, Any],
+) -> None:
+    """The session's ``system`` prefix lands on the ``TextPart.text``,
+    not as a separate part. Mirrors the plain-string-prompt behaviour
+    (where ``system`` already concatenates onto the prompt text)."""
+    from airframe import KimiRuntime
+
+    sdk_session = _FakeSdkSession(wire_messages=[_wire("TextPart", text="ok")])
+    patch_sdk["sdk_session"] = sdk_session
+
+    rt = KimiRuntime(api_key="sk-test")
+    sess = rt.session(system="You are precise.")
+    asyncio.run(
+        sess.execute(
+            [
+                "Caption:",
+                ImageInput(url="https://example.com/a.png"),
+            ]
+        )
+    )
+
+    parts = sdk_session.prompt_calls[0]
+    assert parts[0].text == "You are precise.\n\nCaption:"
+    asyncio.run(sess.close())

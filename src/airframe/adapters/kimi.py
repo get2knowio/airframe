@@ -22,6 +22,19 @@ constraint knob, and the wrap-don't-rewrite principle in
 wire structured output via an in-process MCP forced-tool, the same
 pattern :class:`CopilotRuntime` uses.
 
+**Iteration C.** Polymorphic prompt + reasoning. :class:`KimiSession`
+now translates :class:`~airframe.inputs.ImageInput` parts into the
+SDK's :class:`ImageURLPart` shape (URL → pass-through, bytes / path →
+base64 data URI), and threads ``thinking=`` through
+:meth:`Session.create`'s boolean ``thinking`` kwarg.
+:data:`Feature.REASONING_EFFORT` and :data:`Feature.VISION_INPUT`
+flip True; :data:`Feature.FILE_INPUT` stays False (the SDK has no
+prompt-side file slot — files reach Kimi tools via the session's
+``work_dir``). ``thinking=`` is session-scoped at the SDK boundary
+(baked at :meth:`Session.create` time, not per-prompt) so a toggle
+between turns rebuilds the SDK session, mirroring how Codex rebuilds
+its :class:`Thread` on a reasoning-effort change.
+
 **Auth.** Three options, checked in order:
 
 1. Explicit ``api_key=`` / ``base_url=`` / ``model=`` constructor
@@ -47,8 +60,11 @@ message from pip. Documented in
 
 from __future__ import annotations
 
+import base64
 import logging
+import mimetypes
 import os
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, TypeVar
 
 from pydantic import BaseModel
@@ -68,7 +84,7 @@ from airframe.events import (
     TurnComplete,
 )
 from airframe.features import Feature
-from airframe.inputs import Prompt
+from airframe.inputs import ImageInput, Prompt
 from airframe.models import ModelInfo
 from airframe.options import KimiOptions
 from airframe.protocol import (
@@ -139,6 +155,132 @@ _FALLBACK_MODELS: tuple[ModelInfo, ...] = (
 )
 
 
+def _translate_thinking_for_kimi(thinking: ThinkingMode) -> bool:
+    """Translate airframe's :data:`ThinkingMode` onto the SDK's
+    boolean ``thinking`` kwarg.
+
+    The kimi-agent-sdk's :meth:`Session.create` accepts ``thinking:
+    bool = False`` — there's no effort literal; the model itself
+    decides reasoning depth based on input complexity once thinking
+    is enabled. Mapping:
+
+    * ``None`` / ``"disabled"`` → ``False``.
+    * Any effort literal (``"minimal"``, ``"low"``, ``"medium"``,
+      ``"high"``) → ``True``. Effort granularity is lost on the SDK
+      boundary — the model decides depth itself.
+    * ``{"budget_tokens": N}`` raises :class:`UnsupportedFeatureError`
+      with :data:`Feature.REASONING_BUDGET_TOKENS` — Kimi has no
+      token-budget channel for reasoning (Claude-only shape).
+
+    Returns:
+        ``True`` if thinking should be enabled on the SDK session,
+        ``False`` otherwise.
+
+    Raises:
+        UnsupportedFeatureError: ``thinking`` is a ``dict`` shape, or
+        an unrecognised value the literal type doesn't cover.
+    """
+    if thinking is None or thinking == "disabled":
+        return False
+    if isinstance(thinking, str):
+        return True
+    if isinstance(thinking, dict):
+        raise UnsupportedFeatureError(
+            "kimi: thinking=<dict> (budget_tokens shape) is Claude-only; "
+            "kimi-agent-sdk exposes a boolean thinking knob — pass a literal "
+            "effort string ('minimal'|'low'|'medium'|'high') instead, or omit "
+            "thinking= to use the SDK's default (False).",
+            feature=Feature.REASONING_BUDGET_TOKENS,
+        )
+    raise UnsupportedFeatureError(
+        f"kimi: unsupported thinking= value {thinking!r}",
+        feature=Feature.REASONING_EFFORT,
+    )
+
+
+def _image_to_data_uri(img: ImageInput) -> str:
+    """Convert an :class:`ImageInput` to a value suitable for
+    :class:`ImageURLPart.ImageURL.url`.
+
+    Kosong's :class:`ImageURLPart` accepts both real URLs and
+    ``data:`` URIs. The mapping:
+
+    * ``url=`` → returned verbatim (HTTPS pass-through to the model).
+    * ``bytes_=`` → ``data:{media_type};base64,{b64}``. ``media_type``
+      defaults to ``image/png`` when omitted; the SDK doesn't sniff
+      bytes itself, so a portable default beats raising.
+    * ``path=`` → file read, base64-encode, build a ``data:`` URI.
+      ``media_type`` resolves from :mod:`mimetypes` against the path
+      extension when omitted.
+
+    Raises:
+        UnsupportedFeatureError: ``ImageInput.path`` points at a file
+        that doesn't exist. This is a configuration error (we don't
+        want a silent ``OSError`` from inside the SDK call).
+    """
+    if img.url is not None:
+        return img.url
+    if img.bytes_ is not None:
+        media_type = img.media_type or "image/png"
+        b64 = base64.b64encode(img.bytes_).decode("ascii")
+        return f"data:{media_type};base64,{b64}"
+    assert img.path is not None  # ImageInput.__post_init__ enforces one-of
+    path = Path(img.path)
+    if not path.is_file():
+        raise UnsupportedFeatureError(
+            f"kimi: ImageInput(path={img.path!r}) — file not found. "
+            f"Pass an existing path, or use bytes_= / url= instead.",
+            feature=Feature.VISION_INPUT,
+        )
+    if img.media_type is not None:
+        path_media_type = img.media_type
+    else:
+        guessed, _ = mimetypes.guess_type(path.name)
+        path_media_type = guessed or "application/octet-stream"
+    b64 = base64.b64encode(path.read_bytes()).decode("ascii")
+    return f"data:{path_media_type};base64,{b64}"
+
+
+def _build_kimi_user_input(
+    text: str,
+    images: list[ImageInput],
+    *,
+    sdk_module: Any,
+) -> Any:
+    """Build the ``user_input`` value for :meth:`Session.prompt`.
+
+    Returns ``text`` verbatim (a ``str``) when no images are present —
+    the SDK accepts plain strings as the common case, no need to wrap
+    in a single-element :class:`TextPart` list. When images are
+    present, returns ``list[ContentPart]`` with one :class:`TextPart`
+    leading and one :class:`ImageURLPart` per image.
+
+    Args:
+        text: The prompt text (already system-prompt-prepended by the
+            caller).
+        images: Image parts to attach. Empty list → plain-text path.
+        sdk_module: The lazily-imported ``kimi_agent_sdk`` module
+            (passed in so the helper doesn't import at module load —
+            kimi-agent-sdk has hostile transitive deps that conflict
+            with claude-agent-sdk; lazy imports are mandatory).
+
+    Returns:
+        Either a ``str`` (no images) or a ``list`` of :class:`TextPart`
+        + :class:`ImageURLPart` instances ready to pass to
+        :meth:`Session.prompt`.
+    """
+    if not images:
+        return text
+    text_part = sdk_module.TextPart(text=text)
+    image_url_cls = sdk_module.ImageURLPart.ImageURL
+    parts: list[Any] = [text_part]
+    parts.extend(
+        sdk_module.ImageURLPart(image_url=image_url_cls(url=_image_to_data_uri(img)))
+        for img in images
+    )
+    return parts
+
+
 class KimiRuntime(AgentRuntime):
     """``AgentRuntime`` over Moonshot AI's Kimi Agent SDK.
 
@@ -189,7 +331,14 @@ class KimiRuntime(AgentRuntime):
     #: ``session.prompt()`` is the streaming async generator,
     #: ``session.cancel()`` sets the SDK's cancel event, and
     #: ``Session.resume(work_dir, session_id)`` resumes a prior
-    #: session by ID. Structured output stays at the conformance
+    #: session by ID. Iteration C adds :data:`Feature.REASONING_EFFORT`
+    #: (mapped to the SDK's boolean ``thinking`` kwarg on
+    #: :meth:`Session.create`) and :data:`Feature.VISION_INPUT` (image
+    #: prompt parts translated to :class:`ImageURLPart`; URLs pass
+    #: through, bytes / paths land as ``data:`` URIs).
+    #: :data:`Feature.FILE_INPUT` stays False — the SDK has no
+    #: prompt-side file slot; files reach Kimi tools via the session's
+    #: ``work_dir`` instead. Structured output stays at the conformance
     #: floor only — :data:`Feature.STRUCTURED_OUTPUT_JSON_SCHEMA`
     #: declared True (every airframe adapter must declare it), but
     #: ``execute(schema=…)`` raises :class:`NotImplementedError`
@@ -200,6 +349,8 @@ class KimiRuntime(AgentRuntime):
             Feature.STREAMING,
             Feature.CANCEL,
             Feature.SESSION_RESUME,
+            Feature.REASONING_EFFORT,
+            Feature.VISION_INPUT,
         }
     )
 
@@ -434,13 +585,43 @@ class KimiSession(AgentSession):
         # When ``resume=`` was passed we surface it eagerly so callers
         # can read it before driving a turn.
         self.id: str | None = resume
+        # Iteration C: the SDK bakes ``thinking`` at session-create time;
+        # tracking what's baked lets us rebuild when a later turn passes
+        # a different ``thinking=``. ``None`` means "no session
+        # materialised yet" — first turn populates this and the SDK
+        # session together.
+        self._sdk_thinking_baked: bool | None = None
 
     # --- SDK lifecycle ------------------------------------------------------
 
-    async def _ensure_sdk_session(self) -> Any:
-        """Lazily create or resume the underlying ``kimi_agent_sdk.Session``."""
-        if self._sdk_session is not None:
+    async def _ensure_sdk_session(self, *, thinking: bool) -> Any:
+        """Lazily create / resume / rebuild the underlying ``kimi_agent_sdk.Session``.
+
+        Args:
+            thinking: The desired ``thinking`` flag for this turn. When
+                a session already exists with a different flag baked
+                in, it's closed and rebuilt — the SDK's
+                :meth:`Session.create` bakes ``thinking`` once and
+                never re-evaluates. A prior session ID (whether from
+                ``resume=`` or from a previous turn) is preserved
+                across the rebuild: the new SDK session resumes by
+                that ID so multi-turn state survives the toggle.
+        """
+        if self._sdk_session is not None and self._sdk_thinking_baked == thinking:
             return self._sdk_session
+
+        if self._sdk_session is not None:
+            # Thinking toggled between turns. Close the existing SDK
+            # session and re-resume by its ID so the conversation
+            # carries over.
+            prior_id = self.id
+            try:
+                await self._sdk_session.close()
+            except Exception:  # noqa: BLE001 — close never raises
+                logger.debug("kimi: prior SDK session close raised", exc_info=True)
+            self._sdk_session = None
+            if prior_id is not None:
+                self._resume_id = prior_id
 
         # Late imports — the ``[kimi]`` extra installs these. The
         # ImportError surfaces clearly when the extra isn't present.
@@ -476,6 +657,7 @@ class KimiSession(AgentSession):
                     session_id=self._resume_id,
                     model=model_id,
                     yolo=True,
+                    thinking=thinking,
                 )
                 if sdk is None:
                     raise RuntimeProtocolError(
@@ -489,6 +671,7 @@ class KimiSession(AgentSession):
                     work_dir=work_dir,
                     model=model_id,
                     yolo=True,
+                    thinking=thinking,
                 )
         except RuntimeProtocolError:
             raise
@@ -497,6 +680,7 @@ class KimiSession(AgentSession):
             self._classify_sdk_exception(exc)
 
         self._sdk_session = sdk
+        self._sdk_thinking_baked = thinking
         self.id = sdk.id
         return sdk
 
@@ -523,7 +707,7 @@ class KimiSession(AgentSession):
     ) -> RuntimeResult:
         if self._closed:
             raise RuntimeError("session is closed")
-        prompt_str = self._gate_and_coerce_prompt(
+        text, images, thinking_bool = self._gate_and_coerce_prompt(
             prompt,
             schema=schema,
             thinking=thinking,
@@ -536,11 +720,14 @@ class KimiSession(AgentSession):
         text_buffer: list[str] = []
         reasoning_buffer: list[str] = []
         last_usage: Any = None
-        sdk = await self._ensure_sdk_session()
+        sdk = await self._ensure_sdk_session(thinking=thinking_bool)
+        import kimi_agent_sdk as kimi_sdk  # late import — see module docstring
+
+        user_input = _build_kimi_user_input(text, images, sdk_module=kimi_sdk)
 
         self._in_flight = True
         try:
-            async for wire in self._iter_wire_messages(sdk, prompt_str):
+            async for wire in self._iter_wire_messages(sdk, user_input):
                 kind = self._classify_wire_message(wire)
                 if kind == "text":
                     text_buffer.append(wire.text)
@@ -582,7 +769,7 @@ class KimiSession(AgentSession):
     ) -> AsyncIterator[RuntimeEvent]:
         if self._closed:
             raise RuntimeError("session is closed")
-        prompt_str = self._gate_and_coerce_prompt(
+        text, images, thinking_bool = self._gate_and_coerce_prompt(
             prompt,
             schema=schema,
             thinking=thinking,
@@ -593,11 +780,14 @@ class KimiSession(AgentSession):
 
         text_buffer: list[str] = []
         last_usage: Any = None
-        sdk = await self._ensure_sdk_session()
+        sdk = await self._ensure_sdk_session(thinking=thinking_bool)
+        import kimi_agent_sdk as kimi_sdk  # late import — see module docstring
+
+        user_input = _build_kimi_user_input(text, images, sdk_module=kimi_sdk)
 
         self._in_flight = True
         try:
-            async for wire in self._iter_wire_messages(sdk, prompt_str):
+            async for wire in self._iter_wire_messages(sdk, user_input):
                 kind = self._classify_wire_message(wire)
                 if kind == "text":
                     text_buffer.append(wire.text)
@@ -664,20 +854,21 @@ class KimiSession(AgentSession):
         thinking: ThinkingMode,
         max_turns: int | None,
         max_budget_usd: float | None,
-    ) -> str:
-        """Run all per-call gates; return the plain-text prompt string.
+    ) -> tuple[str, list[ImageInput], bool]:
+        """Run all per-call gates; return ``(text, images, thinking_bool)``.
 
         Capability gates raise :class:`UnsupportedFeatureError` (not
         :class:`NotImplementedError`) so the conformance contracts that
         distinguish "declined" from "not-yet-wired" stay happy.
+
+        Returns:
+            ``(text, images, thinking_bool)``. ``text`` already has the
+            session's ``system`` prefix prepended; ``images`` is the
+            list of attached :class:`ImageInput` parts to forward to
+            :func:`_build_kimi_user_input`; ``thinking_bool`` is the
+            value to pass to :meth:`Session.create` /
+            :meth:`Session.resume`.
         """
-        if thinking is not None and not self._runtime.supports(Feature.REASONING_EFFORT):
-            raise UnsupportedFeatureError(
-                f"{self._runtime.label}: thinking= is not wired on this "
-                f"adapter yet. Check runtime.supports(Feature.REASONING_EFFORT) "
-                f"before passing thinking=.",
-                feature=Feature.REASONING_EFFORT,
-            )
         if schema is not None:
             raise NotImplementedError(
                 f"{self._runtime.label}: execute(schema=...) is not yet "
@@ -691,8 +882,10 @@ class KimiSession(AgentSession):
             )
         # Polymorphic prompts gate against VISION_INPUT / FILE_INPUT
         # via the shared helper. Plain ``str`` prompts pass through and
-        # come back as ``(prompt, [], [])``.
-        text, _images, _files = _split_prompt_parts(
+        # come back as ``(prompt, [], [])``. Iteration C: vision is on,
+        # files remain declined (no SDK channel for prompt-side files —
+        # use the session's work_dir + tool reads instead).
+        text, images, _files = _split_prompt_parts(
             prompt,
             adapter_label=self._runtime.label,
             supports_vision=self._runtime.supports(Feature.VISION_INPUT),
@@ -706,18 +899,19 @@ class KimiSession(AgentSession):
         )
         if self._system:
             # The SDK's ``Session.create(config=...)`` is the canonical
-            # system-prompt slot. Iteration B doesn't yet thread the
-            # system kwarg into the Config layer (the Config shape is
-            # opaque without installing kimi-cli); we prepend it to the
-            # first prompt as a lightweight stand-in. Iteration C/D
-            # will route through Config properly.
-            return f"{self._system}\n\n{text}"
-        return text
+            # system-prompt slot. Iteration C still prepends to the
+            # prompt text as a lightweight stand-in (the Config shape
+            # is opaque without installing kimi-cli, which conflicts
+            # with claude-agent-sdk); a future iteration may route
+            # through Config properly.
+            text = f"{self._system}\n\n{text}"
+        thinking_bool = _translate_thinking_for_kimi(thinking)
+        return text, images, thinking_bool
 
-    async def _iter_wire_messages(self, sdk: Any, prompt_str: str) -> AsyncIterator[Any]:
+    async def _iter_wire_messages(self, sdk: Any, user_input: Any) -> AsyncIterator[Any]:
         """Yield :class:`WireMessage` instances from the SDK, classifying errors."""
         try:
-            async for wire in sdk.prompt(prompt_str):
+            async for wire in sdk.prompt(user_input):
                 yield wire
         except Exception as exc:
             self._classify_sdk_exception(exc)
