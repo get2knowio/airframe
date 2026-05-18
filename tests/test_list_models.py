@@ -26,6 +26,7 @@ These tests mock at the vendor-SDK boundary and assert that:
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -575,12 +576,45 @@ async def test_codex_list_models_without_api_key_raises_auth(
 ) -> None:
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.delenv("CODEX_API_KEY", raising=False)
-    # Steer the opencode-auth.json fallback at a path that doesn't exist.
-    monkeypatch.setenv("OPENCODE_AUTH_PATH", "/tmp/airframe-nonexistent-auth.json")
+    # Steer the ~/.codex/auth.json fallback at a path that doesn't exist.
+    monkeypatch.setenv("CODEX_AUTH_PATH", "/tmp/airframe-nonexistent-codex-auth.json")
     rt = CodexRuntime()
     with pytest.raises(RuntimeAuthError) as excinfo:
         await rt.list_models()
     assert "OPENAI_API_KEY" in str(excinfo.value)
+
+
+@pytest.mark.asyncio
+async def test_codex_list_models_oauth_only_auth_json_raises_tailored_error(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """OAuth-bundle ``~/.codex/auth.json`` (ChatGPT Plus subscription)
+    surfaces a tailored error explaining the mismatch — /v1/models needs
+    a Platform API key, not a ChatGPT OAuth access_token."""
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("CODEX_API_KEY", raising=False)
+    auth_file = tmp_path / "auth.json"
+    auth_file.write_text(
+        json.dumps(
+            {
+                "OPENAI_API_KEY": None,
+                "auth_mode": "chatgpt",
+                "tokens": {
+                    "access_token": "oauth-access-token",
+                    "refresh_token": "oauth-refresh-token",
+                    "id_token": "oauth-id-token",
+                    "account_id": "acct_123",
+                },
+            }
+        )
+    )
+    monkeypatch.setenv("CODEX_AUTH_PATH", str(auth_file))
+    rt = CodexRuntime()
+    with pytest.raises(RuntimeAuthError) as excinfo:
+        await rt.list_models()
+    assert "ChatGPT-OAuth" in str(excinfo.value)
+    assert "Platform" in str(excinfo.value)
 
 
 @pytest.mark.asyncio
