@@ -6,7 +6,65 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-_Nothing yet — work toward v0.7.0 begins after the v0.6.1 cut._
+_Nothing yet — work toward v0.7.0 begins after the v0.6.2 cut._
+
+---
+
+## [0.6.2] — 2026-05-18
+
+Bug fix release: `ClaudeCodeRuntime.list_models()` now works under
+Claude Max subscription OAuth auth, not just under `ANTHROPIC_API_KEY`.
+
+### Fixed
+
+- **`ClaudeCodeRuntime.list_models()` under OAuth.** The previous
+  implementation hand-rolled a `GET /v1/models` via `httpx` and only
+  sent the `x-api-key` header — Claude Max subscription users
+  (whose auth is an OAuth bearer token) saw `RuntimeAuthError`. Root
+  cause: `/v1/models` *does* accept Bearer tokens, but only when the
+  request also carries `anthropic-beta: oauth-2025-04-20`. Airframe's
+  hand-rolled call didn't include the beta header. The fix delegates
+  to `anthropic.AsyncAnthropic.models.list()`, which picks the right
+  header set automatically based on whether `api_key=` or
+  `auth_token=` was passed. Auth-slot resolution follows airframe's
+  documented four-step chain (explicit `api_key=` → `CLAUDE_CODE_OAUTH_TOKEN`
+  env → `ANTHROPIC_API_KEY` env → `~/.claude/.credentials.json`).
+
+### Added
+
+- **`anthropic` SDK dependency** on the `[claude]` extra
+  (`anthropic>=0.40,<1`). Also added to `[all]` and the test
+  dependency group.
+- **`_read_claude_credentials_oauth_token()` helper** that parses
+  `~/.claude/.credentials.json` defensively — every malformed-input
+  case returns `None` so the caller falls through to a clean
+  `RuntimeAuthError`. Path overridable via the
+  `CLAUDE_CREDENTIALS_PATH` env var (testing hook).
+
+### Changed
+
+- **`CLAUDE.md` gains a new key invariant: "Wrap vendor SDKs; don't
+  rewrite them."** Codifies the principle that surfaced this bug —
+  before hand-rolling HTTP, headers, retry policy, error parsing, or
+  auth handling against a vendor endpoint, check whether the official
+  SDK already exposes that surface and use it if it does. After the
+  audit prompted by this fix, the codebase has no remaining raw
+  `httpx` callers in adapters, no hand-rolled subprocesses, no
+  retry/backoff loops duplicating SDK behavior.
+- **`tests/test_list_models.py` Claude section rewritten.** Mocks
+  `anthropic.AsyncAnthropic` instead of `httpx`. Five new tests cover
+  the four auth-resolution paths (explicit api_key, OAuth env,
+  ANTHROPIC_API_KEY-defer-to-SDK, credentials-file fallback), the
+  no-credentials error message, and the SDK's `APIStatusError` /
+  `APIConnectionError` classification.
+
+### Notes
+
+- No protocol shape changes; no other adapter touched. Wheel/sdist
+  surface identical to v0.6.1 except for the version string,
+  CHANGELOG entry, CLAUDE.md update, and the
+  `src/airframe/adapters/claude_code.py` / `tests/test_list_models.py`
+  contents.
 
 ---
 
