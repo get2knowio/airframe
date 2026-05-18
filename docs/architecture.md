@@ -65,18 +65,21 @@ its lifetime.
                 │  • id: str | None  (resume)   │
                 └───────────────────────────────┘
                                 │
-            ┌───────────────────┼───────────────────┐
-            ▼                   ▼                   ▼         ▼
-    ┌──────────────┐  ┌──────────────────┐  ┌──────────┐  ┌──────────────┐
-    │ ClaudeCode   │  │ Copilot          │  │ Codex    │  │ OpenAICompat │
-    │ +Session     │  │ +AgentSession    │  │ +Session │  │ +Session     │
-    └──────────────┘  └──────────────────┘  └──────────┘  └──────────────┘
-            │                   │                   │            │
-            ▼                   ▼                   ▼            ▼
-    claude-agent-sdk    github-copilot-sdk   openai-codex   openai (HTTP)
-    (subprocess +       (subprocess +        -sdk           https://*/v1
-     JSON-RPC)           tool reg)            (subprocess   chat.completions
-                                              per turn)
+        ┌─────────────┬─────────┴───┬────────────┬──────────────┐
+        ▼             ▼             ▼            ▼              ▼
+   ┌──────────┐ ┌────────────┐ ┌──────────┐ ┌──────────┐ ┌──────────────┐
+   │ Bedrock  │ │ ClaudeCode │ │ Codex    │ │ Copilot  │ │ OpenAICompat │
+   │ +Session │ │ +Session   │ │ +Session │ │ +Session │ │ +Session     │
+   └──────────┘ └────────────┘ └──────────┘ └──────────┘ └──────────────┘
+        │             │             │            │              │
+        ▼             ▼             ▼            ▼              ▼
+   aioboto3      claude-agent-  openai-      github-       openai
+   bedrock-      sdk            codex-sdk    copilot-sdk   chat.completions
+   runtime       (subprocess    (subprocess  (subprocess   over https
+   (Converse      + JSON-RPC)    per turn)   + tool reg)    ↳ subclasses:
+    API)                                                    OpenCodeGo,
+                                                            OpenCodeZen,
+                                                            OpenRouter
 ```
 
 `runtime.execute(prompt, ...)` is now documented sugar for
