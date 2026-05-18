@@ -50,6 +50,7 @@ def test_list_providers_returns_all_when_installed_only_false() -> None:
         "claude",
         "github-copilot",
         "codex",
+        "kimi",
         "opencode-zen",
         "opencode-go",
         "openrouter",
@@ -99,6 +100,14 @@ def test_list_providers_filters_when_only_bedrock_installed(
     """The ``[bedrock]`` extra brings ``aioboto3`` — gates only ``bedrock``."""
     _stub_find_spec(monkeypatch, available={"aioboto3"})
     assert list_providers() == ["bedrock"]
+
+
+def test_list_providers_filters_when_only_kimi_installed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The ``[kimi]`` extra brings ``kimi-agent-sdk`` — gates only ``kimi``."""
+    _stub_find_spec(monkeypatch, available={"kimi_agent_sdk"})
+    assert list_providers() == ["kimi"]
 
 
 def test_list_providers_when_nothing_installed_is_empty(
@@ -289,6 +298,7 @@ def test_entry_point_adapter_appears_in_list_providers(
         "claude",
         "github-copilot",
         "codex",
+        "kimi",
         "opencode-zen",
         "opencode-go",
         "openrouter",

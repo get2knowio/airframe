@@ -238,11 +238,42 @@ class BedrockOptions:
     additional_model_fields: dict[str, Any] | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class KimiOptions:
+    """Vendor-specific options for :class:`KimiRuntime`.
+
+    Empty scaffolding in Iteration A — the namespace exists so the
+    adapter's ``session(provider_options=)`` can type-check against
+    it (and reject every other vendor's namespace per the tagged-
+    union discipline). Fields populate as the corresponding Kimi
+    Agent SDK features land in Iterations B–F per
+    ``dev-docs/kimi-adapter-plan.md``:
+
+    * ``working_directory`` (Iteration B) — per-session working
+      directory the SDK's filesystem-affecting tools operate from.
+      Maps to ``Session.create(work_dir=...)``.
+    * ``yolo`` (Iteration D) — auto-approve all tool / shell
+      invocations. Mutually exclusive with ``on_permission=`` at the
+      session factory.
+    * ``additional_mcp_servers`` / ``skill_directories`` /
+      ``additional_config_fields`` (Iterations D / F) — pass-throughs
+      for vendor-specific knobs airframe doesn't surface portably.
+
+    All fields default to "unset" so an empty :class:`KimiOptions()`
+    instance is a no-op the SDK never sees.
+    """
+
+
 #: Tagged union of provider-specific options. Adapters
 #: :func:`isinstance`-match to decide whether they accept the value
 #: passed in. No common base class on purpose — see module docstring.
 ProviderOptions = (
-    ClaudeOptions | CopilotOptions | CodexOptions | OpenAICompatOptions | BedrockOptions
+    ClaudeOptions
+    | CopilotOptions
+    | CodexOptions
+    | OpenAICompatOptions
+    | BedrockOptions
+    | KimiOptions
 )
 
 
@@ -251,6 +282,7 @@ __all__ = [
     "ClaudeOptions",
     "CodexOptions",
     "CopilotOptions",
+    "KimiOptions",
     "OpenAICompatOptions",
     "ProviderOptions",
 ]

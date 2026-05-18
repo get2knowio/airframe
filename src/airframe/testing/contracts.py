@@ -736,6 +736,7 @@ def test_session_rejects_wrong_provider_options_namespace(adapter_runtime: Any) 
         ClaudeOptions,
         CodexOptions,
         CopilotOptions,
+        KimiOptions,
         OpenAICompatOptions,
     )
 
@@ -747,6 +748,7 @@ def test_session_rejects_wrong_provider_options_namespace(adapter_runtime: Any) 
         "opencode-go": OpenAICompatOptions,
         "openrouter": OpenAICompatOptions,
         "bedrock": BedrockOptions,
+        "kimi": KimiOptions,
     }
     own = matching.get(adapter_runtime.PROVIDER_ID)
     # Pick any namespace that isn't ours.
@@ -756,6 +758,7 @@ def test_session_rejects_wrong_provider_options_namespace(adapter_runtime: Any) 
         CodexOptions,
         OpenAICompatOptions,
         BedrockOptions,
+        KimiOptions,
     )
     others = [c for c in all_namespaces if c is not own]
     assert others, "test fixture must have at least one foreign namespace"

@@ -18,8 +18,8 @@ endif
 help: ## Show this help message
 	$(Q)awk 'BEGIN {FS = ":.*##"; printf "Usage:\n  make \033[36m<target>\033[0m\n\nTargets:\n"} /^[a-zA-Z_-]+:.*##/ { printf "  \033[36m%-15s\033[0m %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
 
-install: ## Install all deps (incl. dev group)
-	$(Q)$(UV) sync --all-extras --group dev
+install: ## Install all deps (incl. dev group); excludes [kimi] — mcp conflict
+	$(Q)$(UV) sync --all-extras --no-extra kimi --group dev
 
 test: ## Run the full test suite
 	$(Q)$(UV) run pytest $(PYTEST_QUIET)

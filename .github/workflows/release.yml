@@ -19,7 +19,10 @@ jobs:
       - name: Set up Python ${{ matrix.python-version }}
         run: uv python install ${{ matrix.python-version }}
       - name: Install
-        run: uv sync --all-extras --group dev --python ${{ matrix.python-version }}
+        # --no-extra kimi: kimi-agent-sdk's mcp pin conflicts with
+        # claude-agent-sdk's. Kimi unit tests use mocks; release CI
+        # doesn't need the real SDK installed.
+        run: uv sync --all-extras --no-extra kimi --group dev --python ${{ matrix.python-version }}
       - name: Run tests
         run: uv run --python ${{ matrix.python-version }} pytest --tb=short -q
 

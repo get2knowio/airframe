@@ -84,9 +84,12 @@ Key invariants when editing:
   `"openai"` are reserved for future direct-API adapters; today's
   subscription / gateway / managed adapters use `"claude"`,
   `"github-copilot"`, `"codex"`, `"opencode-zen"`, `"opencode-go"`,
-  `"openrouter"`, `"bedrock"`. `"bedrock-agents"` is reserved for a
-  future sibling wrapping `bedrock-agent-runtime` (Knowledge Bases,
-  action groups) and must not be folded into `"bedrock"`.
+  `"openrouter"`, `"bedrock"`, and `"kimi"`. Reserved-but-not-shipped:
+  `"bedrock-agents"` (future sibling wrapping `bedrock-agent-runtime`
+  — Knowledge Bases, action groups; must not be folded into
+  `"bedrock"`); `"moonshot"` (future OpenAI-compat sibling fronting
+  `api.moonshot.ai/v1` chat-completions; must not be folded into
+  `"kimi"`, which wraps the Kimi Agent SDK subprocess surface).
 - **`CopilotRuntime.validate_binding` deliberately rejects
   `claude-*` model IDs** — Claude via Copilot Chat Completions emits
   markdown-fenced JSON instead of honouring tool calls. Route Claude
