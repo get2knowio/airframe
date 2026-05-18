@@ -78,6 +78,7 @@ from airframe.options import (
     ClaudeOptions,
     CodexOptions,
     CopilotOptions,
+    KimiOptions,
     OpenAICompatOptions,
     ProviderOptions,
 )
@@ -102,6 +103,7 @@ from airframe.adapters.bedrock import BedrockRuntime
 from airframe.adapters.claude_code import ClaudeCodeRuntime
 from airframe.adapters.codex import CodexRuntime
 from airframe.adapters.copilot import CopilotRuntime
+from airframe.adapters.kimi import KimiRuntime
 from airframe.adapters.opencode_go import OpenCodeGoRuntime
 from airframe.adapters.opencode_zen import OpenCodeZenRuntime
 from airframe.adapters.openrouter import OpenRouterRuntime
@@ -130,6 +132,8 @@ __all__ = [
     "HookEvent",
     "HookEventKind",
     "ImageInput",
+    "KimiOptions",
+    "KimiRuntime",
     "McpServerRef",
     "ModelInfo",
     "OpenAICompatOptions",

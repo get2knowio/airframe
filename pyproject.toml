@@ -50,6 +50,23 @@ openai-compat = ["openai>=1.50,<3"]
 # async wrapper around botocore. Fronts Anthropic / Meta / Mistral /
 # Cohere / Amazon Nova / AI21 behind one AWS-billed endpoint.
 bedrock = ["aioboto3>=13"]
+# `kimi` covers Moonshot AI's Kimi Agent SDK — a subprocess-class
+# agent SDK over the open-weight Kimi K2 line. Two upstream
+# constraints worth knowing:
+#
+# 1. ``kimi-agent-sdk`` requires Python >=3.12 (stricter than
+#    airframe's >=3.11). The ``python_version`` marker means
+#    ``pip install airframe-agents[kimi]`` is a no-op on 3.11; the
+#    adapter's lazy import surfaces "Python 3.12+ required" at first
+#    use. Bumping airframe's floor to 3.12 wholesale would punish
+#    users of every other adapter, so the marker-skip is the lesser
+#    evil.
+# 2. ``kimi-cli`` 1.12.0 → ``fastmcp`` 2.12.5 → ``mcp<1.17`` conflicts
+#    with ``claude-agent-sdk``'s ``mcp>=1.23``. See [tool.uv]
+#    conflicts below — the two SDKs can't be co-installed in one
+#    environment. Users wanting both must split into separate venvs
+#    until upstream resolves.
+kimi = ['kimi-agent-sdk>=0.0.5,<0.1; python_version >= "3.12"']
 # Brings in pytest for adapter authors that want to run the shared
 # `airframe.testing.contracts` conformance suite against their own
 # adapter. The main package does not depend on pytest.
@@ -57,7 +74,16 @@ testing = [
     "pytest>=8.2.0,<9",
     "pytest-asyncio>=0.24.0,<1",
 ]
-# "Batteries included" — installs every adapter family's SDK.
+# "Batteries included" — installs every co-installable adapter SDK.
+# Notable exclusion: `kimi-agent-sdk` is NOT in `[all]`. The
+# kimi-cli >=1.12 → fastmcp 2.12.5 → mcp<1.17 chain conflicts with
+# claude-agent-sdk 0.2.82's mcp>=1.23 requirement. The two SDKs are
+# upstream-incompatible today; until upstream resolves the mcp
+# version range, users wanting both must pick one extra and install
+# the other in a separate venv. `pip install airframe-agents[kimi]`
+# remains supported as a standalone install. KimiRuntime stays
+# auto-hidden from list_providers() in `[all]`-only environments
+# because its REQUIRES_PACKAGE check finds kimi_agent_sdk missing.
 all = [
     "claude-agent-sdk>=0.2.0,<1",
     "anthropic>=0.40,<1",
@@ -98,6 +124,36 @@ lint = [
 dev = [
     { include-group = "test" },
     { include-group = "lint" },
+]
+
+[tool.uv]
+# Upstream conflict: kimi-agent-sdk 0.0.5 → kimi-cli 1.12.0 → fastmcp
+# 2.12.5 → mcp<1.17, but claude-agent-sdk 0.2.82 → mcp>=1.23. Until
+# Moonshot publishes a newer kimi-agent-sdk that widens the kimi-cli
+# range, the two SDKs cannot be co-installed. Declaring the conflicts
+# here lets `uv sync --all-extras` succeed by picking one side at
+# resolution time; the lockfile splits the environments. The dev /
+# test groups also pull claude-agent-sdk for the mocked unit suite,
+# so `[kimi]` is mutually exclusive with the dev / test groups too —
+# CI runs the kimi unit tests against a mocked surface, so this
+# doesn't block coverage.
+conflicts = [
+    [
+        { extra = "kimi" },
+        { extra = "claude" },
+    ],
+    [
+        { extra = "kimi" },
+        { extra = "all" },
+    ],
+    [
+        { extra = "kimi" },
+        { group = "test" },
+    ],
+    [
+        { extra = "kimi" },
+        { group = "dev" },
+    ],
 ]
 
 [tool.hatch.build.targets.wheel]

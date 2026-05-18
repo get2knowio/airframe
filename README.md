@@ -8,8 +8,8 @@
 **One protocol, every agent SDK.** Vendor-neutral runtime for
 Python AI agents — write once against a small `AgentRuntime`
 protocol and run on AWS Bedrock, Claude Code, OpenAI Codex,
-GitHub Copilot, OpenCode Go, OpenCode Zen, or OpenRouter by
-changing a single config value.
+GitHub Copilot, Moonshot Kimi, OpenCode Go, OpenCode Zen, or
+OpenRouter by changing a single config value.
 
 ## Quickstart
 
@@ -68,8 +68,9 @@ is `airframe`.
 |---|---|---|---|
 | [`BedrockRuntime`](https://github.com/get2knowio/airframe/blob/main/docs/adapters/bedrock.md) | `bedrock` | `aioboto3` | boto3 chain (env / `AWS_PROFILE` / IAM role) + `AWS_REGION` |
 | [`ClaudeCodeRuntime`](https://github.com/get2knowio/airframe/blob/main/docs/adapters/claude.md) | `claude` | `claude-agent-sdk` | Claude Max OAuth → `~/.claude/credentials.json` → `ANTHROPIC_API_KEY` |
-| [`CodexRuntime`](https://github.com/get2knowio/airframe/blob/main/docs/adapters/codex.md) | `codex` | `openai-codex-sdk` | `OPENAI_API_KEY` → opencode `auth.json` → `~/.codex/auth.json` |
+| [`CodexRuntime`](https://github.com/get2knowio/airframe/blob/main/docs/adapters/codex.md) | `codex` | `openai-codex-sdk` | `OPENAI_API_KEY` → `~/.codex/auth.json` (static key or ChatGPT OAuth) |
 | [`CopilotRuntime`](https://github.com/get2knowio/airframe/blob/main/docs/adapters/copilot.md) | `github-copilot` | `github-copilot-sdk` | `GITHUB_TOKEN` → `gh auth` |
+| [`KimiRuntime`](https://github.com/get2knowio/airframe/blob/main/docs/adapters/kimi.md) | `kimi` | `kimi-agent-sdk` | `KIMI_API_KEY` (Python 3.12+ only; mcp-version conflict with `[claude]`) |
 | [`OpenCodeGoRuntime`](https://github.com/get2knowio/airframe/blob/main/docs/adapters/opencode-go.md) | `opencode-go` | OpenAI compatible | `OPENCODE_API_KEY` → opencode `auth.json::opencode-go.key` |
 | [`OpenCodeZenRuntime`](https://github.com/get2knowio/airframe/blob/main/docs/adapters/opencode-zen.md) | `opencode-zen` | OpenAI compatible | `OPENCODE_API_KEY` → opencode `auth.json::opencode.key` |
 | [`OpenRouterRuntime`](https://github.com/get2knowio/airframe/blob/main/docs/adapters/openrouter.md) | `openrouter` | OpenAI compatible | `OPENROUTER_API_KEY` |
@@ -104,22 +105,22 @@ contract.
 Current snapshot (run
 `uv run python examples/probe_supports.py` for the live version):
 
-| Feature | Bedrock | Claude | Codex | Copilot | OpenAI-compat |
-|---|---|---|---|---|---|
-| `STRUCTURED_OUTPUT_JSON_SCHEMA` | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `STREAMING` / `CANCEL` | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `SESSION_RESUME` | ✗ | ✓ | ✓ | ✓ | ✗ |
-| `REASONING_EFFORT` | ✓ (Anthropic) | ✓ | ✓ | ✓ | ✓ |
-| `REASONING_BUDGET_TOKENS` | ✓ (Anthropic) | ✓ | ✗ | ✗ | ✗ |
-| `VISION_INPUT` | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `FILE_INPUT` | ✓ (Anthropic) | ✓ | ✓ | ✓ | ✗ |
-| `TOOLS_FUNCTION` | ✓ | ✓ | ✗ | ✓ | ✓ |
-| `TOOLS_MCP_STDIO` / `_HTTP` | ✗ | ✓ | ✗ | ✓ | ✗ |
-| `TOOLS_MCP_SSE` | ✗ | ✓ | ✗ | ✗ | ✗ |
-| `PERMISSION_CALLBACK` | ✓ | ✓ | ✓ (session-wide) | ✓ | ✗ |
-| `LIFECYCLE_HOOKS` | ✓ (6 kinds) | ✓ (8 kinds) | ✓ (6 kinds) | ✓ (7 kinds) | ✓ (6 kinds) |
-| `BUDGET_USD_CAP` | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `BUDGET_TURN_CAP` | ✓ | ✓ | ✓ | ✗ | ✓ |
+| Feature | Bedrock | Claude | Codex | Copilot | Kimi | OpenAI-compat |
+|---|---|---|---|---|---|---|
+| `STRUCTURED_OUTPUT_JSON_SCHEMA` | ✓ | ✓ | ✓ | ✓ | ◐ | ✓ |
+| `STREAMING` / `CANCEL` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `SESSION_RESUME` | ✗ | ✓ | ✓ | ✓ | ✓ | ✗ |
+| `REASONING_EFFORT` | ✓ (Anthropic) | ✓ | ✓ | ✓ | ✓ (bool) | ✓ |
+| `REASONING_BUDGET_TOKENS` | ✓ (Anthropic) | ✓ | ✗ | ✗ | ✗ | ✗ |
+| `VISION_INPUT` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `FILE_INPUT` | ✓ (Anthropic) | ✓ | ✓ | ✓ | ✗ | ✗ |
+| `TOOLS_FUNCTION` | ✓ | ✓ | ✗ | ✓ | ✗ | ✓ |
+| `TOOLS_MCP_STDIO` / `_HTTP` | ✗ | ✓ | ✗ | ✓ | ✓ | ✗ |
+| `TOOLS_MCP_SSE` | ✗ | ✓ | ✗ | ✗ | ✓ | ✗ |
+| `PERMISSION_CALLBACK` | ✓ | ✓ | ✓ (session-wide) | ✓ | ✓ | ✗ |
+| `LIFECYCLE_HOOKS` | ✓ (6 kinds) | ✓ (8 kinds) | ✓ (6 kinds) | ✓ (7 kinds) | ✓ (7 kinds) | ✓ (6 kinds) |
+| `BUDGET_USD_CAP` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `BUDGET_TURN_CAP` | ✓ | ✓ | ✓ | ✗ | ✓ | ✓ |
 
 Capability flags are statically declared per adapter. Check
 `runtime.supports(Feature.X)` before invoking a feature; declined
@@ -170,10 +171,19 @@ pip install airframe-agents[bedrock]        # BedrockRuntime
 pip install airframe-agents[claude]         # ClaudeCodeRuntime
 pip install airframe-agents[codex]          # CodexRuntime
 pip install airframe-agents[copilot]        # CopilotRuntime
+pip install airframe-agents[kimi]           # KimiRuntime (Python 3.12+, separate venv — see note below)
 pip install airframe-agents[openai-compat]  # OpenCodeGoRuntime + OpenCodeZenRuntime + OpenRouterRuntime (+ future siblings)
-pip install airframe-agents[all]            # Everything
+pip install airframe-agents[all]            # Everything except [kimi] (mcp-version conflict)
 pip install airframe-agents[testing]        # Conformance contract suite (pytest)
 ```
+
+**`[kimi]` co-installation note.** `kimi-agent-sdk` 0.0.5 →
+`kimi-cli` 1.12 → `fastmcp` 2.12.5 → `mcp<1.17`, but
+`claude-agent-sdk` 0.2 requires `mcp>=1.23`. The two SDKs cannot
+co-install in one environment until upstream resolves; airframe
+declares the conflict in `[tool.uv.conflicts]` and excludes
+`[kimi]` from `[all]`. Users wanting both extras must split into
+separate venvs.
 
 `list_providers()` filters by which extras you installed:
 `airframe-agents[copilot]` makes `list_providers()` return

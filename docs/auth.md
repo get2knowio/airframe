@@ -132,28 +132,43 @@ runtime = CodexRuntime()  # env or opencode auth or codex-CLI auth
 runtime_explicit = CodexRuntime(api_key="sk-proj-...")
 ```
 
-Four sources, checked in order:
+Three sources, checked in order:
 
 1. **`api_key=` constructor arg** — explicit OpenAI API key.
-   Exported as `CODEX_API_KEY` for the subprocess.
+   Passed through to `Codex({"apiKey": ...})`.
 2. **`OPENAI_API_KEY` env var** — the standard OpenAI variable.
    Falls back to **`CODEX_API_KEY`**, the codex-CLI alias. The
    `openai-codex-sdk` subprocess inherits `os.environ`, so these
    work without explicit forwarding.
-3. **`~/.local/share/opencode/auth.json`** — the API key minted by
-   `opencode auth login openai` when the user already has opencode
-   auth configured. Path override:
-   **`OPENCODE_AUTH_PATH`** env var.
-4. **Implicit fallback to `~/.codex/auth.json`** — populated by
-   `codex login`. Airframe doesn't read this file directly; the
-   `codex` CLI subprocess does. No work for us.
+3. **`~/.codex/auth.json`** — populated by `codex login`. Two
+   shapes are common:
+   - Static-key shape (`{"OPENAI_API_KEY": "sk-..."}` from
+     `codex login --api-key=…`) — lifted into the SDK
+     constructor.
+   - ChatGPT-OAuth bundle shape (`{"OPENAI_API_KEY": null,
+     "auth_mode": "...", "tokens": {"access_token", "refresh_token",
+     "id_token", "account_id"}}` from `codex login` against a
+     ChatGPT Plus/Pro subscription) — **not** lifted. The Codex
+     CLI subprocess reads the file itself and refreshes the OAuth
+     tokens as needed; airframe stays out of that path. Path
+     override: **`CODEX_AUTH_PATH`** env var.
 
 ### Notes
 
-- The implicit `~/.codex/auth.json` path means `CodexRuntime()`
-  with no env vars **may still work** if the user has run
-  `codex login` — the codex CLI subprocess reads its own credential
-  file directly.
+- The ChatGPT OAuth bundle shape means `CodexRuntime()` with no
+  env vars **still works** for ChatGPT Plus / Pro users who ran
+  `codex login` previously — the CLI subprocess handles the OAuth
+  dance itself.
+- `list_models()` is stricter than `execute()`: ChatGPT OAuth
+  access tokens aren't valid against `api.openai.com/v1/models`, so
+  when airframe detects the OAuth bundle shape but no static key,
+  `list_models()` raises a tailored `RuntimeAuthError` pointing the
+  user at `codex login --api-key=…` or `OPENAI_API_KEY=`.
+- airframe v0.6.3 fixed a credential-leak where the Codex adapter
+  was reading opencode's auth.json (`~/.local/share/opencode/`)
+  instead of Codex's own. The cross-product read is gone; the
+  `OPENCODE_AUTH_PATH` env override no longer applies to
+  `CodexRuntime`.
 - `codex_path=` overrides the Codex CLI binary path; honours
   `CODEX_CLI_PATH` env var.
 - `sandbox_mode=` controls the codex subprocess's filesystem
@@ -190,6 +205,49 @@ Three sources, checked in order at `execute()` time:
 - The Copilot CLI does not serve Claude models — `validate_binding()`
   returns False for any `model_id` starting with `claude-`. Route
   Claude work through `ClaudeCodeRuntime` instead.
+
+## KimiRuntime
+
+```python
+from airframe import KimiRuntime
+runtime = KimiRuntime()                      # env var
+runtime_explicit = KimiRuntime(api_key="sk-...")
+```
+
+Three sources, checked in order at session-construction time:
+
+1. **`api_key=` constructor arg** — explicit Moonshot API key.
+   Highest precedence. Mutates `os.environ["KIMI_API_KEY"]` for
+   the duration of the underlying SDK call and restores it on
+   `session.close()` so the key doesn't leak across runtimes in
+   the same process.
+2. **`KIMI_API_KEY` env var** — the SDK's native env-derived
+   default. `KIMI_BASE_URL` and `KIMI_MODEL_NAME` work the same
+   way for the companion knobs (base URL override, default model).
+3. **The SDK's own resolution** if neither of the above is set —
+   airframe doesn't override this layer; whatever
+   `kimi-agent-sdk`'s `Config` object picks up wins.
+
+If no API key resolves through any layer, the first network call
+raises `RuntimeAuthError` pointing at
+<https://platform.moonshot.ai/console/api-keys>.
+
+### Notes
+
+- The `kimi-cli` subprocess must be on PATH —
+  [install instructions](https://github.com/MoonshotAI/kimi-cli).
+  Like `ClaudeCodeRuntime`'s posture on the `claude` CLI, the
+  adapter does *not* bundle `kimi-cli`.
+- `base_url=` constructor arg overrides the Moonshot API endpoint
+  (defaults to `https://api.moonshot.ai/v1`); honours
+  `KIMI_BASE_URL` env var. Useful when fronting Kimi through a
+  proxy or hitting a region-specific endpoint.
+- `model=` constructor arg sets the default model when
+  `execute()` is called without a `ProviderModel`; honours
+  `KIMI_MODEL_NAME` env var.
+- Mutual-exclusion gate: `KimiOptions(yolo=True)` and
+  `on_permission=callback` cannot be combined; passing both
+  raises `UnsupportedFeatureError` at `runtime.session()`.
 
 ## OpenCodeGoRuntime
 
