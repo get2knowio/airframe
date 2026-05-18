@@ -516,19 +516,8 @@ async def test_runtime_execute_is_sugar_for_session(
 
 
 # ---------------------------------------------------------------------------
-# Iteration B gates — thinking / budget kwargs decline cleanly
+# Iteration E gates — budget kwargs decline cleanly until pricing lands
 # ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_execute_thinking_raises_unsupported(
-    runtime_with_mock_client: tuple[BedrockRuntime, MagicMock],
-) -> None:
-    rt, _ = runtime_with_mock_client
-    sess = rt.session()
-    with pytest.raises(UnsupportedFeatureError) as exc:
-        await sess.execute("hi", thinking="medium")
-    assert exc.value.feature == Feature.REASONING_EFFORT
 
 
 @pytest.mark.asyncio
@@ -543,16 +532,220 @@ async def test_execute_max_turns_raises_unsupported(
 
 
 @pytest.mark.asyncio
-async def test_execute_polymorphic_prompt_raises_unsupported(
+async def test_execute_max_budget_usd_raises_unsupported(
+    runtime_with_mock_client: tuple[BedrockRuntime, MagicMock],
+) -> None:
+    rt, _ = runtime_with_mock_client
+    sess = rt.session()
+    with pytest.raises(UnsupportedFeatureError) as exc:
+        await sess.execute("hi", max_budget_usd=1.0)
+    assert exc.value.feature == Feature.BUDGET_USD_CAP
+
+
+# ---------------------------------------------------------------------------
+# Iteration C — vision + file input + thinking
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_execute_with_image_bytes_translates_to_image_block(
+    runtime_with_mock_client: tuple[BedrockRuntime, MagicMock],
+) -> None:
+    from airframe.inputs import ImageInput
+
+    rt, client = runtime_with_mock_client
+    sess = rt.session()
+    png_bytes = b"\x89PNG\r\n\x1a\n" + b"\x00" * 64
+    await sess.execute(["What's in this image?", ImageInput(bytes_=png_bytes)])
+    call_kwargs = client.converse.await_args.kwargs
+    blocks = call_kwargs["messages"][0]["content"]
+    # First block is the text portion; image block follows.
+    assert blocks[0] == {"text": "What's in this image?"}
+    assert blocks[1] == {"image": {"format": "png", "source": {"bytes": png_bytes}}}
+
+
+@pytest.mark.asyncio
+async def test_execute_with_image_path_reads_and_translates(
+    runtime_with_mock_client: tuple[BedrockRuntime, MagicMock],
+    tmp_path: Any,
+) -> None:
+    from airframe.inputs import ImageInput
+
+    rt, client = runtime_with_mock_client
+    img_path = tmp_path / "diagram.jpeg"
+    payload = b"\xff\xd8\xff\xe0" + b"\x00" * 32
+    img_path.write_bytes(payload)
+    sess = rt.session()
+    await sess.execute(["caption:", ImageInput(path=str(img_path))])
+    blocks = client.converse.await_args.kwargs["messages"][0]["content"]
+    image_block = next(b for b in blocks if "image" in b)
+    assert image_block["image"]["format"] == "jpeg"
+    assert image_block["image"]["source"]["bytes"] == payload
+
+
+@pytest.mark.asyncio
+async def test_execute_with_image_url_raises_unsupported(
+    runtime_with_mock_client: tuple[BedrockRuntime, MagicMock],
+) -> None:
+    """Converse needs bytes locally — URL fetching is on the caller."""
+    from airframe.inputs import ImageInput
+
+    rt, _ = runtime_with_mock_client
+    sess = rt.session()
+    with pytest.raises(UnsupportedFeatureError) as exc:
+        await sess.execute(["see:", ImageInput(url="https://example.com/x.png")])
+    assert exc.value.feature == Feature.VISION_INPUT
+
+
+@pytest.mark.asyncio
+async def test_execute_with_unknown_image_format_raises(
     runtime_with_mock_client: tuple[BedrockRuntime, MagicMock],
 ) -> None:
     from airframe.inputs import ImageInput
 
     rt, _ = runtime_with_mock_client
     sess = rt.session()
-    with pytest.raises(UnsupportedFeatureError) as exc:
-        await sess.execute(["caption:", ImageInput(path="/tmp/nope.png")])
-    assert exc.value.feature == Feature.VISION_INPUT
+    # Random non-magic bytes, no path extension.
+    with pytest.raises(UnsupportedFeatureError):
+        await sess.execute(["see:", ImageInput(bytes_=b"not-an-image-header")])
+
+
+@pytest.mark.asyncio
+async def test_execute_with_file_input_translates_to_document_block(
+    runtime_with_mock_client: tuple[BedrockRuntime, MagicMock],
+    tmp_path: Any,
+) -> None:
+    from airframe.inputs import FileInput
+
+    rt, client = runtime_with_mock_client
+    doc_path = tmp_path / "spec.pdf"
+    doc_path.write_bytes(b"%PDF-1.4 minimal payload")
+    sess = rt.session()
+    await sess.execute(["summarise:", FileInput(path=str(doc_path))])
+    blocks = client.converse.await_args.kwargs["messages"][0]["content"]
+    doc_block = next(b for b in blocks if "document" in b)
+    assert doc_block["document"]["format"] == "pdf"
+    assert doc_block["document"]["name"] == "spec"
+    assert doc_block["document"]["source"]["bytes"].startswith(b"%PDF-1.4")
+
+
+@pytest.mark.asyncio
+async def test_execute_with_file_input_unknown_format_raises(
+    runtime_with_mock_client: tuple[BedrockRuntime, MagicMock],
+    tmp_path: Any,
+) -> None:
+    from airframe.inputs import FileInput
+
+    rt, _ = runtime_with_mock_client
+    weird = tmp_path / "thing.xyz"
+    weird.write_bytes(b"data")
+    sess = rt.session()
+    with pytest.raises(UnsupportedFeatureError):
+        await sess.execute(["look:", FileInput(path=str(weird))])
+
+
+@pytest.mark.asyncio
+async def test_execute_thinking_low_lands_on_additional_request_fields(
+    runtime_with_mock_client: tuple[BedrockRuntime, MagicMock],
+) -> None:
+    rt, client = runtime_with_mock_client
+    sess = rt.session()  # Default model is anthropic.claude-3-5-haiku-...
+    await sess.execute("solve this", thinking="low")
+    additional = client.converse.await_args.kwargs.get("additionalModelRequestFields")
+    assert additional == {"thinking": {"type": "enabled", "budget_tokens": 1024}}
+
+
+@pytest.mark.asyncio
+async def test_execute_thinking_high_uses_32k_budget(
+    runtime_with_mock_client: tuple[BedrockRuntime, MagicMock],
+) -> None:
+    rt, client = runtime_with_mock_client
+    sess = rt.session()
+    await sess.execute("solve this", thinking="high")
+    additional = client.converse.await_args.kwargs.get("additionalModelRequestFields")
+    assert additional == {"thinking": {"type": "enabled", "budget_tokens": 32768}}
+
+
+@pytest.mark.asyncio
+async def test_execute_thinking_explicit_budget_passes_through(
+    runtime_with_mock_client: tuple[BedrockRuntime, MagicMock],
+) -> None:
+    rt, client = runtime_with_mock_client
+    sess = rt.session()
+    await sess.execute("solve this", thinking={"budget_tokens": 4096})
+    additional = client.converse.await_args.kwargs.get("additionalModelRequestFields")
+    assert additional == {"thinking": {"type": "enabled", "budget_tokens": 4096}}
+
+
+@pytest.mark.asyncio
+async def test_execute_thinking_disabled_omits_field(
+    runtime_with_mock_client: tuple[BedrockRuntime, MagicMock],
+) -> None:
+    rt, client = runtime_with_mock_client
+    sess = rt.session()
+    await sess.execute("hi", thinking="disabled")
+    assert "additionalModelRequestFields" not in client.converse.await_args.kwargs
+
+
+@pytest.mark.asyncio
+async def test_execute_thinking_for_non_anthropic_silently_drops(
+    runtime_with_mock_client: tuple[BedrockRuntime, MagicMock],
+) -> None:
+    """Bedrock ignores additionalModelRequestFields per vendor;
+    saving the field for vendors that won't honour it is honest."""
+    from airframe.protocol import ProviderModel
+
+    rt, client = runtime_with_mock_client
+    sess = rt.session(model=ProviderModel("bedrock", "amazon.nova-pro-v1:0"))
+    await sess.execute("solve this", thinking="medium")
+    assert "additionalModelRequestFields" not in client.converse.await_args.kwargs
+
+
+@pytest.mark.asyncio
+async def test_execute_thinking_for_inference_profile_routes_anthropic(
+    runtime_with_mock_client: tuple[BedrockRuntime, MagicMock],
+) -> None:
+    """Region-prefixed inference profile IDs still recognise as Anthropic."""
+    from airframe.protocol import ProviderModel
+
+    rt, client = runtime_with_mock_client
+    sess = rt.session(
+        model=ProviderModel("bedrock", "us.anthropic.claude-3-5-sonnet-20241022-v2:0")
+    )
+    await sess.execute("solve this", thinking="medium")
+    additional = client.converse.await_args.kwargs.get("additionalModelRequestFields")
+    assert additional == {"thinking": {"type": "enabled", "budget_tokens": 8192}}
+
+
+@pytest.mark.asyncio
+async def test_execute_thinking_minimal_coerces_to_low(
+    runtime_with_mock_client: tuple[BedrockRuntime, MagicMock],
+) -> None:
+    rt, client = runtime_with_mock_client
+    sess = rt.session()
+    await sess.execute("solve this", thinking="minimal")
+    additional = client.converse.await_args.kwargs.get("additionalModelRequestFields")
+    assert additional == {"thinking": {"type": "enabled", "budget_tokens": 1024}}
+
+
+@pytest.mark.asyncio
+async def test_execute_thinking_unknown_string_raises(
+    runtime_with_mock_client: tuple[BedrockRuntime, MagicMock],
+) -> None:
+    rt, _ = runtime_with_mock_client
+    sess = rt.session()
+    with pytest.raises(UnsupportedFeatureError):
+        await sess.execute("hi", thinking="ultra")  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+async def test_execute_thinking_dict_missing_budget_raises(
+    runtime_with_mock_client: tuple[BedrockRuntime, MagicMock],
+) -> None:
+    rt, _ = runtime_with_mock_client
+    sess = rt.session()
+    with pytest.raises(UnsupportedFeatureError):
+        await sess.execute("hi", thinking={"some_other_key": 100})
 
 
 # ---------------------------------------------------------------------------

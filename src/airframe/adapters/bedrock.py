@@ -8,15 +8,31 @@ Anthropic Claude, Meta Llama, Mistral, Cohere, Amazon Nova, and
 AI21 Jamba behind one AWS-billed endpoint with IAM-rooted auth and
 region pinning.
 
-**Iteration B scope** (the current commit). Lands the bespoke
-:class:`BedrockSession` that owns the per-conversation ``messages=[]``
-buffer, single-turn ``client.converse()`` execution, schema-shaped
-structured output via a forced ``submit_result`` tool, streaming via
-``client.converse_stream()`` (text + reasoning deltas), and
-cooperative cancellation. ``Feature.STRUCTURED_OUTPUT_JSON_SCHEMA``,
-``Feature.STREAMING``, and ``Feature.CANCEL`` flip True.
-Polymorphic prompts + reasoning land in Iteration C; tools +
-permission in D; hooks + budget in E.
+**Iteration C scope** (the current commit). Layers polymorphic
+prompts + extended thinking onto the Iteration B baseline:
+
+* :class:`~airframe.inputs.ImageInput` parts translate into
+  Converse ``{"image": {"format": "...", "source": {"bytes": ...}}}``
+  content blocks. Format is detected from the bytes header or from
+  the ``path`` extension. Anthropic on Bedrock, Amazon Nova, and
+  Meta Llama 3.2 vision models all honour these.
+* :class:`~airframe.inputs.FileInput` parts translate into
+  ``{"document": {"format": "pdf|md|txt|...", "name": "...",
+  "source": {"bytes": ...}}}`` content blocks. Anthropic-only
+  today; other vendors silently ignore.
+* ``thinking=`` is translated to Anthropic's extended-thinking
+  config and sent under ``additionalModelRequestFields={"thinking":
+  {"type": "enabled", "budget_tokens": N}}``. Mapping mirrors
+  :class:`ClaudeCodeRuntime`: ``"low"`` → 1024, ``"medium"`` →
+  8192, ``"high"`` → 32768, ``{"budget_tokens": N}`` → N,
+  ``"disabled"`` omits the field, ``"minimal"`` coerces to
+  ``"low"`` with a debug-level log. Non-Anthropic models log at
+  debug and pass through — Bedrock ignores unknown
+  ``additionalModelRequestFields`` keys per vendor.
+* Flags flipped True: ``REASONING_EFFORT``,
+  ``REASONING_BUDGET_TOKENS``, ``VISION_INPUT``, ``FILE_INPUT``.
+
+Tools + permission land in Iteration D; hooks + budget in E.
 
 **Auth.** Resolved at first network call via the boto3 four-step
 chain — see :doc:`auth` and ``_resolve_aws_credentials``:
@@ -84,6 +100,7 @@ from airframe.events import (
     TurnComplete,
 )
 from airframe.features import Feature
+from airframe.inputs import FileInput, ImageInput, Prompt
 from airframe.models import (
     CAPABILITY_STREAMING,
     CAPABILITY_STRUCTURED_OUTPUT,
@@ -98,12 +115,12 @@ from airframe.protocol import (
     RuntimeResult,
     UnsupportedBindingError,
 )
+from airframe.sessions import _split_prompt_parts
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
 
     from airframe.hooks import HookEvent
-    from airframe.inputs import Prompt
     from airframe.options import ProviderOptions
     from airframe.permission import PermissionCallback
     from airframe.thinking import ThinkingMode
@@ -229,15 +246,33 @@ class BedrockRuntime(AgentRuntime):
     #: * ``CANCEL`` — wired via :func:`asyncio.Task.cancel` for
     #:   :meth:`BedrockSession.execute` + a stream-iterator close for
     #:   :meth:`BedrockSession.stream` (Iteration B).
+    #: * ``REASONING_EFFORT`` / ``REASONING_BUDGET_TOKENS`` — wired via
+    #:   ``additionalModelRequestFields={"thinking": {...}}`` for
+    #:   Anthropic-on-Bedrock variants. Non-Anthropic models silently
+    #:   ignore the field (Iteration C). Per-vendor: Bedrock declines
+    #:   the field rather than rejecting it, so airframe lets the
+    #:   request through with a debug-log when the model isn't
+    #:   ``anthropic.*``.
+    #: * ``VISION_INPUT`` — wired via Converse ``{"image": ...}``
+    #:   content blocks. ``path=`` reads the file; ``bytes_=`` passes
+    #:   through directly; ``url=`` raises (Converse needs the bytes
+    #:   locally) (Iteration C).
+    #: * ``FILE_INPUT`` — wired via Converse ``{"document": ...}``
+    #:   content blocks. Anthropic-only today; other vendors silently
+    #:   ignore (Iteration C).
     #:
     #: ``SESSION_RESUME`` stays False — Converse is stateless from the
-    #: client's perspective. Reasoning + vision + tools + budget land in
-    #: Iterations C through E.
+    #: client's perspective. Tools + permission land in Iteration D;
+    #: hooks + budget in E.
     SUPPORTED_FEATURES: ClassVar[frozenset[Feature]] = frozenset(
         {
             Feature.STRUCTURED_OUTPUT_JSON_SCHEMA,
             Feature.STREAMING,
             Feature.CANCEL,
+            Feature.REASONING_EFFORT,
+            Feature.REASONING_BUDGET_TOKENS,
+            Feature.VISION_INPUT,
+            Feature.FILE_INPUT,
         }
     )
 
@@ -625,13 +660,18 @@ class BedrockSession:
     ) -> RuntimeResult:
         if self._closed:
             raise RuntimeError("session is closed")
-        _enforce_iteration_b_gates(thinking, max_turns=max_turns, max_budget_usd=max_budget_usd)
+        _enforce_budget_gates(max_turns=max_turns, max_budget_usd=max_budget_usd)
 
-        prompt_str = _coerce_prompt_str(prompt)
+        content = _build_user_content(prompt, adapter_label=self._runtime.label)
+        thinking_field = _translate_thinking_for_bedrock(
+            thinking, model_id=self._model_id, label=self._runtime.label
+        )
         pre_len = len(self._messages)
-        self._messages.append({"role": "user", "content": [{"text": prompt_str}]})
+        self._messages.append({"role": "user", "content": content})
 
-        task = asyncio.create_task(self._do_execute(schema=schema, timeout=timeout))
+        task = asyncio.create_task(
+            self._do_execute(schema=schema, thinking_field=thinking_field, timeout=timeout)
+        )
         self._in_flight_task = task
         try:
             return await task
@@ -645,10 +685,14 @@ class BedrockSession:
             self._in_flight_task = None
 
     async def _do_execute(
-        self, *, schema: type[BaseModel] | None, timeout: float
+        self,
+        *,
+        schema: type[BaseModel] | None,
+        thinking_field: dict[str, Any] | None,
+        timeout: float,
     ) -> RuntimeResult:
         client = await self._runtime._get_runtime_client()
-        call_kwargs = self._build_call_kwargs(schema=schema)
+        call_kwargs = self._build_call_kwargs(schema=schema, thinking_field=thinking_field)
         try:
             response = await asyncio.wait_for(client.converse(**call_kwargs), timeout=timeout)
         except TimeoutError as exc:
@@ -673,15 +717,18 @@ class BedrockSession:
     ) -> AsyncIterator[RuntimeEvent]:
         if self._closed:
             raise RuntimeError("session is closed")
-        _enforce_iteration_b_gates(thinking, max_turns=max_turns, max_budget_usd=max_budget_usd)
+        _enforce_budget_gates(max_turns=max_turns, max_budget_usd=max_budget_usd)
 
-        prompt_str = _coerce_prompt_str(prompt)
+        content = _build_user_content(prompt, adapter_label=self._runtime.label)
+        thinking_field = _translate_thinking_for_bedrock(
+            thinking, model_id=self._model_id, label=self._runtime.label
+        )
         pre_len = len(self._messages)
-        self._messages.append({"role": "user", "content": [{"text": prompt_str}]})
+        self._messages.append({"role": "user", "content": content})
         self._stream_cancelled = False
 
         client = await self._runtime._get_runtime_client()
-        call_kwargs = self._build_call_kwargs(schema=schema)
+        call_kwargs = self._build_call_kwargs(schema=schema, thinking_field=thinking_field)
         try:
             response = await client.converse_stream(**call_kwargs)
         except Exception as exc:
@@ -833,7 +880,12 @@ class BedrockSession:
 
     # --- Internals ----------------------------------------------------------
 
-    def _build_call_kwargs(self, *, schema: type[BaseModel] | None) -> dict[str, Any]:
+    def _build_call_kwargs(
+        self,
+        *,
+        schema: type[BaseModel] | None,
+        thinking_field: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         # Pass a shallow copy so the assistant-message append we do
         # after the call doesn't retroactively mutate what the API saw.
         call_kwargs: dict[str, Any] = {
@@ -844,6 +896,8 @@ class BedrockSession:
             call_kwargs["system"] = [{"text": self._system}]
         if schema is not None:
             call_kwargs["toolConfig"] = _build_submit_result_tool_config(schema)
+        if thinking_field is not None:
+            call_kwargs["additionalModelRequestFields"] = {"thinking": thinking_field}
         return call_kwargs
 
     def _parse_converse_response(
@@ -897,35 +951,16 @@ class BedrockSession:
 # ---------------------------------------------------------------------------
 
 
-def _coerce_prompt_str(prompt: Prompt) -> str:
-    """Reject list-shaped prompts until Iteration C wires vision / files."""
-    if isinstance(prompt, str):
-        return prompt
-    raise UnsupportedFeatureError(
-        "BedrockSession: polymorphic prompts (images, files) land in Iteration C. "
-        "Pass a plain str for now.",
-        feature=Feature.VISION_INPUT,
-    )
-
-
-def _enforce_iteration_b_gates(
-    thinking: ThinkingMode,
+def _enforce_budget_gates(
     *,
     max_turns: int | None,
     max_budget_usd: float | None,
 ) -> None:
-    """Raise on capability-bearing kwargs not yet wired.
+    """Decline budget kwargs until Iteration E wires the cost table.
 
     Per the "no silent fallbacks" principle: a capability declined
-    must raise, never quietly drop the request. Each gate matches a
-    later iteration that flips the corresponding flag True.
+    must raise, never quietly drop the request.
     """
-    if thinking is not None:
-        raise UnsupportedFeatureError(
-            "BedrockSession: REASONING_EFFORT / REASONING_BUDGET_TOKENS land in "
-            "Iteration C. Pass thinking=None for now.",
-            feature=Feature.REASONING_EFFORT,
-        )
     if max_turns is not None:
         raise UnsupportedFeatureError(
             "BedrockSession: BUDGET_TURN_CAP lands in Iteration E.",
@@ -936,6 +971,256 @@ def _enforce_iteration_b_gates(
             "BedrockSession: BUDGET_USD_CAP lands in Iteration E.",
             feature=Feature.BUDGET_USD_CAP,
         )
+
+
+#: Bedrock Converse's recognised image formats (the ``format`` field on
+#: the image content block). ``gif`` / ``webp`` honoured on
+#: Anthropic-on-Bedrock; others are silently dropped per vendor.
+_BEDROCK_IMAGE_FORMATS: frozenset[str] = frozenset({"png", "jpeg", "gif", "webp"})
+
+#: Document formats Converse accepts on the document content block.
+#: ``pdf`` is the broad case (Anthropic); the text variants
+#: (``txt`` / ``md`` / ``html`` / ``csv``) ride along for the same
+#: vendor's native document understanding. Anything outside the set is
+#: rejected at translate time rather than surfacing as a vendor 400.
+_BEDROCK_DOCUMENT_FORMATS: frozenset[str] = frozenset(
+    {"pdf", "csv", "doc", "docx", "xls", "xlsx", "html", "txt", "md"}
+)
+
+#: Magic-number → image format. Used when the caller passes
+#: ``ImageInput(bytes_=...)`` without ``media_type=`` so we can pick
+#: the right ``format`` string without guessing from the byte stream
+#: structure beyond the four-or-twelve-byte header.
+_IMAGE_MAGIC_NUMBERS: list[tuple[bytes, str]] = [
+    (b"\x89PNG\r\n\x1a\n", "png"),
+    (b"\xff\xd8\xff", "jpeg"),
+    (b"GIF87a", "gif"),
+    (b"GIF89a", "gif"),
+    (b"RIFF", "webp"),  # WebP is RIFF/WEBP; we accept the RIFF prefix
+]
+
+
+def _infer_image_format(*, path: str | None, bytes_: bytes | None) -> str:
+    """Return the Bedrock-recognised image ``format`` string.
+
+    Tries the file-extension first when ``path=`` is set, then sniffs
+    the bytes magic number. Raises :class:`UnsupportedFeatureError`
+    when neither is conclusive — Bedrock requires a literal format,
+    so silent fallback would produce a vendor 400.
+    """
+    if path is not None:
+        ext = os.path.splitext(path)[1].lower().lstrip(".")
+        if ext == "jpg":
+            ext = "jpeg"
+        if ext in _BEDROCK_IMAGE_FORMATS:
+            return ext
+    if bytes_ is not None:
+        for magic, fmt in _IMAGE_MAGIC_NUMBERS:
+            if bytes_.startswith(magic):
+                return fmt
+    raise UnsupportedFeatureError(
+        "BedrockSession: could not infer image format. Bedrock Converse "
+        "needs one of png|jpeg|gif|webp; pass a path with a recognised "
+        "extension, or use a different image.",
+        feature=Feature.VISION_INPUT,
+    )
+
+
+def _infer_document_format(*, path: str, media_type: str | None) -> str:
+    """Return the Bedrock-recognised document ``format`` string."""
+    if media_type is not None:
+        # Strip the prefix: 'application/pdf' → 'pdf', 'text/markdown' → 'md'.
+        if "/" in media_type:
+            mt = media_type.split("/", 1)[1].lower()
+            mt = {"markdown": "md", "plain": "txt", "html": "html"}.get(mt, mt)
+            if mt in _BEDROCK_DOCUMENT_FORMATS:
+                return mt
+    ext = os.path.splitext(path)[1].lower().lstrip(".")
+    ext = {"markdown": "md", "htm": "html", "text": "txt"}.get(ext, ext)
+    if ext in _BEDROCK_DOCUMENT_FORMATS:
+        return ext
+    raise UnsupportedFeatureError(
+        f"BedrockSession: unrecognised document format for {path!r}. "
+        f"Bedrock Converse accepts: {sorted(_BEDROCK_DOCUMENT_FORMATS)}.",
+        feature=Feature.FILE_INPUT,
+    )
+
+
+def _document_name_from_path(path: str) -> str:
+    """Build a Converse-legal ``document.name`` from a filesystem path.
+
+    Bedrock requires the name to be alphanumeric + whitespace + a small
+    set of punctuation; underscores and hyphens get through. Returns a
+    sanitised basename without the extension.
+    """
+    base = os.path.basename(path)
+    base = os.path.splitext(base)[0]
+    sanitised = "".join(c if c.isalnum() or c in " _-" else "_" for c in base) or "document"
+    return sanitised[:64]
+
+
+def _build_image_block(img: ImageInput) -> dict[str, Any]:
+    """Translate one :class:`ImageInput` to a Converse image content block."""
+    if img.url is not None and img.bytes_ is None and img.path is None:
+        raise UnsupportedFeatureError(
+            "BedrockSession: ImageInput(url=) is not supported — Bedrock "
+            "Converse needs the bytes locally. Pass path= or bytes_=.",
+            feature=Feature.VISION_INPUT,
+        )
+    if img.bytes_ is not None:
+        data = img.bytes_
+    elif img.path is not None:
+        with open(img.path, "rb") as fh:
+            data = fh.read()
+    else:  # pragma: no cover — guarded by ImageInput.__post_init__
+        raise UnsupportedFeatureError(
+            "BedrockSession: ImageInput must set path= or bytes_=.",
+            feature=Feature.VISION_INPUT,
+        )
+    fmt = _infer_image_format(path=img.path, bytes_=data)
+    return {"image": {"format": fmt, "source": {"bytes": data}}}
+
+
+def _build_document_block(file: FileInput) -> dict[str, Any]:
+    """Translate one :class:`FileInput` to a Converse document content block."""
+    with open(file.path, "rb") as fh:
+        data = fh.read()
+    fmt = _infer_document_format(path=file.path, media_type=file.media_type)
+    return {
+        "document": {
+            "format": fmt,
+            "name": _document_name_from_path(file.path),
+            "source": {"bytes": data},
+        }
+    }
+
+
+def _build_user_content(prompt: Prompt, *, adapter_label: str) -> list[dict[str, Any]]:
+    """Build the Converse ``content`` list for a user message.
+
+    Routes the prompt through :func:`_split_prompt_parts` and turns
+    each :class:`ImageInput` / :class:`FileInput` into its native
+    Converse content block. The text portion lands as a single
+    leading ``{"text": ...}`` block (Converse uses one block per
+    text segment but the conventional shape is one combined text
+    block followed by attachments).
+    """
+    text, images, files = _split_prompt_parts(
+        prompt,
+        adapter_label=adapter_label,
+        supports_vision=True,
+        supports_file=True,
+    )
+    blocks: list[dict[str, Any]] = []
+    if text:
+        blocks.append({"text": text})
+    for img in images:
+        blocks.append(_build_image_block(img))
+    for file in files:
+        blocks.append(_build_document_block(file))
+    if not blocks:
+        # The model spec wants at least one block; default to an
+        # empty-string text block so the wire shape stays valid.
+        blocks.append({"text": ""})
+    return blocks
+
+
+#: ``thinking`` effort → budget-tokens mapping for Anthropic-on-Bedrock.
+#: Mirrors :class:`ClaudeCodeRuntime` to keep the airframe portable
+#: surface stable across both routes to Claude.
+_BEDROCK_THINKING_BUDGETS: dict[str, int] = {
+    "low": 1024,
+    "medium": 8192,
+    "high": 32768,
+}
+
+
+def _is_anthropic_on_bedrock(model_id: str) -> bool:
+    """Return ``True`` when the model id targets an Anthropic Claude variant.
+
+    Covers raw IDs (``anthropic.claude-...``) and region-prefixed
+    inference profiles (``us.anthropic.claude-...``). PT ARNs are
+    opaque to vendor identity here — they pass through with thinking
+    silently dropped (the field rides ``additionalModelRequestFields``
+    which Bedrock per-vendor validates).
+    """
+    head = model_id.split(":", 1)[0].lower()
+    return ".anthropic." in f".{head}." or head.startswith("anthropic.")
+
+
+def _translate_thinking_for_bedrock(
+    thinking: ThinkingMode,
+    *,
+    model_id: str,
+    label: str,
+) -> dict[str, Any] | None:
+    """Translate :data:`ThinkingMode` into the Converse thinking field.
+
+    The result lands in ``additionalModelRequestFields={"thinking":
+    <returned>}`` when non-None. ``None`` skips the field entirely.
+
+    Mappings:
+
+    * ``None`` → ``None`` (no override).
+    * ``"disabled"`` → ``None`` (omit; Bedrock has no explicit
+      disable shape — sending nothing is the disable).
+    * ``"minimal"`` → ``{"type": "enabled", "budget_tokens": 1024}``
+      with a debug log (Anthropic has no "minimal" tier — coerced
+      to "low" same as :class:`ClaudeCodeRuntime`).
+    * ``"low" | "medium" | "high"`` → ``{"type": "enabled",
+      "budget_tokens": 1024|8192|32768}``.
+    * ``{"budget_tokens": N}`` → ``{"type": "enabled",
+      "budget_tokens": N}``.
+
+    Non-Anthropic models receive ``None`` with a debug log — Bedrock
+    silently ignores ``additionalModelRequestFields`` keys the
+    vendor doesn't understand, so sending the field anyway is a
+    no-op, but we save the extra bytes.
+    """
+    if thinking is None:
+        return None
+    if thinking == "disabled":
+        return None
+    if isinstance(thinking, str):
+        if thinking == "minimal":
+            logger.debug(
+                "%s: thinking='minimal' has no Anthropic equivalent; coercing to 'low'",
+                label,
+            )
+            budget = _BEDROCK_THINKING_BUDGETS["low"]
+        elif thinking in _BEDROCK_THINKING_BUDGETS:
+            budget = _BEDROCK_THINKING_BUDGETS[thinking]
+        else:
+            raise UnsupportedFeatureError(
+                f"{label}: unrecognised thinking effort {thinking!r}; "
+                f"supported: 'minimal' (→'low'), 'low', 'medium', 'high', 'disabled'.",
+                feature=Feature.REASONING_EFFORT,
+            )
+    elif isinstance(thinking, dict):
+        raw_budget = thinking.get("budget_tokens")
+        if raw_budget is None or not isinstance(raw_budget, int):
+            raise UnsupportedFeatureError(
+                f"{label}: dict-shaped thinking must include integer "
+                f"'budget_tokens'; got keys={list(thinking)}",
+                feature=Feature.REASONING_BUDGET_TOKENS,
+            )
+        budget = int(raw_budget)
+    else:
+        raise UnsupportedFeatureError(
+            f"{label}: unrecognised thinking mode {thinking!r}",
+            feature=Feature.REASONING_EFFORT,
+        )
+
+    if not _is_anthropic_on_bedrock(model_id):
+        logger.debug(
+            "%s: thinking= forwarded to non-Anthropic model %s; "
+            "Bedrock will silently ignore additionalModelRequestFields "
+            "this vendor doesn't honour.",
+            label,
+            model_id,
+        )
+        return None
+    return {"type": "enabled", "budget_tokens": budget}
 
 
 def _build_submit_result_tool_config(schema: type[BaseModel]) -> dict[str, Any]:

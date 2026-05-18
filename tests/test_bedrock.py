@@ -68,37 +68,42 @@ def test_constructor_model_overrides_env(monkeypatch: pytest.MonkeyPatch) -> Non
 
 
 # ---------------------------------------------------------------------------
-# SUPPORTED_FEATURES — Iteration B flips three flags True
+# SUPPORTED_FEATURES — Iteration C adds reasoning + vision + file
 # ---------------------------------------------------------------------------
 
 
-def test_supported_features_iteration_b_set() -> None:
-    """Iteration B flips STRUCTURED_OUTPUT_JSON_SCHEMA + STREAMING + CANCEL.
+def test_supported_features_iteration_c_set() -> None:
+    """Iteration C adds REASONING_EFFORT / REASONING_BUDGET_TOKENS /
+    VISION_INPUT / FILE_INPUT on top of Iteration B's three flags.
 
-    The rest stay False — reasoning + vision + tools + budget + hooks
-    land in Iterations C through E.
+    Tools + permission land in Iteration D; hooks + budget in E.
     """
-    assert Feature.STRUCTURED_OUTPUT_JSON_SCHEMA in BedrockRuntime.SUPPORTED_FEATURES
-    assert Feature.STREAMING in BedrockRuntime.SUPPORTED_FEATURES
-    assert Feature.CANCEL in BedrockRuntime.SUPPORTED_FEATURES
-    assert len(BedrockRuntime.SUPPORTED_FEATURES) == 3
+    iteration_b_and_c = {
+        Feature.STRUCTURED_OUTPUT_JSON_SCHEMA,
+        Feature.STREAMING,
+        Feature.CANCEL,
+        Feature.REASONING_EFFORT,
+        Feature.REASONING_BUDGET_TOKENS,
+        Feature.VISION_INPUT,
+        Feature.FILE_INPUT,
+    }
+    for feature in iteration_b_and_c:
+        assert feature in BedrockRuntime.SUPPORTED_FEATURES
+    assert len(BedrockRuntime.SUPPORTED_FEATURES) == 7
 
 
-def test_supports_iteration_b_flags_true() -> None:
+def test_supports_iteration_c_flags_true() -> None:
     rt = BedrockRuntime()
-    assert rt.supports(Feature.STRUCTURED_OUTPUT_JSON_SCHEMA) is True
-    assert rt.supports(Feature.STREAMING) is True
-    assert rt.supports(Feature.CANCEL) is True
+    assert rt.supports(Feature.REASONING_EFFORT) is True
+    assert rt.supports(Feature.REASONING_BUDGET_TOKENS) is True
+    assert rt.supports(Feature.VISION_INPUT) is True
+    assert rt.supports(Feature.FILE_INPUT) is True
 
 
 def test_supports_returns_false_for_later_iteration_features() -> None:
     rt = BedrockRuntime()
     later = {
         Feature.SESSION_RESUME,
-        Feature.REASONING_EFFORT,
-        Feature.REASONING_BUDGET_TOKENS,
-        Feature.VISION_INPUT,
-        Feature.FILE_INPUT,
         Feature.TOOLS_FUNCTION,
         Feature.TOOLS_MCP_STDIO,
         Feature.TOOLS_MCP_HTTP,

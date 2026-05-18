@@ -25,7 +25,14 @@ Usage::
     uv run python examples/probe_thinking.py --provider github-copilot
     uv run python examples/probe_thinking.py --provider codex
     uv run python examples/probe_thinking.py --provider opencode
+    uv run python examples/probe_thinking.py --provider bedrock
     uv run python examples/probe_thinking.py --effort medium
+
+For ``--provider bedrock`` the request hits an Anthropic-on-Bedrock
+model by default; non-Anthropic Bedrock models silently drop the
+``thinking`` field (Bedrock ignores unknown
+``additionalModelRequestFields`` per vendor) so
+``reasoning_tokens`` will be 0.
 
 Defaults to ``claude`` (Anthropic's models expose ``thinking_tokens``
 on usage cleanly) and ``high`` (most likely to actually trigger a
@@ -102,7 +109,8 @@ async def main() -> int:
             file=sys.stderr,
         )
         print(
-            "Install one with: pip install airframe-agents[claude|copilot|codex|openai-compat]",
+            "Install one with: pip install airframe-agents"
+            "[claude|copilot|codex|openai-compat|bedrock]",
             file=sys.stderr,
         )
         return 1
