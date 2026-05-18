@@ -2,8 +2,12 @@
 
 Each adapter has its own model-discovery path:
 
-* :class:`ClaudeCodeRuntime` — hits ``GET https://api.anthropic.com/v1/models``
-  directly via :mod:`httpx`, joins against ``_METADATA``.
+* :class:`ClaudeCodeRuntime` — wraps the official ``anthropic`` SDK's
+  :meth:`AsyncAnthropic.models.list`. The SDK handles both API-key
+  (``x-api-key``) and OAuth-Bearer (``Authorization: Bearer …`` +
+  ``anthropic-beta: oauth-2025-04-20``) auth; airframe picks the
+  slot based on which credential resolved through the four-step
+  chain and lets the SDK send the right headers.
 * :class:`CopilotRuntime` — native ``CopilotClient.list_models()``
   (Copilot ships rich metadata: vision, reasoning_effort, context window).
 * :class:`CodexRuntime` — ``AsyncOpenAI.models.list()`` filtered to
@@ -21,10 +25,10 @@ These tests mock at the vendor-SDK boundary and assert that:
 
 from __future__ import annotations
 
+import json
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
-import httpx
 import pytest
 
 from airframe.adapters.claude_code import ClaudeCodeRuntime
@@ -46,78 +50,96 @@ from airframe.models import (
 )
 
 # ---------------------------------------------------------------------------
-# ClaudeCodeRuntime.list_models — httpx against /v1/models
+# ClaudeCodeRuntime.list_models — wraps anthropic.AsyncAnthropic.models.list
 # ---------------------------------------------------------------------------
 
 
-class _FakeClaudeResponse:
-    def __init__(self, *, status_code: int, payload: dict[str, Any] | None = None) -> None:
-        self.status_code = status_code
-        self._payload = payload or {}
-        self.text = ""
-
-    def raise_for_status(self) -> None:
-        if self.status_code >= 400:
-            req = httpx.Request("GET", "https://api.anthropic.com/v1/models")
-            raise httpx.HTTPStatusError(
-                f"HTTP {self.status_code}",
-                request=req,
-                response=httpx.Response(self.status_code, request=req),
-            )
-
-    def json(self) -> dict[str, Any]:
-        return self._payload
+class _FakeAnthropicModel:
+    def __init__(self, *, id: str, display_name: str | None = None) -> None:
+        self.id = id
+        if display_name is not None:
+            self.display_name = display_name
 
 
-def _patch_claude_http(
+def _patch_anthropic_sdk(
     monkeypatch: pytest.MonkeyPatch,
     *,
-    response: _FakeClaudeResponse | None = None,
+    models: list[_FakeAnthropicModel] | None = None,
     raise_exc: Exception | None = None,
 ) -> dict[str, Any]:
-    """Patch ``httpx.AsyncClient`` to return one canned response."""
+    """Patch ``anthropic.AsyncAnthropic`` to return a fake client.
+
+    Returns the captured-kwargs dict the test can introspect to verify
+    which auth slot airframe picked (api_key= vs auth_token=).
+    """
+    import anthropic
 
     captured: dict[str, Any] = {}
 
-    class _FakeAsyncClient:
-        def __init__(self, *args: Any, **kwargs: Any) -> None:
-            captured["client_kwargs"] = kwargs
+    mock_models = MagicMock()
+    if raise_exc is not None:
+        mock_models.list = AsyncMock(side_effect=raise_exc)
+    else:
+        page = MagicMock()
+        page.data = models or []
+        mock_models.list = AsyncMock(return_value=page)
 
-        async def __aenter__(self) -> Any:
-            return self
+    mock_client = MagicMock()
+    mock_client.models = mock_models
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=None)
 
-        async def __aexit__(self, *a: Any) -> None:
-            return None
+    def factory(**kwargs: Any) -> Any:
+        captured.update(kwargs)
+        return mock_client
 
-        async def get(self, url: str, *, headers: dict[str, str]) -> Any:
-            captured["url"] = url
-            captured["headers"] = headers
-            if raise_exc is not None:
-                raise raise_exc
-            return response
-
-    monkeypatch.setattr(httpx, "AsyncClient", _FakeAsyncClient)
+    monkeypatch.setattr(anthropic, "AsyncAnthropic", factory)
     return captured
 
 
+def _anthropic_api_error(status_code: int) -> Exception:
+    """Build an ``APIStatusError`` instance airframe should classify."""
+    import anthropic
+    import httpx
+
+    response = httpx.Response(status_code, request=httpx.Request("GET", "https://example.com"))
+    return anthropic.APIStatusError(
+        message=f"HTTP {status_code}",
+        response=response,
+        body=None,
+    )
+
+
+def _anthropic_connection_error() -> Exception:
+    import anthropic
+    import httpx
+
+    return anthropic.APIConnectionError(request=httpx.Request("GET", "https://example.com"))
+
+
 @pytest.mark.asyncio
-async def test_claude_list_models_returns_enriched_model_info(
+async def test_claude_list_models_uses_api_key_kwarg_when_constructor_arg_set(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Known IDs get full metadata from ``_METADATA``."""
-    payload = {
-        "data": [
-            {"id": "claude-haiku-4-5", "display_name": "Claude Haiku 4.5", "type": "model"},
-            {"id": "claude-sonnet-4-6", "display_name": "Claude Sonnet 4.6", "type": "model"},
-            {"id": "claude-opus-4-7", "display_name": "Claude Opus 4.7", "type": "model"},
-        ]
-    }
-    captured = _patch_claude_http(
-        monkeypatch, response=_FakeClaudeResponse(status_code=200, payload=payload)
+    """Explicit ``api_key=`` constructor arg → ``api_key=`` on AsyncAnthropic."""
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setenv("CLAUDE_CREDENTIALS_PATH", "/nonexistent/path")
+
+    captured = _patch_anthropic_sdk(
+        monkeypatch,
+        models=[
+            _FakeAnthropicModel(id="claude-haiku-4-5", display_name="Claude Haiku 4.5"),
+            _FakeAnthropicModel(id="claude-sonnet-4-6", display_name="Claude Sonnet 4.6"),
+            _FakeAnthropicModel(id="claude-opus-4-7", display_name="Claude Opus 4.7"),
+        ],
     )
 
     rt = ClaudeCodeRuntime(api_key="sk-ant-test")
     models = await rt.list_models()
+
+    # Auth slot selection: explicit constructor api_key wins.
+    assert captured == {"api_key": "sk-ant-test"}
 
     assert len(models) == 3
     assert all(isinstance(m, ModelInfo) for m in models)
@@ -128,29 +150,97 @@ async def test_claude_list_models_returns_enriched_model_info(
     assert haiku.context_window == 200_000
     assert haiku.pricing_input_per_1k_usd == 0.0010
     assert haiku.pricing_output_per_1k_usd == 0.0050
-    # All Claude models declare these capabilities.
     assert CAPABILITY_TOOLS in haiku.capabilities
     assert CAPABILITY_STRUCTURED_OUTPUT in haiku.capabilities
     assert CAPABILITY_STREAMING in haiku.capabilities
     assert CAPABILITY_VISION in haiku.capabilities
 
-    # We sent the x-api-key header (not Authorization Bearer).
-    assert captured["headers"]["x-api-key"] == "sk-ant-test"
-    assert captured["headers"]["anthropic-version"] == "2023-06-01"
-    assert captured["url"] == "https://api.anthropic.com/v1/models"
+
+@pytest.mark.asyncio
+async def test_claude_list_models_uses_auth_token_kwarg_for_oauth_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``CLAUDE_CODE_OAUTH_TOKEN`` env → ``auth_token=`` on AsyncAnthropic.
+
+    The SDK then sends ``Authorization: Bearer …`` + ``anthropic-beta:
+    oauth-2025-04-20`` automatically — the combination that
+    ``/v1/models`` actually accepts for subscription tokens.
+    """
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat-from-env")
+    monkeypatch.setenv("CLAUDE_CREDENTIALS_PATH", "/nonexistent/path")
+
+    captured = _patch_anthropic_sdk(monkeypatch, models=[])
+
+    rt = ClaudeCodeRuntime()  # no explicit api_key
+    await rt.list_models()
+
+    assert captured == {"auth_token": "sk-ant-oat-from-env"}
+
+
+@pytest.mark.asyncio
+async def test_claude_list_models_defers_to_sdk_when_only_anthropic_api_key_env_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``ANTHROPIC_API_KEY`` env (no explicit arg) → SDK self-resolves.
+
+    Airframe passes no auth kwargs in this case; the SDK reads the
+    env var itself via its native auth chain.
+    """
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-from-env")
+    monkeypatch.setenv("CLAUDE_CREDENTIALS_PATH", "/nonexistent/path")
+
+    captured = _patch_anthropic_sdk(monkeypatch, models=[])
+
+    rt = ClaudeCodeRuntime()
+    await rt.list_models()
+
+    # No kwargs to AsyncAnthropic — the SDK reads ANTHROPIC_API_KEY itself.
+    assert captured == {}
+
+
+@pytest.mark.asyncio
+async def test_claude_list_models_falls_back_to_credentials_file(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Any,
+) -> None:
+    """``~/.claude/.credentials.json`` is the last-resort OAuth fallback."""
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+
+    cred_path = tmp_path / "credentials.json"
+    cred_path.write_text(
+        json.dumps(
+            {
+                "claudeAiOauth": {
+                    "accessToken": "sk-ant-oat-from-file",
+                    "refreshToken": "refresh-...",
+                    "expiresAt": 9_999_999_999,
+                    "subscriptionType": "max",
+                }
+            }
+        )
+    )
+    monkeypatch.setenv("CLAUDE_CREDENTIALS_PATH", str(cred_path))
+
+    captured = _patch_anthropic_sdk(monkeypatch, models=[])
+
+    rt = ClaudeCodeRuntime()
+    await rt.list_models()
+
+    assert captured == {"auth_token": "sk-ant-oat-from-file"}
 
 
 @pytest.mark.asyncio
 async def test_claude_list_models_handles_unknown_model_ids(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Unknown IDs come back without enrichment — display_name from the API."""
-    payload = {
-        "data": [
-            {"id": "claude-mystery-5-0", "display_name": "Claude Mystery 5.0", "type": "model"},
-        ]
-    }
-    _patch_claude_http(monkeypatch, response=_FakeClaudeResponse(status_code=200, payload=payload))
+    """Unknown IDs come back without enrichment — display_name from SDK."""
+    _patch_anthropic_sdk(
+        monkeypatch,
+        models=[_FakeAnthropicModel(id="claude-mystery-5-0", display_name="Claude Mystery 5.0")],
+    )
 
     rt = ClaudeCodeRuntime(api_key="sk-ant-test")
     models = await rt.list_models()
@@ -163,20 +253,27 @@ async def test_claude_list_models_handles_unknown_model_ids(
 
 
 @pytest.mark.asyncio
-async def test_claude_list_models_without_api_key_raises_auth(
+async def test_claude_list_models_no_credentials_anywhere_raises_auth(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """OAuth tokens don't work for /v1/models — we surface that cleanly."""
+    """Every credential source exhausted → RuntimeAuthError with clear hint."""
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    rt = ClaudeCodeRuntime()  # no api_key override
+    monkeypatch.setenv("CLAUDE_CREDENTIALS_PATH", "/nonexistent/path")
+
+    rt = ClaudeCodeRuntime()
     with pytest.raises(RuntimeAuthError) as excinfo:
         await rt.list_models()
-    assert "ANTHROPIC_API_KEY" in str(excinfo.value)
+    msg = str(excinfo.value)
+    # The error message should name all the recoverable paths.
+    assert "CLAUDE_CODE_OAUTH_TOKEN" in msg
+    assert "ANTHROPIC_API_KEY" in msg
+    assert "claude setup-token" in msg
 
 
 @pytest.mark.asyncio
 async def test_claude_list_models_401_raises_auth(monkeypatch: pytest.MonkeyPatch) -> None:
-    _patch_claude_http(monkeypatch, response=_FakeClaudeResponse(status_code=401))
+    _patch_anthropic_sdk(monkeypatch, raise_exc=_anthropic_api_error(401))
     rt = ClaudeCodeRuntime(api_key="sk-ant-bad")
     with pytest.raises(RuntimeAuthError):
         await rt.list_models()
@@ -186,7 +283,7 @@ async def test_claude_list_models_401_raises_auth(monkeypatch: pytest.MonkeyPatc
 async def test_claude_list_models_503_raises_transient(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _patch_claude_http(monkeypatch, response=_FakeClaudeResponse(status_code=503))
+    _patch_anthropic_sdk(monkeypatch, raise_exc=_anthropic_api_error(503))
     rt = ClaudeCodeRuntime(api_key="sk-ant-test")
     with pytest.raises(RuntimeTransientError):
         await rt.list_models()
@@ -196,7 +293,7 @@ async def test_claude_list_models_503_raises_transient(
 async def test_claude_list_models_network_error_raises_transient(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _patch_claude_http(monkeypatch, raise_exc=httpx.ConnectError("DNS failure"))
+    _patch_anthropic_sdk(monkeypatch, raise_exc=_anthropic_connection_error())
     rt = ClaudeCodeRuntime(api_key="sk-ant-test")
     with pytest.raises(RuntimeTransientError):
         await rt.list_models()
@@ -206,10 +303,68 @@ async def test_claude_list_models_network_error_raises_transient(
 async def test_claude_list_models_unexpected_status_raises_protocol(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _patch_claude_http(monkeypatch, response=_FakeClaudeResponse(status_code=418))
+    _patch_anthropic_sdk(monkeypatch, raise_exc=_anthropic_api_error(418))
     rt = ClaudeCodeRuntime(api_key="sk-ant-test")
     with pytest.raises(RuntimeProtocolError):
         await rt.list_models()
+
+
+# ---------------------------------------------------------------------------
+# _read_claude_credentials_oauth_token helper — defensive parsing
+# ---------------------------------------------------------------------------
+
+
+def test_credentials_helper_returns_none_for_missing_file(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from airframe.adapters.claude_code import _read_claude_credentials_oauth_token
+
+    monkeypatch.setenv("CLAUDE_CREDENTIALS_PATH", "/definitely/not/a/path")
+    assert _read_claude_credentials_oauth_token() is None
+
+
+def test_credentials_helper_returns_none_for_malformed_json(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    from airframe.adapters.claude_code import _read_claude_credentials_oauth_token
+
+    bad = tmp_path / "credentials.json"
+    bad.write_text("not valid json{{{")
+    monkeypatch.setenv("CLAUDE_CREDENTIALS_PATH", str(bad))
+    assert _read_claude_credentials_oauth_token() is None
+
+
+def test_credentials_helper_returns_none_for_missing_oauth_key(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    from airframe.adapters.claude_code import _read_claude_credentials_oauth_token
+
+    p = tmp_path / "credentials.json"
+    p.write_text(json.dumps({"otherKey": {"accessToken": "x"}}))
+    monkeypatch.setenv("CLAUDE_CREDENTIALS_PATH", str(p))
+    assert _read_claude_credentials_oauth_token() is None
+
+
+def test_credentials_helper_returns_none_for_empty_access_token(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    from airframe.adapters.claude_code import _read_claude_credentials_oauth_token
+
+    p = tmp_path / "credentials.json"
+    p.write_text(json.dumps({"claudeAiOauth": {"accessToken": ""}}))
+    monkeypatch.setenv("CLAUDE_CREDENTIALS_PATH", str(p))
+    assert _read_claude_credentials_oauth_token() is None
+
+
+def test_credentials_helper_returns_token_when_present(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    from airframe.adapters.claude_code import _read_claude_credentials_oauth_token
+
+    p = tmp_path / "credentials.json"
+    p.write_text(json.dumps({"claudeAiOauth": {"accessToken": "sk-ant-oat-VALID"}}))
+    monkeypatch.setenv("CLAUDE_CREDENTIALS_PATH", str(p))
+    assert _read_claude_credentials_oauth_token() == "sk-ant-oat-VALID"
 
 
 # ---------------------------------------------------------------------------
