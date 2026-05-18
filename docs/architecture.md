@@ -318,7 +318,62 @@ These are the sharp edges the adapters absorb so you don't have to.
 * Auth: codex CLI reads `~/.codex/auth.json` directly when present.
   Adapter falls through to that when no env var is set.
 
-### OpenAI-compatible HTTP (OpenCode Zen + OpenCode Go today)
+### AWS Bedrock (Converse API)
+
+* Stateless from the client's perspective; `BedrockSession` keeps a
+  client-side `messages=[]` buffer like the OpenAI-compat family
+  does, even though the wire format is Converse rather than Chat
+  Completions.
+* **Region is mandatory.** Bedrock is region-pinned and per-region
+  model catalogs diverge. If `AWS_REGION` doesn't resolve and boto3
+  falls through to `us-east-1`, a model that works fine in
+  `us-west-2` returns `ValidationException` and looks like
+  model-not-found. The adapter surfaces an unresolved region as a
+  first-class `RuntimeAuthError` at the first network call rather
+  than letting boto3's default cascade into a confusing downstream
+  error.
+* **Inference-profile and PT ARN model IDs.** Some models *require*
+  the prefixed form (`us.anthropic.claude-3-5-sonnet-20241022-v2:0`)
+  or a full provisioned-throughput ARN. `validate_binding` accepts
+  both shapes; `_BEDROCK_METADATA` lookups fall through to
+  `cost_usd=None` on prefixed variants rather than guessing pricing.
+  `BedrockOptions.inference_profile_arn` replaces the call-time
+  `modelId` when set, so consumers route through a PT or cross-region
+  inference profile without rebuilding the session.
+* **Guardrail interventions are silent without help.** When a
+  Bedrock Guardrails policy fires, Converse returns
+  `stopReason == "guardrail_intervened"` with an empty or truncated
+  `output`. Pydantic validation would then fail with a confusing
+  message. The adapter's `_check_guardrail_intervention()` raises
+  `RuntimeProtocolError` with a clear message instead, on both
+  `execute()` and `stream()` paths.
+* **Redacted reasoning blocks.** Recent Claude versions on Bedrock
+  emit `reasoningContent` chunks carrying only a `redactedContent`
+  field (safety-redacted thinking — no `text` available). The
+  streaming parser skips those without crashing rather than emitting
+  empty `ReasoningDelta` events.
+* Structured output: forced `submit_result` tool in Converse's
+  `toolConfig` slot — same pattern Copilot uses. User-defined
+  `FunctionTool`s coexist with the forced tool. Schema is
+  fingerprinted so successive turns with the same schema reuse the
+  built `toolConfig`.
+* Thinking is Anthropic-on-Bedrock only. `thinking=` translates to
+  `additionalModelRequestFields={"thinking": {"type": "enabled",
+  "budget_tokens": N}}` for Anthropic model IDs and is silently
+  omitted (with a debug log) for other vendors. `REASONING_EFFORT` /
+  `REASONING_BUDGET_TOKENS` report True via `supports()` but are
+  model-gated in practice.
+* `additionalModelRequestFields` is a vendor-specific footgun.
+  `BedrockOptions.additional_model_fields` passes a dict through
+  unchecked. Wrong field for the wrong vendor = silent ignore.
+  Documented as an escape hatch where field validity is the caller's
+  problem.
+* Auth: standard boto3 chain (explicit kwargs → env →
+  `AWS_PROFILE` → IAM instance / ECS / Lambda / IRSA roles); region
+  resolves on a separate chain (`region_name=` → `AWS_REGION` /
+  `AWS_DEFAULT_REGION` → resolved profile's config).
+
+### OpenAI-compatible HTTP (OpenCode Go, OpenCode Zen, OpenRouter)
 
 * Stateless HTTP; the simplest transport. The `OpenAICompatibleSession`
   maintains a client-side `messages=[]` buffer because chat-completions
@@ -338,6 +393,37 @@ These are the sharp edges the adapters absorb so you don't have to.
   structured payload (`{"input": {...}}`, `{"content": "<json>"}`).
   The adapter's `_unwrap_envelope` strips one level of wrapper before
   Pydantic validates.
+
+### OpenRouter (within the OpenAI-compatible family)
+
+Same base as the other `OpenAICompatibleRuntime` subclasses; what
+follows is the router-specific surface on top.
+
+* **Per-model feature heterogeneity is the headline landmine.**
+  OpenRouter is a router, not a vendor. What works in any given call
+  depends on which underlying model the request gets routed to —
+  function tools, strict JSON schema, vision are all wire-compatible
+  but unevenly supported across the catalog. `runtime.supports()`
+  declares the *adapter*'s surface; silent degradation per model is
+  the failure mode rather than a hard refusal. If your application
+  hard-depends on a feature for a specific model, verify against that
+  model directly.
+* **Model IDs carry vendor prefixes.** Strings are `<vendor>/<model>`
+  (`anthropic/claude-3.5-sonnet`, `meta-llama/llama-3.1-70b-instruct`,
+  `google/gemini-pro-1.5`, etc.). The adapter passes the string
+  through unchanged; copying a bare model name from elsewhere yields
+  a 404 from OpenRouter.
+* **Curated pricing only.** Around ten model IDs have static
+  `ModelMeta` entries; everything else returns `cost_usd=None` from
+  `list_models()`. OpenRouter's per-model pricing shifts as upstream
+  vendors adjust, so the adapter doesn't guess. Compare to OpenCode
+  Go (flat-fee → always `0.0`) and OpenCode Zen / direct OpenAI-compat
+  (per-token rates known at the gateway).
+* **No on-disk auth fallback.** Unlike the OpenCode adapters which
+  fall through to `~/.local/share/opencode/auth.json`, OpenRouter
+  reads `OPENROUTER_API_KEY` env or an explicit `api_key=` only.
+  Missing either raises `RuntimeAuthError` pointing at
+  `https://openrouter.ai/keys`.
 
 ## Lifecycle contract
 
