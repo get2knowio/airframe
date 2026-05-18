@@ -864,25 +864,49 @@ phases above. Each one is signal-gated (concrete consumer or
 capability-gap demand triggers prioritisation) and has its own
 dedicated dev-doc; the list here is the index.
 
-* **`OpenCodeServerRuntime`** — *Phase 1 candidate*. Wraps the bespoke
-  OpenCode agent HTTP server (`sst/opencode` — distinct from the
-  `OpenCodeZenRuntime` / `OpenCodeGoRuntime` gateway adapters that
-  share the brand). Lands the lineup's first **model-agnostic agent
-  adapter** — open-weight agentics is otherwise unreachable through
-  airframe today. Server-side sessions, native SSE streaming,
-  permission-callback and lifecycle-hook surfaces fall out near-free
-  from the existing event bus. Risks: pre-1.0 SDK, server-side
-  tool execution = no client-callback transport for caller-defined
-  Python functions (worked around via in-process MCP wrapping).
-  Full plan: [`opencode-adapter-plan.md`](./opencode-adapter-plan.md).
-* **`BedrockRuntime`** — wraps AWS Bedrock's Converse API; the
-  enterprise / IAM-rooted access path. Multi-vendor model catalog
-  (Anthropic / Meta / Mistral / Cohere / Amazon Nova) behind one
-  AWS auth scheme. Full plan:
+**Shipped:**
+
+* **`BedrockRuntime`** (v0.6.0) — wraps AWS Bedrock's Converse API;
+  the enterprise / IAM-rooted access path. Multi-vendor model catalog
+  (Anthropic / Meta / Mistral / Cohere / Amazon Nova) behind one AWS
+  auth scheme. Retrospective plan retained for reference at
   [`bedrock-adapter-plan.md`](./bedrock-adapter-plan.md).
-* **`GeminiRuntime`** — signal-gated post-1.0 work. Direct wrapper
-  around `google-genai` (Developer API + Vertex). Fills the obvious
-  gap in the four-adapter matrix. Full plan:
+
+**Phase 1 candidates** (open-weight or new-shape agentics; each
+mergeable in parallel — disjoint files):
+
+* **`KimiRuntime`** — wraps Moonshot AI's `kimi-agent-sdk`
+  (subprocess-class, thin wrapper around `kimi-cli`). Architecturally
+  the closest analogue to `ClaudeCodeRuntime` in the lineup — sessions,
+  approvals, MCP, streaming all fall out from the existing patterns.
+  First adapter to deliver agent-SDK-class agentics over an open-
+  weight model line (Kimi K2 / K2.6 / K2-thinking-turbo). Full plan:
+  [`kimi-adapter-plan.md`](./kimi-adapter-plan.md).
+* **`MistralRuntime`** — wraps Mistral AI's Agents API via
+  `mistralai[agents]`. New shape in the lineup: hosted multi-tenant
+  agent service with server-managed conversations, multi-agent
+  handoffs (server/client execution), agent versioning + aliases, and
+  connectors (Mistral's MCP equivalent). Architecturally prep for
+  the future `BedrockAgentsRuntime` sibling. Full plan:
+  [`mistral-adapter-plan.md`](./mistral-adapter-plan.md).
+* **`OpenCodeServerRuntime`** — wraps the bespoke OpenCode agent
+  HTTP server (`sst/opencode` — distinct from the `OpenCodeZenRuntime`
+  / `OpenCodeGoRuntime` gateway adapters that share the brand). Lands
+  the lineup's first **model-agnostic agent adapter** — backend
+  flexibility decoupled from a model house, complementing the
+  model-house-bound options (Kimi, Mistral). Server-side sessions,
+  native SSE streaming, permission-callback and lifecycle-hook
+  surfaces fall out near-free from the existing event bus. Risks:
+  pre-1.0 SDK, server-side tool execution = no client-callback
+  transport for caller-defined Python functions (worked around via
+  in-process MCP wrapping). Full plan:
+  [`opencode-adapter-plan.md`](./opencode-adapter-plan.md).
+
+**Signal-gated post-1.0:**
+
+* **`GeminiRuntime`** — direct wrapper around `google-genai`
+  (Developer API + Vertex). Fills the obvious gap in the
+  model-house-bound matrix. Full plan:
   [`google-genai-adapter-plan.md`](./google-genai-adapter-plan.md).
 
 These adapters share a common iteration shape (ABCDEF — scaffold,
