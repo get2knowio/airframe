@@ -13,7 +13,7 @@ OpenCode Zen by changing a single config value.
 ## Quickstart
 
 ```bash
-pip install airframe-agents[claude]   # or [copilot] / [codex] / [openai-compat] / [all]
+pip install airframe-agents[claude]   # or [bedrock] / [codex] / [copilot] / [openai-compat] / [all]
 ```
 
 ```python
@@ -25,7 +25,7 @@ class Brief(BaseModel):
     risks: list[str]
 
 # Provider ID comes from config — YAML, env, CLI flag, whatever.
-provider_id = "claude"  # or github-copilot / codex / opencode-zen / opencode-go / openrouter / bedrock
+provider_id = "claude"  # or bedrock / codex / github-copilot / opencode-go / opencode-zen / openrouter
 
 cls = runtime_for(provider_id)       # discovery lookup by ID
 runtime = cls()                      # auth resolves from env / credential files
@@ -103,22 +103,22 @@ contract.
 Current snapshot (run
 `uv run python examples/probe_supports.py` for the live version):
 
-| Feature | Claude | Copilot | Codex | OpenAI-compat | Bedrock |
+| Feature | Bedrock | Claude | Codex | Copilot | OpenAI-compat |
 |---|---|---|---|---|---|
 | `STRUCTURED_OUTPUT_JSON_SCHEMA` | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `STREAMING` / `CANCEL` | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `SESSION_RESUME` | ✓ | ✓ | ✓ | ✗ | ✗ |
-| `REASONING_EFFORT` | ✓ | ✓ | ✓ | ✓ | ✓ (Anthropic) |
-| `REASONING_BUDGET_TOKENS` | ✓ | ✗ | ✗ | ✗ | ✓ (Anthropic) |
+| `SESSION_RESUME` | ✗ | ✓ | ✓ | ✓ | ✗ |
+| `REASONING_EFFORT` | ✓ (Anthropic) | ✓ | ✓ | ✓ | ✓ |
+| `REASONING_BUDGET_TOKENS` | ✓ (Anthropic) | ✓ | ✗ | ✗ | ✗ |
 | `VISION_INPUT` | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `FILE_INPUT` | ✓ | ✓ | ✓ | ✗ | ✓ (Anthropic) |
+| `FILE_INPUT` | ✓ (Anthropic) | ✓ | ✓ | ✓ | ✗ |
 | `TOOLS_FUNCTION` | ✓ | ✓ | ✗ | ✓ | ✓ |
-| `TOOLS_MCP_STDIO` / `_HTTP` | ✓ | ✓ | ✗ | ✗ | ✗ |
-| `TOOLS_MCP_SSE` | ✓ | ✗ | ✗ | ✗ | ✗ |
-| `PERMISSION_CALLBACK` | ✓ | ✓ | ✓ (session-wide) | ✗ | ✓ |
-| `LIFECYCLE_HOOKS` | ✓ (8 kinds) | ✓ (7 kinds) | ✓ (6 kinds) | ✓ (6 kinds) | ✓ (6 kinds) |
+| `TOOLS_MCP_STDIO` / `_HTTP` | ✗ | ✓ | ✗ | ✓ | ✗ |
+| `TOOLS_MCP_SSE` | ✗ | ✓ | ✗ | ✗ | ✗ |
+| `PERMISSION_CALLBACK` | ✓ | ✓ | ✓ (session-wide) | ✓ | ✗ |
+| `LIFECYCLE_HOOKS` | ✓ (6 kinds) | ✓ (8 kinds) | ✓ (6 kinds) | ✓ (7 kinds) | ✓ (6 kinds) |
 | `BUDGET_USD_CAP` | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `BUDGET_TURN_CAP` | ✓ | ✗ | ✓ | ✓ | ✓ |
+| `BUDGET_TURN_CAP` | ✓ | ✓ | ✓ | ✗ | ✓ |
 
 Capability flags are statically declared per adapter. Check
 `runtime.supports(Feature.X)` before invoking a feature; declined

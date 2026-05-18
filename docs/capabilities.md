@@ -13,26 +13,26 @@ Renaming would be a major-version break.
 
 ## Capability matrix
 
-| Feature | Claude | Copilot | Codex | OpenAI-compat | Bedrock |
+| Feature | Bedrock | Claude | Codex | Copilot | OpenAI-compat |
 |---|---|---|---|---|---|
 | `STRUCTURED_OUTPUT_JSON_SCHEMA` | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `STRUCTURED_OUTPUT_STRICT` | ✗ | ✗ | ✗ | ✗ | ✗ |
 | `STREAMING` | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `CANCEL` | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `SESSION_RESUME` | ✓ | ✓ | ✓ | ✗ | ✗ |
-| `REASONING_EFFORT` | ✓ | ✓ | ✓ | ✓ | ✓ (Anthropic-on-Bedrock) |
-| `REASONING_BUDGET_TOKENS` | ✓ | ✗ | ✗ | ✗ | ✓ (Anthropic-on-Bedrock) |
+| `SESSION_RESUME` | ✗ | ✓ | ✓ | ✓ | ✗ |
+| `REASONING_EFFORT` | ✓ (Anthropic-on-Bedrock) | ✓ | ✓ | ✓ | ✓ |
+| `REASONING_BUDGET_TOKENS` | ✓ (Anthropic-on-Bedrock) | ✓ | ✗ | ✗ | ✗ |
 | `VISION_INPUT` | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `FILE_INPUT` | ✓ | ✓ | ✓ | ✗ | ✓ (Anthropic-on-Bedrock) |
+| `FILE_INPUT` | ✓ (Anthropic-on-Bedrock) | ✓ | ✓ | ✓ | ✗ |
 | `TOOLS_FUNCTION` | ✓ | ✓ | ✗ | ✓ | ✓ |
-| `TOOLS_MCP_STDIO` | ✓ | ✓ | ✗ | ✗ | ✗ (permanent) |
-| `TOOLS_MCP_HTTP` | ✓ | ✓ | ✗ | ✗ | ✗ (permanent) |
-| `TOOLS_MCP_SSE` | ✓ | ✗ | ✗ | ✗ | ✗ (permanent) |
-| `TOOLS_MCP_IN_PROCESS` | (internal) | (internal) | ✗ | ✗ | ✗ |
-| `PERMISSION_CALLBACK` | ✓ | ✓ | ✓ (session-wide) | ✗ | ✓ |
-| `LIFECYCLE_HOOKS` | ✓ (8 kinds) | ✓ (7 kinds) | ✓ (6 kinds) | ✓ (6 kinds) | ✓ (6 kinds) |
+| `TOOLS_MCP_STDIO` | ✗ (permanent) | ✓ | ✗ | ✓ | ✗ |
+| `TOOLS_MCP_HTTP` | ✗ (permanent) | ✓ | ✗ | ✓ | ✗ |
+| `TOOLS_MCP_SSE` | ✗ (permanent) | ✓ | ✗ | ✗ | ✗ |
+| `TOOLS_MCP_IN_PROCESS` | ✗ | (internal) | ✗ | (internal) | ✗ |
+| `PERMISSION_CALLBACK` | ✓ | ✓ | ✓ (session-wide) | ✓ | ✗ |
+| `LIFECYCLE_HOOKS` | ✓ (6 kinds) | ✓ (8 kinds) | ✓ (6 kinds) | ✓ (7 kinds) | ✓ (6 kinds) |
 | `BUDGET_USD_CAP` | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `BUDGET_TURN_CAP` | ✓ | ✗ | ✓ | ✓ | ✓ |
+| `BUDGET_TURN_CAP` | ✓ | ✓ | ✓ | ✗ | ✓ |
 | `SANDBOX` / `SUBAGENTS` | ✗ (planned) | ✗ (planned) | ✗ (planned) | ✗ (planned) | ✗ (planned) |
 
 Run `uv run python examples/probe_supports.py` for the live matrix

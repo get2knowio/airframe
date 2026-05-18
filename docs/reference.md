@@ -13,13 +13,13 @@ import airframe
 
 | Class | Provider ID | See |
 |---|---|---|
-| `ClaudeCodeRuntime` | `claude` | [adapters/claude.md](./adapters/claude.md) |
-| `CopilotRuntime` | `github-copilot` | [adapters/copilot.md](./adapters/copilot.md) |
-| `CodexRuntime` | `codex` | [adapters/codex.md](./adapters/codex.md) |
-| `OpenCodeZenRuntime` | `opencode` | [adapters/opencode-zen.md](./adapters/opencode-zen.md) |
-| `OpenCodeGoRuntime` | `opencode-go` | [adapters/opencode-go.md](./adapters/opencode-go.md) |
-| `OpenRouterRuntime` | `openrouter` | [adapters/openrouter.md](./adapters/openrouter.md) |
 | `BedrockRuntime` | `bedrock` | [adapters/bedrock.md](./adapters/bedrock.md) |
+| `ClaudeCodeRuntime` | `claude` | [adapters/claude.md](./adapters/claude.md) |
+| `CodexRuntime` | `codex` | [adapters/codex.md](./adapters/codex.md) |
+| `CopilotRuntime` | `github-copilot` | [adapters/copilot.md](./adapters/copilot.md) |
+| `OpenCodeGoRuntime` | `opencode-go` | [adapters/opencode-go.md](./adapters/opencode-go.md) |
+| `OpenCodeZenRuntime` | `opencode-zen` | [adapters/opencode-zen.md](./adapters/opencode-zen.md) |
+| `OpenRouterRuntime` | `openrouter` | [adapters/openrouter.md](./adapters/openrouter.md) |
 
 Every runtime implements the `AgentRuntime` protocol.
 
@@ -463,9 +463,9 @@ Everything below is importable from `airframe`:
 
 ```
 AgentRuntime, AgentSession, AgentRuntimeError
-ClaudeCodeRuntime, CopilotRuntime, CodexRuntime,
-OpenCodeZenRuntime, OpenCodeGoRuntime, OpenRouterRuntime, BedrockRuntime
-ClaudeOptions, CopilotOptions, CodexOptions, OpenAICompatOptions, BedrockOptions, ProviderOptions
+BedrockRuntime, ClaudeCodeRuntime, CodexRuntime, CopilotRuntime,
+OpenCodeGoRuntime, OpenCodeZenRuntime, OpenRouterRuntime
+BedrockOptions, ClaudeOptions, CodexOptions, CopilotOptions, OpenAICompatOptions, ProviderOptions
 ProviderModel, RuntimeResult, ModelInfo, CostRecord
 Feature
 Prompt, PromptPart, ImageInput, FileInput

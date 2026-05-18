@@ -16,9 +16,10 @@ confirm credentials are wired and the vendor responds.
 
 | Probe | What it does |
 |---|---|
+| `examples/probe_bedrock.py` | `BedrockRuntime.execute(schema=)` round-trip |
 | `examples/probe_claude_code.py` | `ClaudeCodeRuntime.execute(schema=)` round-trip |
-| `examples/probe_copilot.py` | `CopilotRuntime.execute(schema=)` round-trip |
 | `examples/probe_codex.py` | `CodexRuntime.execute(schema=)` round-trip |
+| `examples/probe_copilot.py` | `CopilotRuntime.execute(schema=)` round-trip |
 | `examples/probe_opencode_zen.py` | `OpenCodeZenRuntime.execute(schema=)` round-trip |
 
 ```bash
