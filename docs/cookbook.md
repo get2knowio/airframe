@@ -20,6 +20,7 @@ confirm credentials are wired and the vendor responds.
 | `examples/probe_claude_code.py` | `ClaudeCodeRuntime.execute(schema=)` round-trip |
 | `examples/probe_copilot.py` | `CopilotRuntime.execute(schema=)` round-trip |
 | `examples/probe_kimi.py` | `KimiRuntime.execute()` round-trip (no `schema=` yet — see adapter docs) |
+| `examples/probe_opencode_server.py` | `OpenCodeServerRuntime` against a local `opencode serve` — plain-text execute, streaming, session resume |
 | `examples/probe_opencode_zen.py` | `OpenCodeZenRuntime.execute(schema=)` round-trip |
 
 ```bash

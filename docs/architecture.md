@@ -65,21 +65,22 @@ its lifetime.
                 │  • id: str | None  (resume)   │
                 └───────────────────────────────┘
                                 │
-        ┌─────────────┬─────────┴───┬────────────┬──────────────┐
-        ▼             ▼             ▼            ▼              ▼
-   ┌──────────┐ ┌────────────┐ ┌──────────┐ ┌──────────┐ ┌──────────────┐
-   │ Bedrock  │ │ ClaudeCode │ │ Copilot  │ │  Kimi    │ │ OpenAICompat │
-   │ +Session │ │ +Session   │ │ +Session │ │ +Session │ │ +Session     │
-   └──────────┘ └────────────┘ └──────────┘ └──────────┘ └──────────────┘
-        │             │             │            │              │
-        ▼             ▼             ▼            ▼              ▼
-   aioboto3      claude-agent-  github-      kimi-agent-   openai
-   bedrock-      sdk            copilot-sdk  sdk           chat.completions
-   runtime       (subprocess    (subprocess  (subprocess   over https
-   (Converse      + JSON-RPC)    + tool reg)  + JSONL)      ↳ subclasses:
-    API)                                                    OpenCodeGo,
-                                                            OpenCodeZen,
-                                                            OpenRouter
+  ┌──────┬───────┬───────┬───────┬──────────────┬──────────────┐
+  ▼      ▼       ▼       ▼       ▼              ▼              ▼
+┌──────┐┌──────┐┌──────┐┌──────┐┌────────────┐┌────────────┐┌──────────────┐
+│Bedrk ││Claude││Cpilot││ Kimi ││ OpenCode   ││ OpenAI     ││  (third-     │
+│+Sess ││Code+ ││+Sess ││+Sess ││ Server+    ││ Compat+    ││  party       │
+│      ││Sess  ││      ││      ││ Sess       ││ Sess       ││  entry pts)  │
+└──────┘└──────┘└──────┘└──────┘└────────────┘└────────────┘└──────────────┘
+   │       │      │       │         │              │
+   ▼       ▼      ▼       ▼         ▼              ▼
+aioboto3 claude- github- kimi-   opencode-ai     openai
+bedrock- agent-  copilot-agent-  HTTP +          chat.completions
+runtime  sdk     sdk     sdk     SSE bus         over https
+(Converse(subproc)(subproc(subproc(opencode      ↳ subclasses:
+ API)            +tool    +JSONL  serve, local    OpenCodeGo,
+                 reg)            or remote)      OpenCodeZen,
+                                                 OpenRouter
 ```
 
 `runtime.execute(prompt, ...)` is now documented sugar for
@@ -99,7 +100,7 @@ The runtime/session split draws a clean line:
 
 | Lives on the runtime | Lives on the session |
 |---|---|
-| Long-lived vendor handles (`CopilotClient`, `AsyncOpenAI`, `aioboto3` client) | Per-conversation vendor handles (`ClaudeSDKClient`, `CopilotSession`, `kimi_agent_sdk.Session`, `messages=[]` buffer) |
+| Long-lived vendor handles (`CopilotClient`, `AsyncOpenAI`, `aioboto3` client, `AsyncOpencode`) | Per-conversation vendor handles (`ClaudeSDKClient`, `CopilotSession`, `kimi_agent_sdk.Session`, `messages=[]` buffer; OpenCode Server's `id: str | None` carries the server-side session reference) |
 | Auth resolution (`api_key`, `github_token`) | The system prompt baked into the vendor session |
 | Default model | Per-turn schema (when the vendor bakes it at session-creation, the session may reconnect on schema change) |
 | Capability declarations (`supports(Feature.X)`) | `id: str | None` — the live vendor session_id for resume |
@@ -185,9 +186,10 @@ honestly emit. Claude has all 8 (native `PreCompact` + `RateLimit`
 events); Copilot drops `rate_limit`; Kimi drops `rate_limit`
 (Moonshot raises 429s as exceptions rather than wire events);
 OpenAI-compat drops both `pre_compact` and `rate_limit` since it
-synthesises events from the tool loop. Consumers
-writing portable observers can branch defensively on the per-runtime
-set.
+synthesises events from the tool loop; OpenCode Server drops the
+same two (its SDK doesn't surface distinct compaction or rate-limit
+events). Consumers writing portable observers can branch defensively
+on the per-runtime set.
 
 ## Why the protocol looks like this
 
@@ -372,6 +374,71 @@ These are the sharp edges the adapters absorb so you don't have to.
   `AWS_PROFILE` → IAM instance / ECS / Lambda / IRSA roles); region
   resolves on a separate chain (`region_name=` → `AWS_REGION` /
   `AWS_DEFAULT_REGION` → resolved profile's config).
+
+### OpenCode HTTP agent server
+
+`sst/opencode`'s bespoke REST + SSE server (`opencode serve`),
+wrapped via the official `opencode-ai` Stainless-generated Python
+SDK. Distinct from the OpenAI-compatible OpenCode adapters
+(below) — different wire format, different auth, different
+feature surface.
+
+* The agent server is **model-agnostic**: it fronts whatever
+  upstream providers `opencode auth login` has configured
+  (Anthropic, OpenAI incl. ChatGPT-OAuth subscriptions,
+  OpenRouter, Ollama, vLLM, llama.cpp, Together, Groq,
+  MoonshotAI). One adapter, many upstreams.
+* Sessions live **server-side** — `client.session.create()`
+  returns an id; airframe owns the lifecycle (delete on
+  `close()` unless `resume=` adopted an existing id). The
+  `id: str | None` on `OpenCodeServerSession` is populated.
+* Streaming: `client.event.list()` is a global SSE bus across
+  every server-side session. The adapter filters by
+  `session_id` on each event's `properties` and computes text /
+  reasoning deltas client-side against `message.part.updated`
+  snapshots (the SDK has no native delta events — every emission
+  is the full current state of the part, so airframe diffs
+  against the prior snapshot per part id).
+* Cancellation: `client.session.abort(id)` plus cancelling the
+  background `chat_task` that `stream()` dispatches. The
+  awaiter raises `RuntimeCancelledError`.
+* Resume: `runtime.session(resume=<id>)` adopts an existing
+  server-side session; airframe doesn't delete it on close (we
+  only own what we created).
+* Routing: `session.chat()` requires both `model_id` and the
+  upstream `provider_id`. `OpenCodeServerOptions(provider_id=)`
+  is the explicit lever; without it, the adapter looks up via
+  `client.app.providers()` and caches single-match results per
+  session. Ambiguous matches raise asking for explicit routing.
+* Reasoning is per-upstream: Anthropic gets
+  `{"thinking": {"type": "enabled", "budget_tokens": N}}` via
+  `extra_body`; everyone else gets
+  `{"reasoning_effort": "..."}` (OpenAI Chat-Completions shape).
+  The SDK has no first-class slot — the envelope goes through
+  `extra_body`.
+* Polymorphic prompts: `ImageInput` / `FileInput` both translate
+  to OpenCode's single `FilePartInputParam` (`{"type": "file",
+  "mime": "...", "url": "..."}`). URL passes through; bytes /
+  path encode as `data:` URLs so the server can fetch
+  out-of-band without filesystem access to the adapter's host.
+* Hooks: six of airframe's eight kinds — `session_start`,
+  `session_end`, `user_prompt_submit`, `pre_tool_use`,
+  `post_tool_use`, `tool_failure`. `pre_compact` and
+  `rate_limit` not emitted (no distinct SDK events).
+* Auth: HTTP Basic, optional on loopback (matches the server's
+  default unauthenticated-on-localhost posture). Non-loopback
+  URLs without a password raise `RuntimeAuthError` at `__init__`
+  — guardrail against an accidental
+  `opencode serve --hostname 0.0.0.0` becoming a remote-bash
+  endpoint.
+* **SDK-gap declines** (will flip True once `opencode-ai`
+  catches up): `STRUCTURED_OUTPUT_JSON_SCHEMA`, `TOOLS_FUNCTION`,
+  `TOOLS_MCP_STDIO/HTTP/SSE`, `PERMISSION_CALLBACK`. The 0.1.0a36
+  SDK has neither a `client.mcp` resource (only static
+  `opencode.json` config-file types) nor a `client.permission`
+  reply endpoint. OpenCode the *server* supports both; the
+  limitation is the Stainless-generated Python client's
+  coverage.
 
 ### OpenAI-compatible HTTP (OpenCode Go, OpenCode Zen, OpenRouter)
 

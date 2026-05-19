@@ -1,8 +1,8 @@
 """Airframe — vendor-neutral agent runtime.
 
 One protocol, pluggable adapters for Claude Code, GitHub Copilot,
-Moonshot Kimi, AWS Bedrock, and the OpenAI-compatible family
-(OpenCode Zen / Go, OpenRouter).
+Moonshot Kimi, AWS Bedrock, the OpenCode HTTP agent server, and the
+OpenAI-compatible family (OpenCode Zen / Go, OpenRouter).
 
 Quick start::
 
@@ -80,6 +80,7 @@ from airframe.options import (
     CopilotOptions,
     KimiOptions,
     OpenAICompatOptions,
+    OpenCodeServerOptions,
     ProviderOptions,
 )
 from airframe.permission import PermissionCallback, PermissionDecision, PermissionRequest
@@ -104,6 +105,7 @@ from airframe.adapters.claude_code import ClaudeCodeRuntime
 from airframe.adapters.copilot import CopilotRuntime
 from airframe.adapters.kimi import KimiRuntime
 from airframe.adapters.opencode_go import OpenCodeGoRuntime
+from airframe.adapters.opencode_server import OpenCodeServerRuntime
 from airframe.adapters.opencode_zen import OpenCodeZenRuntime
 from airframe.adapters.openrouter import OpenRouterRuntime
 
@@ -135,6 +137,8 @@ __all__ = [
     "ModelInfo",
     "OpenAICompatOptions",
     "OpenCodeGoRuntime",
+    "OpenCodeServerOptions",
+    "OpenCodeServerRuntime",
     "OpenCodeZenRuntime",
     "OpenRouterRuntime",
     "PermissionCallback",

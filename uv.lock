@@ -360,6 +360,7 @@ all = [
     { name = "claude-agent-sdk" },
     { name = "github-copilot-sdk" },
     { name = "openai", version = "2.37.0", source = { registry = "https://pypi.org/simple" } },
+    { name = "opencode-ai" },
 ]
 bedrock = [
     { name = "aioboto3" },
@@ -378,6 +379,9 @@ openai-compat = [
     { name = "openai", version = "2.14.0", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version >= '3.12' and extra == 'extra-15-airframe-agents-kimi') or (extra == 'extra-15-airframe-agents-all' and extra == 'extra-15-airframe-agents-kimi') or (extra == 'extra-15-airframe-agents-claude' and extra == 'extra-15-airframe-agents-kimi') or (extra == 'extra-15-airframe-agents-kimi' and extra == 'group-15-airframe-agents-dev') or (extra == 'extra-15-airframe-agents-kimi' and extra == 'group-15-airframe-agents-test')" },
     { name = "openai", version = "2.37.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12' or extra == 'extra-15-airframe-agents-all' or extra == 'extra-15-airframe-agents-claude' or extra != 'extra-15-airframe-agents-kimi' or (extra == 'extra-15-airframe-agents-kimi' and extra == 'group-15-airframe-agents-dev') or (extra == 'extra-15-airframe-agents-kimi' and extra == 'group-15-airframe-agents-test')" },
 ]
+opencode = [
+    { name = "opencode-ai" },
+]
 testing = [
     { name = "pytest" },
     { name = "pytest-asyncio" },
@@ -391,6 +395,7 @@ dev = [
     { name = "github-copilot-sdk" },
     { name = "mypy" },
     { name = "openai", version = "2.37.0", source = { registry = "https://pypi.org/simple" } },
+    { name = "opencode-ai" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
     { name = "pytest-cov" },
@@ -407,6 +412,7 @@ test = [
     { name = "claude-agent-sdk" },
     { name = "github-copilot-sdk" },
     { name = "openai", version = "2.37.0", source = { registry = "https://pypi.org/simple" } },
+    { name = "opencode-ai" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
     { name = "pytest-cov" },
@@ -427,11 +433,13 @@ requires-dist = [
     { name = "kimi-agent-sdk", marker = "python_full_version >= '3.12' and extra == 'kimi'", specifier = ">=0.0.5,<0.1" },
     { name = "openai", marker = "extra == 'all'", specifier = ">=1.50,<3" },
     { name = "openai", marker = "extra == 'openai-compat'", specifier = ">=1.50,<3" },
+    { name = "opencode-ai", marker = "extra == 'all'", specifier = ">=0.1.0a36,<0.2" },
+    { name = "opencode-ai", marker = "extra == 'opencode'", specifier = ">=0.1.0a36,<0.2" },
     { name = "pydantic", specifier = ">=2.0,<3" },
     { name = "pytest", marker = "extra == 'testing'", specifier = ">=8.2.0,<9" },
     { name = "pytest-asyncio", marker = "extra == 'testing'", specifier = ">=0.24.0,<1" },
 ]
-provides-extras = ["claude", "copilot", "openai-compat", "bedrock", "kimi", "testing", "all"]
+provides-extras = ["claude", "copilot", "openai-compat", "bedrock", "kimi", "opencode", "testing", "all"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -441,6 +449,7 @@ dev = [
     { name = "github-copilot-sdk", specifier = ">=0.3.0" },
     { name = "mypy", specifier = ">=1.0.0,<2" },
     { name = "openai", specifier = ">=1.50,<3" },
+    { name = "opencode-ai", specifier = ">=0.1.0a36,<0.2" },
     { name = "pytest", specifier = ">=8.2.0,<9" },
     { name = "pytest-asyncio", specifier = ">=0.24.0,<1" },
     { name = "pytest-cov", specifier = ">=4.0.0,<6" },
@@ -457,6 +466,7 @@ test = [
     { name = "claude-agent-sdk", specifier = ">=0.2.0,<1" },
     { name = "github-copilot-sdk", specifier = ">=0.3.0" },
     { name = "openai", specifier = ">=1.50,<3" },
+    { name = "opencode-ai", specifier = ">=0.1.0a36,<0.2" },
     { name = "pytest", specifier = ">=8.2.0,<9" },
     { name = "pytest-asyncio", specifier = ">=0.24.0,<1" },
     { name = "pytest-cov", specifier = ">=4.0.0,<6" },
@@ -2544,6 +2554,24 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/79/3f/aa0c1150627b4e683ae5673486b7d5cf2623a8821601863ee389e430965a/openapi_spec_validator-0.8.5.tar.gz", hash = "sha256:93b04ef5321d5866b2502371123d86333e5c1444f051d323e02525d9e83c7622", size = 1756845, upload-time = "2026-04-24T15:25:21.334Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/64/96/d7dfe1cc0be2df22d7a97ffb0f8bb00b10d92749aa6e64ffa7cc9a041580/openapi_spec_validator-0.8.5-py3-none-any.whl", hash = "sha256:3669106361856934153991e30714616a294865a33f6411a4c25d1dc2d08cfbc2", size = 50334, upload-time = "2026-04-24T15:25:19.65Z" },
+]
+
+[[package]]
+name = "opencode-ai"
+version = "0.1.0a36"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "anyio" },
+    { name = "distro" },
+    { name = "httpx" },
+    { name = "pydantic", version = "2.12.5", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version >= '3.12' and extra == 'extra-15-airframe-agents-kimi') or (extra == 'extra-15-airframe-agents-all' and extra == 'extra-15-airframe-agents-kimi') or (extra == 'extra-15-airframe-agents-claude' and extra == 'extra-15-airframe-agents-kimi') or (extra == 'extra-15-airframe-agents-kimi' and extra == 'group-15-airframe-agents-dev') or (extra == 'extra-15-airframe-agents-kimi' and extra == 'group-15-airframe-agents-test')" },
+    { name = "pydantic", version = "2.13.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12' or extra == 'extra-15-airframe-agents-all' or extra == 'extra-15-airframe-agents-claude' or extra != 'extra-15-airframe-agents-kimi' or (extra == 'extra-15-airframe-agents-kimi' and extra == 'group-15-airframe-agents-dev') or (extra == 'extra-15-airframe-agents-kimi' and extra == 'group-15-airframe-agents-test')" },
+    { name = "sniffio" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/b1/d5/51f96d49dd41c5d9996c7f03e22a760085c3589a43dacb8fa77a77c4d1cb/opencode_ai-0.1.0a36.tar.gz", hash = "sha256:3cd89e86e4a333f52999fc0df337afc9be39298c755e1a241d77dd33d7d79050", size = 108133, upload-time = "2025-08-27T02:38:58.878Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/17/af/0379ba45fd2f4c14be3b62a78714b1b34705d0472cdd8d62df47a8fb1ffd/opencode_ai-0.1.0a36-py3-none-any.whl", hash = "sha256:73bce046ec3d841dadb31bed658a5049f25cf0c2e3ebda2e2d1ff37d792ea1b5", size = 110221, upload-time = "2025-08-27T02:38:57.501Z" },
 ]
 
 [[package]]

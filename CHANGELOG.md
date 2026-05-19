@@ -6,6 +6,93 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **`OpenCodeServerRuntime`** — new adapter wrapping `sst/opencode`'s
+  HTTP agent server (`opencode serve`) via the official
+  `opencode-ai` Stainless-generated Python SDK. Distinct from the
+  existing `OpenCodeZenRuntime` / `OpenCodeGoRuntime` (those two wrap
+  OpenCode's per-token / subscription gateways at
+  `https://opencode.ai/zen/*`; this one targets the local agent
+  server). Provider ID: `"opencode"`. Lands fully wired across six
+  iterations:
+  - **A**. Protocol scaffolding (discovery, capability predicates,
+    `validate_binding`, lazy SDK import, auth chain with non-loopback
+    guardrail, `list_models` via `client.app.providers()`).
+  - **B**. SDK-backed `OpenCodeServerSession` — `execute` /
+    `stream` / `cancel` / `Session(resume=...)`; SSE bus translation
+    with client-side delta computation against
+    `message.part.updated` snapshots; SDK exception classification.
+  - **C**. Polymorphic prompts (`ImageInput` / `FileInput` →
+    OpenCode's `FilePartInputParam`; bytes/path encode as data URLs)
+    and reasoning pass-through via `extra_body` (Anthropic upstream
+    gets `{"thinking": {"type": "enabled", "budget_tokens": N}}`,
+    everyone else gets `{"reasoning_effort": "..."}`).
+  - **D**. `OpenCodeServerOptions.available_tools` /
+    `excluded_tools` → `session.chat(tools={...: True/False})`
+    allow/denylist for OpenCode's built-in tools. `tools=` (caller
+    `FunctionTool`s), `mcp_servers=`, `on_permission=` decline
+    permanently for this SDK version — opencode-ai 0.1.0a36 has no
+    `client.mcp` / `client.permission` resources. The plan's "Path 2
+    fallback".
+  - **E**. Lifecycle hooks (6 of 8 kinds — all but `pre_compact` and
+    `rate_limit`, neither of which the SDK surfaces) +
+    `_enforce_budget_pre_turn` for `max_turns` /
+    `max_budget_usd`. Cost accumulates from `AssistantMessage.cost`
+    when the upstream reports it; `BUDGET_USD_CAP` is best-effort
+    against Ollama / llama.cpp deployments that don't.
+  - **F**. `OpenCodeServerOptions` final surface (`provider_id`,
+    `available_tools`, `excluded_tools`, `working_directory`,
+    `permission_mode`, `additional_mcp_servers`,
+    `additional_request_fields`) with the
+    upstream-provider-routing dispatch. Conformance + integration
+    test wrappers, per-adapter docs page, README + auth.md +
+    capabilities.md updates.
+- **`[opencode]` pip extra** — `airframe-agents[opencode]` installs
+  `opencode-ai>=0.1.0a36,<0.2`. Tight pin against a pre-1.0 SDK; bump
+  the upper bound deliberately, not via `pip install -U`.
+- **`OpenCodeServerOptions` provider-options namespace** — seven
+  fields per the surface above. `provider_id` is the most important
+  for callers — it explicitly routes a session through a specific
+  upstream (Anthropic / OpenAI / OpenRouter / …). Without it the
+  adapter auto-discovers from `client.app.providers()`; ambiguous
+  matches raise asking for explicit routing.
+- **Subscription-routing path**: `opencode auth login openai`
+  against a ChatGPT account, then `OpenCodeServerRuntime` →
+  OpenCode → Codex chat via the user's subscription. The path the
+  removed `CodexRuntime` was originally meant to deliver, now
+  served through a maintained SDK.
+- **`RuntimeServerStartError` → `pytest.skip`** in
+  `airframe.testing.integration`. Adapters that depend on a local
+  server (today: OpenCode) skip the suite cleanly when the server
+  isn't reachable, mirroring the `RuntimeAuthError` skip pattern.
+
+### Changed
+
+- **`CLAUDE.md` reserved-IDs paragraph** — added `"opencode"` to
+  the active provider IDs list and clarified the three-way split
+  with `"opencode-zen"` / `"opencode-go"`.
+- **`docs/capabilities.md`** — new OpenCode column. Five `SDK gap`
+  entries (`STRUCTURED_OUTPUT_JSON_SCHEMA`, `TOOLS_*`,
+  `PERMISSION_CALLBACK`) document features OpenCode the *server*
+  supports but the opencode-ai 0.1.0a36 SDK hasn't surfaced yet.
+- **README provider table** — new `OpenCodeServerRuntime` row
+  alphabetised between OpenCode Go and OpenCode Zen.
+- **`docs/auth.md`** — new `## OpenCodeServerRuntime` section
+  covering the HTTP Basic chain + loopback guardrail.
+
+### SDK-gap declines (will flip True once `opencode-ai` catches up)
+
+`STRUCTURED_OUTPUT_JSON_SCHEMA`, `TOOLS_FUNCTION`,
+`TOOLS_MCP_STDIO` / `_HTTP` / `_SSE`, and `PERMISSION_CALLBACK`
+stay False on `OpenCodeServerRuntime` because the 0.1.0a36 SDK has
+neither a `client.mcp` resource nor a `client.permission`
+reply endpoint. OpenCode the *server* supports both surfaces;
+wrapping raw HTTP routes the SDK doesn't surface would violate
+CLAUDE.md's "wrap vendor SDKs, don't rewrite them" invariant. A
+follow-up iteration will flip the flags once Stainless regenerates
+the client with those routes.
+
 ---
 
 ## [0.7.0] — 2026-05-19

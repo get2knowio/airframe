@@ -83,9 +83,16 @@ Key invariants when editing:
   entry-point group for third-party adapters.
 - **Provider IDs are strict; no aliases.** `"anthropic"` and
   `"openai"` are reserved for future direct-API adapters; today's
-  subscription / gateway / managed adapters use `"claude"`,
-  `"github-copilot"`, `"opencode-zen"`, `"opencode-go"`,
-  `"openrouter"`, `"bedrock"`, and `"kimi"`. Reserved-but-not-shipped:
+  subscription / gateway / managed / agent-server adapters use
+  `"claude"`, `"github-copilot"`, `"opencode"`, `"opencode-zen"`,
+  `"opencode-go"`, `"openrouter"`, `"bedrock"`, and `"kimi"`. The
+  three `opencode*` IDs are deliberately distinct: `"opencode"`
+  wraps the local HTTP agent server (`opencode serve`),
+  `"opencode-zen"` wraps the per-token gateway at
+  `https://opencode.ai/zen/v1`, and `"opencode-go"` wraps the
+  flat-fee subscription gateway at `https://opencode.ai/zen/go/v1`
+  — different wire formats, different auth, different feature
+  surfaces. Reserved-but-not-shipped:
   `"bedrock-agents"` (future sibling wrapping `bedrock-agent-runtime`
   — Knowledge Bases, action groups; must not be folded into
   `"bedrock"`); `"moonshot"` (future OpenAI-compat sibling fronting

@@ -269,9 +269,9 @@ Messages API or `OpenAIRuntime` against the Responses API).
 
 A few existing IDs are taken by the built-in adapters:
 `"claude"`, `"github-copilot"`, `"kimi"`, `"bedrock"`,
-`"opencode-zen"`, `"opencode-go"`, `"openrouter"`. If your
-adapter targets one of these vendors with a different transport
-or auth chain, choose a discriminating suffix:
+`"opencode"`, `"opencode-zen"`, `"opencode-go"`, `"openrouter"`.
+If your adapter targets one of these vendors with a different
+transport or auth chain, choose a discriminating suffix:
 `"github-copilot-pro"`, `"opencode-zen-fork"`, etc.
 
 ## A `ProviderOptions` namespace?
@@ -284,10 +284,10 @@ in your package and accept it via
 expected_type=<Vendor>Options, adapter_label=self.label)` at the
 top of `session()` to enforce the tagged-union contract.
 
-The five built-in namespaces (`BedrockOptions`, `ClaudeOptions`,
-`CopilotOptions`, `KimiOptions`, `OpenAICompatOptions`) are
-independent — your namespace doesn't need to inherit from
-anything. The
+The six built-in namespaces (`BedrockOptions`, `ClaudeOptions`,
+`CopilotOptions`, `KimiOptions`, `OpenAICompatOptions`,
+`OpenCodeServerOptions`) are independent — your namespace doesn't
+need to inherit from anything. The
 `ProviderOptions` type alias is just a union of the in-tree
 namespaces; third-party namespaces are accepted by structural
 typing.

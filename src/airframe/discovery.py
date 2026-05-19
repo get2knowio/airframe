@@ -72,12 +72,14 @@ def _builtin_runtime_classes() -> list[type[AgentRuntime]]:
     from airframe.adapters.copilot import CopilotRuntime
     from airframe.adapters.kimi import KimiRuntime
     from airframe.adapters.opencode_go import OpenCodeGoRuntime
+    from airframe.adapters.opencode_server import OpenCodeServerRuntime
     from airframe.adapters.opencode_zen import OpenCodeZenRuntime
     from airframe.adapters.openrouter import OpenRouterRuntime
 
     return [
         ClaudeCodeRuntime,
         CopilotRuntime,
+        OpenCodeServerRuntime,
         OpenCodeZenRuntime,
         OpenCodeGoRuntime,
         OpenRouterRuntime,

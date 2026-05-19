@@ -13,27 +13,29 @@ Renaming would be a major-version break.
 
 ## Capability matrix
 
-| Feature | Bedrock | Claude | Copilot | Kimi | OpenAI-compat |
-|---|---|---|---|---|---|
-| `STRUCTURED_OUTPUT_JSON_SCHEMA` | ✓ | ✓ | ✓ | ◐ scaffolded | ✓ |
-| `STRUCTURED_OUTPUT_STRICT` | ✗ | ✗ | ✗ | ✗ | ✗ |
-| `STREAMING` | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `CANCEL` | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `SESSION_RESUME` | ✗ | ✓ | ✓ | ✓ | ✗ |
-| `REASONING_EFFORT` | ✓ (Anthropic-on-Bedrock) | ✓ | ✓ | ✓ (boolean) | ✓ |
-| `REASONING_BUDGET_TOKENS` | ✓ (Anthropic-on-Bedrock) | ✓ | ✗ | ✗ | ✗ |
-| `VISION_INPUT` | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `FILE_INPUT` | ✓ (Anthropic-on-Bedrock) | ✓ | ✓ | ✗ | ✗ |
-| `TOOLS_FUNCTION` | ✓ | ✓ | ✓ | ✗ (permanent) | ✓ |
-| `TOOLS_MCP_STDIO` | ✗ (permanent) | ✓ | ✓ | ✓ | ✗ |
-| `TOOLS_MCP_HTTP` | ✗ (permanent) | ✓ | ✓ | ✓ | ✗ |
-| `TOOLS_MCP_SSE` | ✗ (permanent) | ✓ | ✗ | ✓ | ✗ |
-| `TOOLS_MCP_IN_PROCESS` | ✗ | (internal) | (internal) | ✗ (permanent) | ✗ |
-| `PERMISSION_CALLBACK` | ✓ | ✓ | ✓ | ✓ | ✗ |
-| `LIFECYCLE_HOOKS` | ✓ (6 kinds) | ✓ (8 kinds) | ✓ (7 kinds) | ✓ (7 kinds) | ✓ (6 kinds) |
-| `BUDGET_USD_CAP` | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `BUDGET_TURN_CAP` | ✓ | ✓ | ✗ | ✓ | ✓ |
-| `SANDBOX` / `SUBAGENTS` | ✗ (planned) | ✗ (planned) | ✗ (planned) | ✗ (planned) | ✗ (planned) |
+| Feature | Bedrock | Claude | Copilot | Kimi | OpenAI-compat | OpenCode |
+|---|---|---|---|---|---|---|
+| `STRUCTURED_OUTPUT_JSON_SCHEMA` | ✓ | ✓ | ✓ | ◐ scaffolded | ✓ | ✗ (SDK gap) |
+| `STRUCTURED_OUTPUT_STRICT` | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ |
+| `STREAMING` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `CANCEL` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `SESSION_RESUME` | ✗ | ✓ | ✓ | ✓ | ✗ | ✓ |
+| `REASONING_EFFORT` | ✓ (Anthropic-on-Bedrock) | ✓ | ✓ | ✓ (boolean) | ✓ | ✓ (per-upstream) |
+| `REASONING_BUDGET_TOKENS` | ✓ (Anthropic-on-Bedrock) | ✓ | ✗ | ✗ | ✗ | ✓ (Anthropic upstream) |
+| `VISION_INPUT` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `FILE_INPUT` | ✓ (Anthropic-on-Bedrock) | ✓ | ✓ | ✗ | ✗ | ✓ |
+| `TOOLS_FUNCTION` | ✓ | ✓ | ✓ | ✗ (permanent) | ✓ | ✗ (SDK gap) |
+| `TOOLS_MCP_STDIO` | ✗ (permanent) | ✓ | ✓ | ✓ | ✗ | ✗ (SDK gap) |
+| `TOOLS_MCP_HTTP` | ✗ (permanent) | ✓ | ✓ | ✓ | ✗ | ✗ (SDK gap) |
+| `TOOLS_MCP_SSE` | ✗ (permanent) | ✓ | ✗ | ✓ | ✗ | ✗ (SDK gap) |
+| `TOOLS_MCP_IN_PROCESS` | ✗ | (internal) | (internal) | ✗ (permanent) | ✗ | ✗ (permanent) |
+| `PERMISSION_CALLBACK` | ✓ | ✓ | ✓ | ✓ | ✗ | ✗ (SDK gap) |
+| `LIFECYCLE_HOOKS` | ✓ (6 kinds) | ✓ (8 kinds) | ✓ (7 kinds) | ✓ (7 kinds) | ✓ (6 kinds) | ✓ (6 kinds) |
+| `BUDGET_USD_CAP` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ (best-effort) |
+| `BUDGET_TURN_CAP` | ✓ | ✓ | ✗ | ✓ | ✓ | ✓ |
+| `SANDBOX` / `SUBAGENTS` | ✗ (planned) | ✗ (planned) | ✗ (planned) | ✗ (planned) | ✗ (planned) | ✗ (planned) |
+
+The OpenCode "SDK gap" entries are not adapter declines — OpenCode the *server* supports those features. The opencode-ai 0.1.0a36 Python SDK simply hasn't surfaced the matching endpoints yet (no `client.mcp` / `client.permission` resources). The flags will flip True once the SDK catches up. See `docs/adapters/opencode-server.md` for the full story.
 
 Run `uv run python examples/probe_supports.py` for the live matrix
 against your installed adapters.
