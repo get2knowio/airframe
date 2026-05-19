@@ -8,8 +8,8 @@
 **One protocol, every agent SDK.** Vendor-neutral runtime for
 Python AI agents — write once against a small `AgentRuntime`
 protocol and run on AWS Bedrock, Claude Code, GitHub Copilot,
-Moonshot Kimi, OpenCode Go, OpenCode Zen, or OpenRouter by
-changing a single config value.
+Moonshot Kimi, the OpenCode HTTP agent server, OpenCode Go,
+OpenCode Zen, or OpenRouter by changing a single config value.
 
 ## Quickstart
 
@@ -26,7 +26,7 @@ class Brief(BaseModel):
     risks: list[str]
 
 # Provider ID comes from config — YAML, env, CLI flag, whatever.
-provider_id = "claude"  # or bedrock / github-copilot / kimi / opencode-go / opencode-zen / openrouter
+provider_id = "claude"  # or bedrock / github-copilot / kimi / opencode / opencode-go / opencode-zen / openrouter
 
 cls = runtime_for(provider_id)       # discovery lookup by ID
 runtime = cls()                      # auth resolves from env / credential files
@@ -71,6 +71,7 @@ is `airframe`.
 | [`CopilotRuntime`](https://github.com/get2knowio/airframe/blob/main/docs/adapters/copilot.md) | `github-copilot` | `github-copilot-sdk` | `GITHUB_TOKEN` → `gh auth` |
 | [`KimiRuntime`](https://github.com/get2knowio/airframe/blob/main/docs/adapters/kimi.md) | `kimi` | `kimi-agent-sdk` | `KIMI_API_KEY` (Python 3.12+ only; mcp-version conflict with `[claude]`) |
 | [`OpenCodeGoRuntime`](https://github.com/get2knowio/airframe/blob/main/docs/adapters/opencode-go.md) | `opencode-go` | OpenAI compatible | `OPENCODE_API_KEY` → opencode `auth.json::opencode-go.key` |
+| [`OpenCodeServerRuntime`](https://github.com/get2knowio/airframe/blob/main/docs/adapters/opencode-server.md) | `opencode` | `opencode-ai` | HTTP Basic (loopback unauthenticated; `OPENCODE_SERVER_PASSWORD` for remote) |
 | [`OpenCodeZenRuntime`](https://github.com/get2knowio/airframe/blob/main/docs/adapters/opencode-zen.md) | `opencode-zen` | OpenAI compatible | `OPENCODE_API_KEY` → opencode `auth.json::opencode.key` |
 | [`OpenRouterRuntime`](https://github.com/get2knowio/airframe/blob/main/docs/adapters/openrouter.md) | `openrouter` | OpenAI compatible | `OPENROUTER_API_KEY` |
 
@@ -171,6 +172,7 @@ pip install airframe-agents[bedrock]        # BedrockRuntime
 pip install airframe-agents[claude]         # ClaudeCodeRuntime
 pip install airframe-agents[copilot]        # CopilotRuntime
 pip install airframe-agents[kimi]           # KimiRuntime (Python 3.12+, separate venv — see note below)
+pip install airframe-agents[opencode]       # OpenCodeServerRuntime (local opencode serve)
 pip install airframe-agents[openai-compat]  # OpenCodeGoRuntime + OpenCodeZenRuntime + OpenRouterRuntime (+ future siblings)
 pip install airframe-agents[all]            # Everything except [kimi] (mcp-version conflict)
 pip install airframe-agents[testing]        # Conformance contract suite (pytest)
@@ -318,6 +320,7 @@ Full list with one-line descriptions in
   [Copilot](https://github.com/get2knowio/airframe/blob/main/docs/adapters/copilot.md) ·
   [Kimi](https://github.com/get2knowio/airframe/blob/main/docs/adapters/kimi.md) ·
   [OpenCode Go](https://github.com/get2knowio/airframe/blob/main/docs/adapters/opencode-go.md) ·
+  [OpenCode Server](https://github.com/get2knowio/airframe/blob/main/docs/adapters/opencode-server.md) ·
   [OpenCode Zen](https://github.com/get2knowio/airframe/blob/main/docs/adapters/opencode-zen.md) ·
   [OpenRouter](https://github.com/get2knowio/airframe/blob/main/docs/adapters/openrouter.md).
 - **[Writing your own adapter](https://github.com/get2knowio/airframe/blob/main/docs/adapters/third-party.md)** —

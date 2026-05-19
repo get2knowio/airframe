@@ -15,6 +15,7 @@ production (explicit constructor argument).
 | **CopilotRuntime** | `github_token=` constructor arg → `GITHUB_TOKEN` env → `GH_TOKEN` env → `use_logged_in_user=True` (`gh auth login` storage) | `airframe-agents[copilot]` |
 | **KimiRuntime** | `api_key=` constructor arg → `KIMI_API_KEY` env → SDK's own resolution | `airframe-agents[kimi]` |
 | **OpenCodeGoRuntime** | `api_key=` constructor arg → `OPENCODE_API_KEY` env → `~/.local/share/opencode/auth.json::opencode-go.key` | `airframe-agents[openai-compat]` |
+| **OpenCodeServerRuntime** | explicit `username=`/`password=` → `OPENCODE_SERVER_USERNAME`+`OPENCODE_SERVER_PASSWORD` env → unauthenticated loopback (default) | `airframe-agents[opencode]` |
 | **OpenCodeZenRuntime** | `api_key=` constructor arg → `OPENCODE_API_KEY` env → `~/.local/share/opencode/auth.json::opencode.key` | `airframe-agents[openai-compat]` |
 | **OpenRouterRuntime** | `api_key=` constructor arg → `OPENROUTER_API_KEY` env | `airframe-agents[openai-compat]` |
 
@@ -221,6 +222,61 @@ Three sources, checked in order:
 - `base_url=` overrides the gateway URL; honours `OPENCODE_GO_BASE_URL`
   env var.
 - HTTP-only — no subprocess, credential stays in-process.
+
+## OpenCodeServerRuntime
+
+```python
+from airframe import OpenCodeServerRuntime
+
+# Default: loopback unauthenticated against `opencode serve`.
+runtime = OpenCodeServerRuntime()
+
+# Remote server: credentials required.
+runtime = OpenCodeServerRuntime(
+    base_url="https://opencode.example.com",
+    username="opencode",
+    password="...",
+)
+```
+
+Two slots, checked in order:
+
+1. **Explicit constructor args** — `username=` and `password=`. Both
+   forwarded as HTTP Basic credentials. Highest precedence.
+2. **`OPENCODE_SERVER_USERNAME` + `OPENCODE_SERVER_PASSWORD` env
+   vars.** Standard env-var path. `OPENCODE_SERVER_USERNAME` defaults
+   to `"opencode"` (the server's documented default) when only the
+   password is set.
+
+When neither resolves and the URL is a **loopback** host
+(`127.0.0.1`, `localhost`, `::1`), the adapter constructs cleanly
+without credentials — matches OpenCode's default `serve` posture of
+unauthenticated-on-localhost. Non-loopback URLs without credentials
+raise `RuntimeAuthError` at `__init__()` so a misconfigured
+`opencode serve --hostname 0.0.0.0` doesn't become a remote-bash
+endpoint by accident.
+
+### Base URL resolution
+
+1. Explicit `base_url=` constructor arg.
+2. `OPENCODE_SERVER_URL` env var.
+3. Default: `http://127.0.0.1:4096`.
+
+### Notes
+
+- Distinct from `OpenCodeZenRuntime` / `OpenCodeGoRuntime` — those
+  two wrap OpenCode's OpenAI-compat *gateway* endpoints
+  (`https://opencode.ai/zen/*`). This adapter wraps the local agent
+  server you start with `opencode serve`.
+- The agent server is model-agnostic: it fronts whatever upstream
+  providers `opencode auth login` has configured (Anthropic / OpenAI
+  / OpenRouter / Ollama / vLLM / llama.cpp / Together / Groq). The
+  airframe adapter forwards routing through
+  `OpenCodeServerOptions(provider_id=)` or auto-discovers from
+  `client.app.providers()`.
+- Useful path to **subscription routing**: `opencode auth login
+  openai` against a ChatGPT account, then airframe → OpenCode →
+  Codex subscription chat via the user's account.
 
 ## OpenCodeZenRuntime
 

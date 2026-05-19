@@ -737,6 +737,7 @@ def test_session_rejects_wrong_provider_options_namespace(adapter_runtime: Any) 
         CopilotOptions,
         KimiOptions,
         OpenAICompatOptions,
+        OpenCodeServerOptions,
     )
 
     matching = {
@@ -747,6 +748,7 @@ def test_session_rejects_wrong_provider_options_namespace(adapter_runtime: Any) 
         "openrouter": OpenAICompatOptions,
         "bedrock": BedrockOptions,
         "kimi": KimiOptions,
+        "opencode": OpenCodeServerOptions,
     }
     own = matching.get(adapter_runtime.PROVIDER_ID)
     # Pick any namespace that isn't ours.
@@ -756,6 +758,7 @@ def test_session_rejects_wrong_provider_options_namespace(adapter_runtime: Any) 
         OpenAICompatOptions,
         BedrockOptions,
         KimiOptions,
+        OpenCodeServerOptions,
     )
     others = [c for c in all_namespaces if c is not own]
     assert others, "test fixture must have at least one foreign namespace"

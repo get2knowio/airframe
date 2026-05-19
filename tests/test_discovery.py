@@ -23,6 +23,7 @@ import pytest
 from airframe import discovery
 from airframe.adapters.claude_code import ClaudeCodeRuntime
 from airframe.adapters.copilot import CopilotRuntime
+from airframe.adapters.opencode_server import OpenCodeServerRuntime
 from airframe.adapters.opencode_zen import OpenCodeZenRuntime
 from airframe.discovery import list_providers, runtime_for
 
@@ -49,6 +50,7 @@ def test_list_providers_returns_all_when_installed_only_false() -> None:
         "claude",
         "github-copilot",
         "kimi",
+        "opencode",
         "opencode-zen",
         "opencode-go",
         "openrouter",
@@ -101,6 +103,14 @@ def test_list_providers_filters_when_only_kimi_installed(
     assert list_providers() == ["kimi"]
 
 
+def test_list_providers_filters_when_only_opencode_installed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The ``[opencode]`` extra brings ``opencode-ai`` — gates only ``opencode``."""
+    _stub_find_spec(monkeypatch, available={"opencode_ai"})
+    assert list_providers() == ["opencode"]
+
+
 def test_list_providers_when_nothing_installed_is_empty(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -134,6 +144,15 @@ def test_runtime_for_opencode_zen_returns_opencode_zen_runtime() -> None:
     assert runtime_for("opencode-zen") is OpenCodeZenRuntime
 
 
+def test_runtime_for_opencode_returns_opencode_server_runtime() -> None:
+    """The bare ``"opencode"`` ID now routes to the agent-server adapter.
+
+    Distinct from ``"opencode-zen"`` / ``"opencode-go"`` (the two
+    OpenAI-compat gateway adapters sharing the OpenCode brand).
+    """
+    assert runtime_for("opencode") is OpenCodeServerRuntime
+
+
 def test_runtime_for_unknown_provider_raises_value_error() -> None:
     with pytest.raises(ValueError) as excinfo:
         runtime_for("not-a-provider")
@@ -149,8 +168,6 @@ def test_runtime_for_dropped_alias_raises_value_error() -> None:
         runtime_for("anthropic")
     with pytest.raises(ValueError):
         runtime_for("copilot")  # legacy alias
-    with pytest.raises(ValueError):
-        runtime_for("opencode")  # bare alias replaced by opencode-zen / opencode-go
 
 
 def test_runtime_for_uninstalled_provider_raises_import_error(
@@ -276,6 +293,7 @@ def test_entry_point_adapter_appears_in_list_providers(
         "claude",
         "github-copilot",
         "kimi",
+        "opencode",
         "opencode-zen",
         "opencode-go",
         "openrouter",

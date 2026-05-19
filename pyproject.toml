@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "airframe-agents"
 version = "0.7.0"
-description = "Vendor-neutral agent runtime: one protocol, pluggable adapters for Claude Code, GitHub Copilot, Moonshot Kimi, AWS Bedrock, and OpenAI-compatible gateways."
+description = "Vendor-neutral agent runtime: one protocol, pluggable adapters for Claude Code, GitHub Copilot, Moonshot Kimi, AWS Bedrock, the OpenCode HTTP agent server, and OpenAI-compatible gateways."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
@@ -66,6 +66,12 @@ bedrock = ["aioboto3>=13"]
 #    environment. Users wanting both must split into separate venvs
 #    until upstream resolves.
 kimi = ['kimi-agent-sdk>=0.0.5,<0.1; python_version >= "3.12"']
+# `opencode` covers the OpenCode HTTP agent server adapter — distinct
+# from `[openai-compat]` (which serves OpenCodeZen / OpenCodeGo over
+# `https://opencode.ai/zen/*`). The Stainless-generated client is
+# pre-1.0; pin tightly so a regenerated breaking change doesn't ship
+# through us silently.
+opencode = ["opencode-ai>=0.1.0a36,<0.2"]
 # Brings in pytest for adapter authors that want to run the shared
 # `airframe.testing.contracts` conformance suite against their own
 # adapter. The main package does not depend on pytest.
@@ -89,6 +95,7 @@ all = [
     "github-copilot-sdk>=0.3.0",
     "openai>=1.50,<3",
     "aioboto3>=13",
+    "opencode-ai>=0.1.0a36,<0.2",
 ]
 
 [project.urls]
@@ -113,6 +120,7 @@ test = [
     "github-copilot-sdk>=0.3.0",
     "openai>=1.50,<3",
     "aioboto3>=13",
+    "opencode-ai>=0.1.0a36,<0.2",
 ]
 lint = [
     "ruff>=0.1.0,<1",

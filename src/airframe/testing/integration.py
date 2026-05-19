@@ -70,7 +70,11 @@ from typing import Any
 import pytest
 from pydantic import BaseModel
 
-from airframe.errors import RuntimeAuthError, RuntimeBudgetExceededError
+from airframe.errors import (
+    RuntimeAuthError,
+    RuntimeBudgetExceededError,
+    RuntimeServerStartError,
+)
 from airframe.events import TextDelta, TurnComplete
 from airframe.features import Feature
 
@@ -93,12 +97,32 @@ _PROVIDER_AUTH: dict[str, list[str]] = {
     # error and skips). AWS_REGION must also be set — Bedrock is
     # region-pinned.
     "bedrock": ["AWS_ACCESS_KEY_ID", "AWS_PROFILE"],
+    # OpenCode loopback (the documented default) needs no env-var
+    # auth — the runtime constructs cleanly without credentials when
+    # ``base_url`` resolves to a loopback host. ``_has_credentials``
+    # returns ``True`` for an empty candidate list, so the fixture
+    # only fails-to-skip when the OpenCode server itself is
+    # unreachable (we catch ``RuntimeServerStartError`` and convert
+    # to skip). For non-loopback URLs callers set
+    # ``OPENCODE_SERVER_PASSWORD``.
+    "opencode": [],
 }
 
 
 def _has_credentials(provider_id: str) -> bool:
-    """Best-effort env-var check; file-based auth resolves at call time."""
-    candidates = _PROVIDER_AUTH.get(provider_id, [])
+    """Best-effort env-var check; file-based auth resolves at call time.
+
+    A provider entry with an empty candidate list is treated as
+    "no env-var auth needed" (e.g., ``"opencode"`` against a
+    loopback server) and returns ``True``. A provider not listed at
+    all returns ``False`` so unknown adapters err on the side of
+    skipping rather than running unauthorised.
+    """
+    if provider_id not in _PROVIDER_AUTH:
+        return False
+    candidates = _PROVIDER_AUTH[provider_id]
+    if not candidates:
+        return True
     return any(os.environ.get(v) for v in candidates)
 
 
@@ -146,7 +170,7 @@ async def test_integration_schema_round_trip(adapter_runtime: Any) -> None:
             "Reply with a one-sentence summary of Python.",
             schema=_Brief,
         )
-    except RuntimeAuthError as exc:
+    except (RuntimeAuthError, RuntimeServerStartError) as exc:
         pytest.skip(f"auth failed: {exc}")
     assert result.structured is not None
     assert "summary" in result.structured
@@ -160,7 +184,7 @@ async def test_integration_plain_text_execute(adapter_runtime: Any) -> None:
         pytest.skip(f"no credentials for {adapter_runtime.PROVIDER_ID!r}")
     try:
         result = await adapter_runtime.execute("Say hello.")
-    except RuntimeAuthError as exc:
+    except (RuntimeAuthError, RuntimeServerStartError) as exc:
         pytest.skip(f"auth failed: {exc}")
     assert result.structured is None
     assert isinstance(result.text, str)
@@ -175,7 +199,7 @@ async def test_integration_list_models(adapter_runtime: Any) -> None:
         pytest.skip(f"no credentials for {adapter_runtime.PROVIDER_ID!r}")
     try:
         models = await adapter_runtime.list_models()
-    except RuntimeAuthError as exc:
+    except (RuntimeAuthError, RuntimeServerStartError) as exc:
         pytest.skip(f"auth failed: {exc}")
     assert models
     for m in models:
@@ -203,7 +227,7 @@ async def test_integration_stream_yields_text_then_turn_complete(
     try:
         async for ev in sess.stream("Reply with the single word: ping"):
             events.append(ev)
-    except RuntimeAuthError as exc:
+    except (RuntimeAuthError, RuntimeServerStartError) as exc:
         pytest.skip(f"auth failed: {exc}")
     finally:
         await sess.close()
@@ -228,7 +252,7 @@ async def test_integration_thinking_round_trip(adapter_runtime: Any) -> None:
     sess = adapter_runtime.session()
     try:
         result = await sess.execute("What is 2+2?", thinking="low")
-    except RuntimeAuthError as exc:
+    except (RuntimeAuthError, RuntimeServerStartError) as exc:
         pytest.skip(f"auth failed: {exc}")
     finally:
         await sess.close()
@@ -273,7 +297,7 @@ async def test_integration_function_tool_round_trip(adapter_runtime: Any) -> Non
         result = await sess.execute(
             "Use the `add` tool to compute 17 + 25 and reply with the number only.",
         )
-    except RuntimeAuthError as exc:
+    except (RuntimeAuthError, RuntimeServerStartError) as exc:
         pytest.skip(f"auth failed: {exc}")
     finally:
         await sess.close()
@@ -330,7 +354,7 @@ async def test_integration_permission_callback_fires(adapter_runtime: Any) -> No
     sess = adapter_runtime.session(on_permission=_ApproveAll(), tools=[tool])
     try:
         await sess.execute("Call the `noop` tool and reply with its output.")
-    except RuntimeAuthError as exc:
+    except (RuntimeAuthError, RuntimeServerStartError) as exc:
         pytest.skip(f"auth failed: {exc}")
     finally:
         await sess.close()
@@ -357,7 +381,7 @@ async def test_integration_hook_observer_receives_events(adapter_runtime: Any) -
     sess = adapter_runtime.session(on_event=_observer)
     try:
         await sess.execute("Say hi.")
-    except RuntimeAuthError as exc:
+    except (RuntimeAuthError, RuntimeServerStartError) as exc:
         pytest.skip(f"auth failed: {exc}")
     finally:
         await sess.close()
@@ -385,7 +409,7 @@ async def test_integration_budget_usd_cap_trips(adapter_runtime: Any) -> None:
         # the test skips when the first turn's cost stays at 0.
         try:
             r1 = await sess.execute("Say one short word.", max_budget_usd=0.000001)
-        except RuntimeAuthError as exc:
+        except (RuntimeAuthError, RuntimeServerStartError) as exc:
             pytest.skip(f"auth failed: {exc}")
         if (r1.cost.cost_usd or 0.0) <= 0.0:
             pytest.skip("vendor reported zero cost; cap can't trip on this binding")

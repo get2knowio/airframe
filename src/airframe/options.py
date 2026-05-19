@@ -6,7 +6,7 @@ Vercel AI SDK's ``providerOptions`` pattern and the Spring Cloud
 Stream binder namespace convention: portable kwargs on the protocol
 core, typed-but-optional per-vendor namespaces for everything else.
 
-The five namespaces:
+The six namespaces:
 
 * :class:`ClaudeOptions` — knobs honoured by
   :class:`airframe.adapters.claude_code.ClaudeCodeRuntime`.
@@ -23,6 +23,11 @@ The five namespaces:
   hint, and a pass-through to Converse's
   ``additionalModelRequestFields`` for vendor-specific knobs
   airframe doesn't expose first-class).
+* :class:`OpenCodeServerOptions` — knobs honoured by
+  :class:`airframe.adapters.opencode_server.OpenCodeServerRuntime`
+  (upstream provider routing, server-side tool allow/denylists,
+  server-filesystem working directory, permission posture, MCP
+  extras, request-body pass-through).
 
 Each dataclass is :func:`frozen <dataclasses.dataclass>` /
 ``slots=True`` — same discipline as :class:`~airframe.cost.CostRecord`,
@@ -278,11 +283,78 @@ class KimiOptions:
     additional_config_fields: dict[str, Any] | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class OpenCodeServerOptions:
+    """Vendor-specific options for :class:`OpenCodeServerRuntime`.
+
+    The OpenCode agent server fronts whatever upstream providers
+    ``opencode auth login`` has configured — Anthropic, OpenAI
+    (including ChatGPT-OAuth subscriptions), OpenRouter, Ollama,
+    vLLM, llama.cpp, Together, Groq. These options expose the
+    server-side knobs that vary per session.
+
+    Fields land progressively across iterations B-F per
+    ``dev-docs/opencode-adapter-plan.md``. Iteration A defines the
+    full field set so the tagged-union shape is stable; subsequent
+    iterations wire each field through to the matching server-side
+    knob. Passing :class:`OpenCodeServerOptions()` is a no-op.
+
+    Attributes:
+        provider_id: Upstream provider to route this session through
+            (``"anthropic"``, ``"openai"``, ``"openrouter"``,
+            ``"ollama"``, …). ``None`` defers to the server's
+            configured routing. Distinct from the airframe-side
+            :attr:`~airframe.adapters.opencode_server.OpenCodeServerRuntime.PROVIDER_ID`
+            (which is always ``"opencode"``); this picks which
+            backend the OpenCode server itself calls.
+        available_tools: Allowlist of OpenCode built-in tool names
+            (``"bash"``, ``"read"``, ``"write"``, ``"edit"``, …) the
+            model may invoke. ``None`` means "no allowlist — server
+            defaults apply"; empty tuple means "no built-in tools".
+            Lands on the ``POST /session`` tool-filter slot.
+        excluded_tools: Denylist applied after ``available_tools``.
+        working_directory: Override the directory the server-side
+            tools (bash, write, edit) operate in. **Server-side path**
+            — interpreted relative to the OpenCode server's filesystem,
+            *not* the adapter's. When the server runs in a container
+            or on a remote host, edits land where the server sees them.
+        permission_mode: Coarse-grained default forwarded to
+            ``POST /session``. Accepts ``"default"`` /
+            ``"accept_edits"`` / ``"bypass"`` per OpenCode's own
+            documented values. A per-call
+            :class:`~airframe.permission.PermissionCallback` (wired
+            in Iteration D) overrides this default per request.
+        additional_mcp_servers: Extra raw MCP-config entries passed
+            verbatim to the server beyond what airframe synthesises
+            from :class:`~airframe.tools.McpServerRef`. Use this slot
+            for OpenCode-specific knobs that the portable ref doesn't
+            surface (per-server timeouts, custom auth shapes).
+        additional_request_fields: Pass-through merged into the
+            request body for vendor-specific knobs airframe doesn't
+            expose first-class. Examples: per-provider reasoning
+            envelopes, sampling overrides, experimental flags.
+            Field validity is the caller's problem.
+    """
+
+    provider_id: str | None = None
+    available_tools: tuple[str, ...] | None = None
+    excluded_tools: tuple[str, ...] = ()
+    working_directory: str | None = None
+    permission_mode: str | None = None
+    additional_mcp_servers: tuple[Any, ...] = ()
+    additional_request_fields: dict[str, Any] | None = None
+
+
 #: Tagged union of provider-specific options. Adapters
 #: :func:`isinstance`-match to decide whether they accept the value
 #: passed in. No common base class on purpose — see module docstring.
 ProviderOptions = (
-    ClaudeOptions | CopilotOptions | OpenAICompatOptions | BedrockOptions | KimiOptions
+    ClaudeOptions
+    | CopilotOptions
+    | OpenAICompatOptions
+    | BedrockOptions
+    | KimiOptions
+    | OpenCodeServerOptions
 )
 
 
@@ -292,5 +364,6 @@ __all__ = [
     "CopilotOptions",
     "KimiOptions",
     "OpenAICompatOptions",
+    "OpenCodeServerOptions",
     "ProviderOptions",
 ]
