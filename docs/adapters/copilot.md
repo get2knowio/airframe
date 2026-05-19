@@ -98,8 +98,7 @@ picks:
 - `gpt-5-mini` — default; balanced cost / capability.
 - `gpt-5` — full-strength frontier.
 - `o5-preview` — reasoning-optimised.
-- `gpt-5-codex` — coding tasks (different from Codex CLI's
-  `gpt-5-codex` despite shared name).
+- `gpt-5-codex` — coding tasks.
 
 **Claude models are rejected.** `validate_binding()` returns False
 for any `model_id` starting with `claude-` — Claude via Copilot

@@ -12,8 +12,8 @@ The five namespaces:
   :class:`airframe.adapters.claude_code.ClaudeCodeRuntime`.
 * :class:`CopilotOptions` — knobs honoured by
   :class:`airframe.adapters.copilot.CopilotRuntime`.
-* :class:`CodexOptions` — knobs honoured by
-  :class:`airframe.adapters.codex.CodexRuntime`.
+* :class:`KimiOptions` — knobs honoured by
+  :class:`airframe.adapters.kimi.KimiRuntime`.
 * :class:`OpenAICompatOptions` — knobs honoured by every subclass of
   :class:`airframe.adapters.openai_compatible.OpenAICompatibleRuntime`
   (today: :class:`~airframe.adapters.opencode_zen.OpenCodeZenRuntime`).
@@ -119,33 +119,6 @@ class CopilotOptions:
     excluded_tools: tuple[str, ...] = ()
     skill_directories: tuple[str, ...] = ()
     working_directory: str | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class CodexOptions:
-    """Vendor-specific options for :class:`CodexRuntime`.
-
-    Attributes:
-        working_directory: Override for the Codex CLI's working
-            directory. ``None`` inherits the parent process's cwd.
-            Maps to :attr:`ThreadOptions.working_directory`.
-        additional_directories: Extra directories Codex is allowed
-            to read from / write into (subject to ``sandbox_mode``).
-            Maps to :attr:`ThreadOptions.additional_directories`.
-        network_access_enabled: When ``True``, Codex's sandboxed
-            shell may make outbound network calls. ``False``
-            (default) matches Codex CLI behaviour. Maps to
-            :attr:`ThreadOptions.network_access_enabled`.
-        web_search_enabled: When ``True``, the model may invoke
-            Codex's built-in web-search tool. ``False`` (default)
-            keeps web search off. Maps to
-            :attr:`ThreadOptions.web_search_enabled`.
-    """
-
-    working_directory: str | None = None
-    additional_directories: tuple[str, ...] = ()
-    network_access_enabled: bool = False
-    web_search_enabled: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -309,19 +282,13 @@ class KimiOptions:
 #: :func:`isinstance`-match to decide whether they accept the value
 #: passed in. No common base class on purpose — see module docstring.
 ProviderOptions = (
-    ClaudeOptions
-    | CopilotOptions
-    | CodexOptions
-    | OpenAICompatOptions
-    | BedrockOptions
-    | KimiOptions
+    ClaudeOptions | CopilotOptions | OpenAICompatOptions | BedrockOptions | KimiOptions
 )
 
 
 __all__ = [
     "BedrockOptions",
     "ClaudeOptions",
-    "CodexOptions",
     "CopilotOptions",
     "KimiOptions",
     "OpenAICompatOptions",

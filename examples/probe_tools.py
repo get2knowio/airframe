@@ -10,7 +10,8 @@ prints the :class:`~airframe.events.ToolCallStart` /
 
 * The runtime declares
   :data:`~airframe.features.Feature.TOOLS_FUNCTION` (Claude /
-  Copilot / OpenCode Zen all do after Phase 3; Codex declines).
+  Copilot / OpenCode Zen / OpenRouter all do; Kimi declines and
+  points at ``mcp_servers=`` instead).
 * ``session(tools=[...])`` accepts the registration without raising.
 * The model actually calls the tool — at least one
   ``ToolCallStart`` event fires.
@@ -32,7 +33,7 @@ Usage::
     uv run python examples/probe_tools.py --provider claude
     uv run python examples/probe_tools.py --provider github-copilot
     uv run python examples/probe_tools.py --provider opencode
-    uv run python examples/probe_tools.py --provider codex     # declines
+    uv run python examples/probe_tools.py --provider kimi      # declines
 
 Defaults to ``opencode-zen`` (OpenAI-compat) since it has the simplest
 auth (single API key) and the client-side tool-loop is the most
@@ -133,7 +134,7 @@ async def main() -> int:
             file=sys.stderr,
         )
         print(
-            "Install one with: pip install airframe-agents[claude|copilot|codex|openai-compat]",
+            "Install one with: pip install airframe-agents[claude|copilot|kimi|openai-compat]",
             file=sys.stderr,
         )
         return 1
@@ -142,7 +143,7 @@ async def main() -> int:
 
     print(f"function-tools probe — provider={args.provider}")
     if not runtime.supports(Feature.TOOLS_FUNCTION):
-        # Codex lands here. The decline message is the deliverable —
+        # Kimi lands here. The decline message is the deliverable —
         # surface it verbatim so the probe doubles as documentation.
         print(
             f"  {type(runtime).__name__} does NOT declare "

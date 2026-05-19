@@ -13,7 +13,7 @@ server exposes, and prints the
 
 * The runtime declares the matching
   :data:`~airframe.features.Feature.TOOLS_MCP_STDIO` flag (Claude
-  + Copilot do after Phase 4; Codex + OpenAI-compat decline).
+  / Copilot / Kimi accept; OpenAI-compat declines).
 * ``session(mcp_servers=[...])`` accepts the registration.
 * If the model invokes a server tool, the matching
   ``ToolCallStart`` / ``ToolCallResult`` events fire with the
@@ -26,14 +26,13 @@ Usage::
     uv run python examples/probe_mcp.py
     uv run python examples/probe_mcp.py --provider claude
     uv run python examples/probe_mcp.py --provider github-copilot
-    uv run python examples/probe_mcp.py --provider codex     # declines
+    uv run python examples/probe_mcp.py --provider kimi
     uv run python examples/probe_mcp.py --provider opencode  # declines
     uv run python examples/probe_mcp.py --transport http --url https://...
 
 Defaults to ``claude`` (broadest MCP transport coverage: stdio + http
-+ sse). Codex and OpenAI-compat surface their permanent declines
-verbatim — same probe-as-docs pattern Phase 3 used for Codex's
-``tools=`` decline.
++ sse). OpenAI-compat surfaces its permanent decline verbatim — the
+probe doubles as documentation for both supported and declined paths.
 
 Requires whatever auth the chosen provider's adapter expects. The
 default stdio probe additionally requires ``npx`` (Node 18+) on
@@ -153,7 +152,7 @@ async def main() -> int:
             file=sys.stderr,
         )
         print(
-            "Install one with: pip install airframe-agents[claude|copilot|codex|openai-compat]",
+            "Install one with: pip install airframe-agents[claude|copilot|kimi|openai-compat]",
             file=sys.stderr,
         )
         return 1
@@ -164,10 +163,10 @@ async def main() -> int:
 
     print(f"mcp probe — provider={args.provider} transport={args.transport}")
     if not runtime.supports(transport_feature):
-        # Codex + OpenAI-compat land here (every transport). On
-        # Copilot, the SSE branch also lands here. The decline message
-        # is the deliverable — surface it verbatim so the probe
-        # doubles as documentation for the workaround.
+        # OpenAI-compat lands here (every transport). On Copilot, the
+        # SSE branch also lands here. The decline message is the
+        # deliverable — surface it verbatim so the probe doubles as
+        # documentation for the workaround.
         print(
             f"  {type(runtime).__name__} does NOT declare "
             f"Feature.{transport_feature.name} — expect "

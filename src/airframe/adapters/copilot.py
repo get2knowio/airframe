@@ -447,7 +447,7 @@ class CopilotRuntime(AgentRuntime):
             provider_options: Optional :class:`CopilotOptions` namespace
                 (empty as of v0.5.0 — the namespace is held open for
                 additive field growth). Passing
-                :class:`ClaudeOptions` / :class:`CodexOptions` /
+                :class:`ClaudeOptions` /
                 :class:`OpenAICompatOptions` here raises
                 :class:`UnsupportedFeatureError`.
         """

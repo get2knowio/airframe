@@ -18,7 +18,7 @@ Usage::
     uv run python examples/probe_budget.py
     uv run python examples/probe_budget.py --provider claude
     uv run python examples/probe_budget.py --provider github-copilot
-    uv run python examples/probe_budget.py --provider codex
+    uv run python examples/probe_budget.py --provider kimi
     uv run python examples/probe_budget.py --provider opencode
 
 Defaults to ``claude`` (broadest budget surface — both caps).
@@ -74,7 +74,15 @@ def _print_matrix() -> None:
     print("\nBudget-capability matrix (Phase 5 Iteration D):")
     print("  Adapter             | BUDGET_USD | BUDGET_TURN")
     print("  --------------------|------------|------------")
-    for pid in ("claude", "github-copilot", "codex", "opencode-zen", "opencode-go", "openrouter"):
+    for pid in (
+        "claude",
+        "github-copilot",
+        "kimi",
+        "bedrock",
+        "opencode-zen",
+        "opencode-go",
+        "openrouter",
+    ):
         try:
             cls = runtime_for(pid)
             usd = Feature.BUDGET_USD_CAP in cls.SUPPORTED_FEATURES
@@ -212,7 +220,7 @@ async def main() -> int:
             file=sys.stderr,
         )
         print(
-            "Install one with: pip install airframe-agents[claude|copilot|codex|openai-compat]",
+            "Install one with: pip install airframe-agents[claude|copilot|kimi|openai-compat]",
             file=sys.stderr,
         )
         return 1

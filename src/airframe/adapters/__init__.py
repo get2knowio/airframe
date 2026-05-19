@@ -9,13 +9,11 @@ top-level :mod:`airframe` re-exports each adapter for convenience.
 from __future__ import annotations
 
 from airframe.adapters.claude_code import ClaudeCodeRuntime
-from airframe.adapters.codex import CodexRuntime
 from airframe.adapters.copilot import CopilotRuntime
 from airframe.adapters.opencode_zen import OpenCodeZenRuntime
 
 __all__ = [
     "ClaudeCodeRuntime",
-    "CodexRuntime",
     "CopilotRuntime",
     "OpenCodeZenRuntime",
 ]

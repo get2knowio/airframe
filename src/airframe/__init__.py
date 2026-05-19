@@ -1,7 +1,8 @@
 """Airframe — vendor-neutral agent runtime.
 
 One protocol, pluggable adapters for Claude Code, GitHub Copilot,
-OpenAI Codex, and OpenCode Zen.
+Moonshot Kimi, AWS Bedrock, and the OpenAI-compatible family
+(OpenCode Zen / Go, OpenRouter).
 
 Quick start::
 
@@ -76,7 +77,6 @@ from airframe.models import (
 from airframe.options import (
     BedrockOptions,
     ClaudeOptions,
-    CodexOptions,
     CopilotOptions,
     KimiOptions,
     OpenAICompatOptions,
@@ -93,15 +93,14 @@ from airframe.protocol import (
 from airframe.thinking import ReasoningEffort, ThinkingMode
 from airframe.tools import FunctionTool, McpServerRef
 
-__version__ = "0.6.2"
+__version__ = "0.7.0"
 
 # Adapter imports live at the top level for ergonomic use, but the
 # adapter modules themselves lazy-import their underlying SDK so
-# `import airframe` doesn't pull in claude-agent-sdk / codex / copilot
-# / openai unless the consumer actually instantiates the adapter.
+# `import airframe` doesn't pull in claude-agent-sdk / copilot /
+# openai unless the consumer actually instantiates the adapter.
 from airframe.adapters.bedrock import BedrockRuntime
 from airframe.adapters.claude_code import ClaudeCodeRuntime
-from airframe.adapters.codex import CodexRuntime
 from airframe.adapters.copilot import CopilotRuntime
 from airframe.adapters.kimi import KimiRuntime
 from airframe.adapters.opencode_go import OpenCodeGoRuntime
@@ -121,8 +120,6 @@ __all__ = [
     "CAPABILITY_VISION",
     "ClaudeCodeRuntime",
     "ClaudeOptions",
-    "CodexOptions",
-    "CodexRuntime",
     "CopilotOptions",
     "CopilotRuntime",
     "CostRecord",

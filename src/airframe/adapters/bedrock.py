@@ -1060,8 +1060,8 @@ class BedrockSession:
         * ``"deny"`` → skip the handler; return a denial message.
         * ``"defer"`` → log at debug and fall through to allow.
           Bedrock has no native permission fallback policy to defer
-          to (unlike Claude / Codex), so silently allowing keeps the
-          contract symmetric with the OpenAI-compat path.
+          to (unlike Claude's per-call channel), so silently allowing
+          keeps the contract symmetric with the OpenAI-compat path.
         """
         if self._on_permission is not None:
             try:

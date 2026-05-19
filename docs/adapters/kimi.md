@@ -119,9 +119,8 @@ against). Pricing comes from the in-tree `_KIMI_PRICING` table
 - `kimi-k2-thinking` — slower / cheaper.
 
 **Only `kimi-*` model IDs accepted.** `validate_binding()` returns
-False for anything else (analogous to how Copilot rejects `claude-*`
-and Codex rejects `claude-*`). Foreign provider IDs return False
-rather than raise.
+False for anything else (analogous to how Copilot rejects
+`claude-*`). Foreign provider IDs return False rather than raise.
 
 ## Structured output
 

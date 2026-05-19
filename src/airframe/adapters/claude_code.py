@@ -510,8 +510,8 @@ class ClaudeCodeRuntime(AgentRuntime):
                   :attr:`ClaudeAgentOptions.strict_mcp_config`.
 
                 Passing :class:`CopilotOptions` /
-                :class:`CodexOptions` / :class:`OpenAICompatOptions`
-                here raises :class:`UnsupportedFeatureError`.
+                :class:`OpenAICompatOptions` here raises
+                :class:`UnsupportedFeatureError`.
         """
         _check_tools_supported(
             tools,

@@ -4,7 +4,7 @@ Think of airframe as JDBC for LLM agent SDKs: one interface, many
 drivers. Agents talk to LLMs through a thin :class:`AgentRuntime`
 protocol; implementations live under :mod:`airframe.adapters` and
 wrap each vendor's preferred Python SDK (Claude Agent SDK, GitHub
-Copilot Python SDK, OpenAI Codex SDK, OpenCode Zen HTTP, etc.). A
+Copilot Python SDK, OpenCode Zen HTTP, etc.). A
 consumer receives an :class:`AgentRuntime` at construction and never
 sees a vendor-specific type at the call site.
 
@@ -65,7 +65,7 @@ class ProviderModel:
 
     Attributes:
         provider_id: Canonical adapter identifier — ``"claude"``,
-            ``"github-copilot"``, ``"codex"``, ``"opencode-zen"``,
+            ``"github-copilot"``, ``"kimi"``, ``"opencode-zen"``,
             ``"opencode-go"``, etc.
         model_id: The model identifier the vendor recognises
             (e.g. ``"claude-haiku-4-5"``, ``"gpt-5-mini"``).
@@ -122,8 +122,8 @@ class AgentRuntime(Protocol):
       Claude family via ``claude-agent-sdk``; subscription auth.
     * :class:`airframe.adapters.copilot.CopilotRuntime` —
       Copilot via ``github-copilot-sdk``; GitHub Copilot subscription.
-    * :class:`airframe.adapters.codex.CodexRuntime` — OpenAI
-      codex via ``openai-codex-sdk``; ChatGPT Plus / OpenAI API.
+    * :class:`airframe.adapters.kimi.KimiRuntime` — Moonshot Kimi
+      via ``kimi-agent-sdk``; ``KIMI_API_KEY``.
     * :class:`airframe.adapters.opencode_zen.OpenCodeZenRuntime`
       — opencode-go Zen gateway via HTTP; opencode subscription.
 
@@ -167,8 +167,7 @@ class AgentRuntime(Protocol):
                 response into a schema-conforming dict on
                 :attr:`RuntimeResult.structured`. Implementations use
                 the vendor's native structured-output mechanism (a
-                forced tool call for Claude / Codex / Copilot, native
-                JSON-schema mode for the Codex CLI,
+                forced tool call for Claude / Copilot,
                 ``response_format=json_schema`` for OpenCode Zen).
                 ``None`` means plain text — text answer on
                 :attr:`RuntimeResult.text`, ``structured=None``.
@@ -283,8 +282,8 @@ class AgentRuntime(Protocol):
           :class:`TypeError` if requested before a client is built.
         * :class:`CopilotRuntime` accepts ``unwrap(CopilotClient)`` and
           ``unwrap(CopilotSession)``.
-        * :class:`CodexRuntime` accepts ``unwrap(Codex)`` and
-          ``unwrap(Thread)``.
+        * :class:`KimiRuntime` accepts ``unwrap(kimi_agent_sdk.Session)``
+          on the session (after first ``execute()``).
         * :class:`OpenAICompatibleRuntime` accepts ``unwrap(AsyncOpenAI)``.
 
         Every adapter additionally accepts ``unwrap(type(self))`` and
@@ -390,8 +389,9 @@ class AgentRuntime(Protocol):
                 :data:`~airframe.features.Feature.TOOLS_FUNCTION`
                 True on every adapter that natively supports
                 function tools (Claude, Copilot, OpenAI-compat).
-                Codex declines — its Python SDK has no tool
-                registration channel. Adapters whose
+                Kimi declines permanently — its Python SDK has no
+                Python-callable tool channel; wrap as MCP via
+                ``mcp_servers=`` instead. Adapters whose
                 ``TOOLS_FUNCTION`` flag is False raise
                 :class:`~airframe.errors.UnsupportedFeatureError` on
                 a non-None ``tools=``.
@@ -403,8 +403,8 @@ class AgentRuntime(Protocol):
                 :data:`~airframe.features.Feature.TOOLS_MCP_STDIO` /
                 :data:`~airframe.features.Feature.TOOLS_MCP_HTTP` /
                 :data:`~airframe.features.Feature.TOOLS_MCP_SSE`
-                flags True per adapter (Claude — all three; Copilot
-                — stdio + http; Codex + OpenAI-compat decline all).
+                flags True per adapter (Claude / Kimi — all three;
+                Copilot — stdio + http; OpenAI-compat declines all).
                 Adapters whose transport flag is False raise
                 :class:`~airframe.errors.UnsupportedFeatureError` on
                 a ref of that transport. ``tools=`` and
@@ -419,7 +419,7 @@ class AgentRuntime(Protocol):
                 returned :class:`~airframe.permission.PermissionDecision`
                 to the vendor's permission channel. Phase 5 flips
                 :data:`~airframe.features.Feature.PERMISSION_CALLBACK`
-                True on Claude / Copilot / Codex; OpenAI-compat
+                True on Claude / Copilot / Kimi; OpenAI-compat
                 declines permanently (Chat Completions has no
                 permission wire shape).
             on_event: Optional ``Callable[[HookEvent], None]`` that
@@ -464,9 +464,9 @@ class AgentSession(Protocol):
 
     The shape mirrors the per-vendor session abstractions airframe
     wraps — Claude's :class:`ClaudeSDKClient` lifecycle, Copilot's
-    :class:`CopilotSession`, Codex's :class:`Thread`, and the
-    client-side ``messages=[]`` buffer used for OpenAI-compatible
-    HTTP — collapsed onto one neutral interface.
+    :class:`CopilotSession`, Kimi's :class:`kimi_agent_sdk.Session`,
+    and the client-side ``messages=[]`` buffer used for
+    OpenAI-compatible HTTP — collapsed onto one neutral interface.
 
     **Concurrency model (ADR-004).** A runtime owns at most one
     *active* session at a time. ``runtime.session()`` returning a

@@ -1,10 +1,10 @@
 """Shared :class:`AgentSession` helpers used across every built-in adapter.
 
-All four built-in adapters ship bespoke per-vendor
-:class:`~airframe.protocol.AgentSession` implementations
+Each built-in adapter ships a bespoke per-vendor
+:class:`~airframe.protocol.AgentSession` implementation
 (:class:`~airframe.adapters.claude_code.ClaudeCodeSession`,
 :class:`~airframe.adapters.copilot.CopilotAgentSession`,
-:class:`~airframe.adapters.codex.CodexAgentSession`,
+:class:`~airframe.adapters.kimi.KimiSession`,
 :class:`~airframe.adapters.openai_compatible.OpenAICompatibleSession`).
 This module contains the cross-cutting helpers they share:
 
@@ -176,9 +176,10 @@ def _check_tools_supported(
     """Gate ``session(tools=...)`` against the adapter's capability flag.
 
     Phase 3 Iteration A scaffolds the ``tools=`` kwarg on every
-    :meth:`AgentRuntime.session` signature but defers the per-adapter
-    wiring to Iterations B (OpenAI-compat), C (Claude + Copilot), and
-    D (Codex declination). Until each adapter flips
+    :meth:`AgentRuntime.session` signature; the per-adapter wiring
+    landed adapter-by-adapter (OpenAI-compat first, then Claude /
+    Copilot natively, Kimi declines permanently pointing at MCP).
+    Until each adapter flips
     :data:`~airframe.features.Feature.TOOLS_FUNCTION` True, a non-None
     ``tools=`` raises here so consumer code gets a clear capability
     decline rather than a silently-ignored kwarg.
@@ -269,10 +270,10 @@ def _check_mcp_servers_supported(
     """Gate ``session(mcp_servers=...)`` against per-transport capability flags.
 
     Phase 4 Iteration A scaffolds the ``mcp_servers=`` kwarg on every
-    :meth:`AgentRuntime.session` signature but defers the per-adapter
-    wiring to Iterations B (Claude — all three transports), C (Copilot
-    — stdio + http; SSE declines), and D (Codex + OpenAI-compat
-    permanent declines). Until each adapter flips the matching
+    :meth:`AgentRuntime.session` signature; per-adapter wiring landed
+    iteratively (Claude / Kimi — all three transports; Copilot — stdio
+    + http with SSE declined; OpenAI-compat declines permanently).
+    Until each adapter flips the matching
     :data:`~airframe.features.Feature.TOOLS_MCP_STDIO` /
     :data:`~airframe.features.Feature.TOOLS_MCP_HTTP` /
     :data:`~airframe.features.Feature.TOOLS_MCP_SSE` True, a non-empty
@@ -327,10 +328,9 @@ def _check_permission_supported(
     :data:`~airframe.features.Feature.PERMISSION_CALLBACK`.
 
     Phase 5 Iteration A scaffolds the ``on_permission=`` kwarg on
-    every :meth:`AgentRuntime.session` signature but defers the
-    per-adapter wiring to Iteration B (Claude / Copilot / Codex
-    accepting paths; OpenAI-compat permanent decline). Until each
-    adapter flips
+    every :meth:`AgentRuntime.session` signature; per-adapter wiring
+    landed iteratively (Claude / Copilot / Kimi accepting paths;
+    OpenAI-compat permanent decline). Until each adapter flips
     :data:`~airframe.features.Feature.PERMISSION_CALLBACK` True, a
     non-None callback raises here so consumer code gets a clear
     capability decline rather than a silently-ignored kwarg.

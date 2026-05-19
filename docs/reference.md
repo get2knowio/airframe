@@ -15,8 +15,8 @@ import airframe
 |---|---|---|
 | `BedrockRuntime` | `bedrock` | [adapters/bedrock.md](./adapters/bedrock.md) |
 | `ClaudeCodeRuntime` | `claude` | [adapters/claude.md](./adapters/claude.md) |
-| `CodexRuntime` | `codex` | [adapters/codex.md](./adapters/codex.md) |
 | `CopilotRuntime` | `github-copilot` | [adapters/copilot.md](./adapters/copilot.md) |
+| `KimiRuntime` | `kimi` | [adapters/kimi.md](./adapters/kimi.md) |
 | `OpenCodeGoRuntime` | `opencode-go` | [adapters/opencode-go.md](./adapters/opencode-go.md) |
 | `OpenCodeZenRuntime` | `opencode-zen` | [adapters/opencode-zen.md](./adapters/opencode-zen.md) |
 | `OpenRouterRuntime` | `openrouter` | [adapters/openrouter.md](./adapters/openrouter.md) |
@@ -332,8 +332,7 @@ sess = runtime.session(on_permission=ApproveAll())
 # - "defer" falls through to the vendor's default policy
 ```
 
-Per-adapter shape: per-call on Claude / Copilot; session-wide on
-Codex (callback fires once to derive policy enum); declined on
+Per-adapter shape: per-call on Claude / Copilot / Kimi; declined on
 OpenAI-compat.
 
 ## Lifecycle hooks
@@ -383,7 +382,7 @@ except RuntimeBudgetExceededError as exc:
 `src/airframe/options.py`.
 
 ```python
-from airframe import ClaudeOptions, CopilotOptions, CodexOptions, OpenAICompatOptions
+from airframe import ClaudeOptions, CopilotOptions, KimiOptions, OpenAICompatOptions
 
 sess = runtime.session(provider_options=ClaudeOptions(strict_mcp_config=True))
 ```
@@ -394,7 +393,7 @@ Tagged union — passing the wrong namespace raises
 Per-namespace fields: see each adapter page
 ([Claude](./adapters/claude.md#claudeoptions-provider-options-namespace),
 [Copilot](./adapters/copilot.md#copilotoptions-provider-options-namespace),
-[Codex](./adapters/codex.md#codexoptions-provider-options-namespace),
+[Kimi](./adapters/kimi.md#kimioptions-provider-options-namespace),
 [OpenAI-compat](./adapters/opencode-zen.md#openaicompatoptions-provider-options-namespace)).
 
 ## Errors
@@ -463,9 +462,9 @@ Everything below is importable from `airframe`:
 
 ```
 AgentRuntime, AgentSession, AgentRuntimeError
-BedrockRuntime, ClaudeCodeRuntime, CodexRuntime, CopilotRuntime,
+BedrockRuntime, ClaudeCodeRuntime, CopilotRuntime, KimiRuntime,
 OpenCodeGoRuntime, OpenCodeZenRuntime, OpenRouterRuntime
-BedrockOptions, ClaudeOptions, CodexOptions, CopilotOptions, OpenAICompatOptions, ProviderOptions
+BedrockOptions, ClaudeOptions, CopilotOptions, KimiOptions, OpenAICompatOptions, ProviderOptions
 ProviderModel, RuntimeResult, ModelInfo, CostRecord
 Feature
 Prompt, PromptPart, ImageInput, FileInput

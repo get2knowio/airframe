@@ -56,7 +56,7 @@ def main() -> int:
     if not provider_ids:
         print(
             "No providers available. Install at least one extra: "
-            "pip install airframe-agents[claude|copilot|codex|openai-compat|all]",
+            "pip install airframe-agents[claude|copilot|kimi|openai-compat|all]",
             file=sys.stderr,
         )
         return 1

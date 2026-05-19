@@ -13,7 +13,6 @@ import pytest
 
 from airframe import (
     ClaudeCodeRuntime,
-    CodexRuntime,
     CopilotRuntime,
     Feature,
     OpenCodeZenRuntime,
@@ -74,7 +73,6 @@ def adapters() -> list[object]:
     return [
         ClaudeCodeRuntime(),
         CopilotRuntime(),
-        CodexRuntime(),
         OpenCodeZenRuntime(api_key="dummy-for-construction"),
     ]
 
@@ -236,50 +234,19 @@ def test_copilot_declares_streaming_resume_and_cancel(adapters: list) -> None:
         )
 
 
-def test_codex_declares_streaming_resume_and_cancel(adapters: list) -> None:
-    """CodexRuntime flips STREAMING + SESSION_RESUME + CANCEL in Iteration F.
+def test_sdk_adapters_declare_session_resume(adapters: list) -> None:
+    """SDK-based adapters (Claude Code, Copilot) declare SESSION_RESUME.
 
-    Wired via :meth:`Thread.run_streamed` for streaming,
-    :meth:`Codex.resume_thread` for resume, and :class:`AbortController`
-    / :attr:`TurnOptions.signal` for cancellation. With this iteration
-    landing, every in-tree adapter exposes the same Phase 1 capability
-    set (OpenAI-compat is the only one without `SESSION_RESUME` since
-    chat-completions has no server-side session).
-    """
-    from airframe import CodexRuntime
-
-    for adapter in adapters:
-        if not isinstance(adapter, CodexRuntime):
-            continue
-        assert adapter.supports(Feature.STREAMING), (
-            "CodexRuntime should declare Feature.STREAMING after Iteration F"
-        )
-        assert adapter.supports(Feature.SESSION_RESUME), (
-            "CodexRuntime should declare Feature.SESSION_RESUME after Iteration F — "
-            "wired via Codex.resume_thread"
-        )
-        assert adapter.supports(Feature.CANCEL), (
-            "CodexRuntime should declare Feature.CANCEL after Iteration F — "
-            "wired via AbortController + TurnOptions.signal"
-        )
-
-
-def test_three_sdk_adapters_declare_session_resume(adapters: list) -> None:
-    """Phase 1 endgame: every SDK-based adapter declares SESSION_RESUME.
-
-    Three of four in-tree adapters (Claude Code, Copilot, Codex) all
-    have server-side session resume via their respective SDKs.
+    Both have server-side session resume via their respective SDKs.
     OpenAI-compat (chat-completions) is the outlier — no server-side
-    session. This test pins the matrix at the end of Phase 1's
-    per-adapter rollout so a future regression on any of the three
-    SDK adapters is caught.
+    session.
     """
-    from airframe import ClaudeCodeRuntime, CodexRuntime, CopilotRuntime, OpenCodeZenRuntime
+    from airframe import ClaudeCodeRuntime, CopilotRuntime, OpenCodeZenRuntime
 
     for adapter in adapters:
-        if isinstance(adapter, ClaudeCodeRuntime | CopilotRuntime | CodexRuntime):
+        if isinstance(adapter, ClaudeCodeRuntime | CopilotRuntime):
             assert adapter.supports(Feature.SESSION_RESUME), (
-                f"{type(adapter).__name__} should declare SESSION_RESUME at end of Phase 1"
+                f"{type(adapter).__name__} should declare SESSION_RESUME"
             )
         elif isinstance(adapter, OpenCodeZenRuntime):
             assert not adapter.supports(Feature.SESSION_RESUME), (
@@ -345,18 +312,18 @@ def test_all_adapters_declare_vision_input(adapters: list) -> None:
         )
 
 
-def test_three_sdk_adapters_declare_file_input(adapters: list) -> None:
-    """FILE_INPUT lands on Claude / Copilot / Codex; OpenAI-compat stays False.
+def test_sdk_adapters_declare_file_input(adapters: list) -> None:
+    """FILE_INPUT lands on Claude / Copilot; OpenAI-compat stays False.
 
     The roadmap notes file routing "varies wildly across compat
     vendors" — ``client.files.create`` semantics differ from vendor to
     vendor, and some don't support it at all. A future per-vendor
     subclass can opt in; the base stays conservative.
     """
-    from airframe import ClaudeCodeRuntime, CodexRuntime, CopilotRuntime, OpenCodeZenRuntime
+    from airframe import ClaudeCodeRuntime, CopilotRuntime, OpenCodeZenRuntime
 
     for adapter in adapters:
-        if isinstance(adapter, ClaudeCodeRuntime | CopilotRuntime | CodexRuntime):
+        if isinstance(adapter, ClaudeCodeRuntime | CopilotRuntime):
             assert adapter.supports(Feature.FILE_INPUT), (
                 f"{type(adapter).__name__} should declare FILE_INPUT after Phase 2 Iteration C"
             )
@@ -367,21 +334,19 @@ def test_three_sdk_adapters_declare_file_input(adapters: list) -> None:
             )
 
 
-def test_tools_function_universal_except_codex(adapters: list) -> None:
-    """Final TOOLS_FUNCTION matrix after Phase 3: Codex is the only adapter
-    that declines.
+def test_tools_function_universal_across_in_tree_adapters(adapters: list) -> None:
+    """Every in-tree adapter in this fixture (Claude, Copilot,
+    OpenCode Zen) declares TOOLS_FUNCTION.
 
     Iteration B flipped it on OpenAI-compat (client-side tool-loop);
     Iteration C wired Claude (in-process MCP server via
     :func:`claude_agent_sdk.create_sdk_mcp_server`) and Copilot
-    (:func:`copilot.define_tool` registrations on the session);
-    Iteration D codifies Codex's decline. The Codex Python SDK has no
-    tool-registration channel — consumers wire tools through the
-    ``codex`` CLI's config file instead.
+    (:func:`copilot.define_tool` registrations on the session).
+    Kimi declines permanently (no Python-callable channel) but isn't
+    in the default fixture because the SDK can't be co-installed.
     """
     from airframe import (
         ClaudeCodeRuntime,
-        CodexRuntime,
         CopilotRuntime,
         OpenCodeZenRuntime,
     )
@@ -389,59 +354,8 @@ def test_tools_function_universal_except_codex(adapters: list) -> None:
     for adapter in adapters:
         if isinstance(adapter, ClaudeCodeRuntime | CopilotRuntime | OpenCodeZenRuntime):
             assert adapter.supports(Feature.TOOLS_FUNCTION), (
-                f"{type(adapter).__name__} should declare TOOLS_FUNCTION after Phase 3"
+                f"{type(adapter).__name__} should declare TOOLS_FUNCTION"
             )
-        elif isinstance(adapter, CodexRuntime):
-            assert not adapter.supports(Feature.TOOLS_FUNCTION), (
-                "CodexRuntime should NOT declare TOOLS_FUNCTION — the Codex "
-                "Python SDK has no tool-registration channel"
-            )
-
-
-def test_session_tools_kwarg_raises_unsupported_feature_on_codex(
-    adapters: list,
-) -> None:
-    """Iteration D: only Codex raises on ``tools=``; the other three accept it.
-
-    Codex's decline carries an actionable CLI-config pointer rather
-    than the generic "not wired yet" message from the shared
-    capability gate. The other three adapters open cleanly with
-    ``tools=`` and dispatch through their respective SDK channels.
-    """
-    from pydantic import BaseModel
-
-    from airframe import (
-        CodexRuntime,
-        FunctionTool,
-    )
-    from airframe.errors import UnsupportedFeatureError
-
-    class _NoArgs(BaseModel):
-        pass
-
-    async def _noop(_p: _NoArgs) -> None:
-        return None
-
-    tool = FunctionTool(
-        name="noop",
-        description="Test tool — never invoked.",
-        params=_NoArgs,
-        handler=_noop,
-    )
-
-    for adapter in adapters:
-        if isinstance(adapter, CodexRuntime):
-            with pytest.raises(UnsupportedFeatureError) as exc_info:
-                adapter.session(tools=[tool])  # type: ignore[attr-defined]
-            assert exc_info.value.feature == Feature.TOOLS_FUNCTION
-            # Iteration D message must point at the workaround.
-            text = str(exc_info.value).lower()
-            assert "config" in text and "codex" in text
-        else:
-            # The other three open cleanly with tools=.
-            sess = adapter.session(tools=[tool])
-            assert sess is not None
-            del sess
 
 
 def test_claude_declares_all_three_mcp_transports(adapters: list) -> None:
@@ -506,15 +420,12 @@ def test_copilot_declares_stdio_and_http_but_not_sse(adapters: list) -> None:
         )
 
 
-def test_codex_and_openai_compat_still_decline_all_mcp_transports(adapters: list) -> None:
-    """Phase 4 Iteration C: Codex + OpenAI-compat still decline every
-    transport.
+def test_openai_compat_declines_all_mcp_transports(adapters: list) -> None:
+    """OpenAI-compat declines every MCP transport permanently.
 
-    Iteration D codifies those declines with vendor-specific messages
-    (Codex points at ``~/.codex/config.toml``; OpenAI-compat at the
-    future ``OpenAIResponsesRuntime``). Until then they share the
-    generic capability-gate message, but the capability flags stay
-    False so the gate keeps raising.
+    Chat Completions has no MCP-as-tool slot; the future
+    ``OpenAIResponsesRuntime`` could translate to the Responses-API
+    ``{"type":"mcp",...}`` tool shape, but the base stays declined.
     """
     from airframe import ClaudeCodeRuntime, CopilotRuntime
 
@@ -529,9 +440,8 @@ def test_codex_and_openai_compat_still_decline_all_mcp_transports(adapters: list
             continue
         for feature in mcp_features:
             assert not adapter.supports(feature), (
-                f"{type(adapter).__name__} should NOT declare {feature.name} "
-                f"during Phase 4 Iteration C — Iteration D codifies the "
-                f"vendor-specific decline messages but the flags stay False"
+                f"{type(adapter).__name__} should NOT declare {feature.name} — "
+                f"OpenAI-compat declines all MCP transports permanently"
             )
 
 
@@ -562,16 +472,15 @@ def test_copilot_session_sse_decline_carries_http_hint(adapters: list) -> None:
         assert "http" in text
 
 
-def test_session_mcp_servers_kwarg_raises_on_codex_and_openai_compat(
+def test_session_mcp_servers_kwarg_raises_on_openai_compat(
     adapters: list,
 ) -> None:
-    """Phase 4 Iteration C: Codex + OpenAI-compat raise on every transport.
+    """OpenAI-compat raises on every MCP transport.
 
     Claude opens cleanly (all three transports), Copilot opens cleanly
-    for stdio + http (SSE has its own specific test). The remaining
-    two adapters still surface
-    :class:`~airframe.errors.UnsupportedFeatureError` carrying the
-    offending transport's :class:`Feature` on the ``.feature``
+    for stdio + http (SSE has its own specific test). OpenAI-compat
+    surfaces :class:`~airframe.errors.UnsupportedFeatureError` carrying
+    the offending transport's :class:`Feature` on the ``.feature``
     attribute.
     """
     from airframe import ClaudeCodeRuntime, CopilotRuntime, McpServerRef
@@ -641,7 +550,6 @@ def test_mcp_transports_final_matrix(adapters: list) -> None:
     +-------------------------+ stdio + http + sse + in_process +
     | ClaudeCodeRuntime       |  ✓   |  ✓   |  ✓  |    ✗       |
     | CopilotRuntime          |  ✓   |  ✓   |  ✗  |    ✗       |
-    | CodexRuntime            |  ✗   |  ✗   |  ✗  |    ✗       |
     | OpenAICompatibleRuntime |  ✗   |  ✗   |  ✗  |    ✗       |
 
     ``TOOLS_MCP_IN_PROCESS`` stays False on every adapter — Phase 4
@@ -653,7 +561,6 @@ def test_mcp_transports_final_matrix(adapters: list) -> None:
     """
     from airframe import (
         ClaudeCodeRuntime,
-        CodexRuntime,
         CopilotRuntime,
         OpenCodeZenRuntime,
     )
@@ -668,12 +575,6 @@ def test_mcp_transports_final_matrix(adapters: list) -> None:
         CopilotRuntime: {
             Feature.TOOLS_MCP_STDIO: True,
             Feature.TOOLS_MCP_HTTP: True,
-            Feature.TOOLS_MCP_SSE: False,
-            Feature.TOOLS_MCP_IN_PROCESS: False,
-        },
-        CodexRuntime: {
-            Feature.TOOLS_MCP_STDIO: False,
-            Feature.TOOLS_MCP_HTTP: False,
             Feature.TOOLS_MCP_SSE: False,
             Feature.TOOLS_MCP_IN_PROCESS: False,
         },
@@ -763,14 +664,12 @@ def test_phase_5_final_matrix(adapters: list) -> None:
     |---|---|---|---|---|
     | ClaudeCodeRuntime | ✓ | ✓ | ✓ | ✓ |
     | CopilotRuntime    | ✓ | ✓ | ✓ | ✗ |  ← turn cap vendor-internal
-    | CodexRuntime      | ✓ | ✓ | ✓ | ✓ |
     | OpenCodeZenRuntime | ✗ | ✓ | ✓ | ✓ |  ← permission permanently declined
 
     Regressions in any cell are caught here.
     """
     from airframe import (
         ClaudeCodeRuntime,
-        CodexRuntime,
         CopilotRuntime,
         OpenCodeZenRuntime,
     )
@@ -787,12 +686,6 @@ def test_phase_5_final_matrix(adapters: list) -> None:
             Feature.LIFECYCLE_HOOKS: True,
             Feature.BUDGET_USD_CAP: True,
             Feature.BUDGET_TURN_CAP: False,
-        },
-        CodexRuntime: {
-            Feature.PERMISSION_CALLBACK: True,
-            Feature.LIFECYCLE_HOOKS: True,
-            Feature.BUDGET_USD_CAP: True,
-            Feature.BUDGET_TURN_CAP: True,
         },
         OpenCodeZenRuntime: {
             Feature.PERMISSION_CALLBACK: False,
@@ -825,7 +718,7 @@ def test_budget_usd_cap_universal(adapters: list) -> None:
 
 
 def test_budget_turn_cap_universal_except_copilot(adapters: list) -> None:
-    """Phase 5 Iteration D: Claude / Codex / OpenAI-compat flip
+    """Phase 5 Iteration D: Claude / OpenAI-compat flip
     BUDGET_TURN_CAP True; Copilot declines.
 
     Copilot's vendor SDK caps internal turns at the CLI level via the
@@ -872,7 +765,6 @@ def test_emittable_hook_kinds_matrix(adapters: list) -> None:
     """
     from airframe import (
         ClaudeCodeRuntime,
-        CodexRuntime,
         CopilotRuntime,
         OpenCodeZenRuntime,
     )
@@ -897,14 +789,6 @@ def test_emittable_hook_kinds_matrix(adapters: list) -> None:
             "tool_failure",
             "pre_compact",
         },
-        CodexRuntime: {
-            "session_start",
-            "session_end",
-            "user_prompt_submit",
-            "pre_tool_use",
-            "post_tool_use",
-            "tool_failure",
-        },
         OpenCodeZenRuntime: {
             "session_start",
             "session_end",
@@ -928,19 +812,17 @@ def test_emittable_hook_kinds_matrix(adapters: list) -> None:
 
 
 def test_permission_callback_universal_except_openai_compat(adapters: list) -> None:
-    """Phase 5 Iteration B: Claude / Copilot / Codex all flip
-    PERMISSION_CALLBACK True; OpenAI-compat (chat-completions)
-    permanently declines.
+    """Phase 5 Iteration B: Claude / Copilot flip PERMISSION_CALLBACK
+    True; OpenAI-compat (chat-completions) permanently declines.
     """
     from airframe import (
         ClaudeCodeRuntime,
-        CodexRuntime,
         CopilotRuntime,
         OpenCodeZenRuntime,
     )
 
     for adapter in adapters:
-        if isinstance(adapter, ClaudeCodeRuntime | CopilotRuntime | CodexRuntime):
+        if isinstance(adapter, ClaudeCodeRuntime | CopilotRuntime):
             assert adapter.supports(Feature.PERMISSION_CALLBACK), (
                 f"{type(adapter).__name__} should declare PERMISSION_CALLBACK "
                 f"after Phase 5 Iteration B"
@@ -955,13 +837,13 @@ def test_permission_callback_universal_except_openai_compat(adapters: list) -> N
 def test_session_on_permission_kwarg_raises_only_on_openai_compat(adapters: list) -> None:
     """Phase 5 Iteration B: only OpenAI-compat raises on ``on_permission=``.
 
-    The accepting three (Claude / Copilot / Codex) open cleanly with
-    the callback supplied. OpenAI-compat raises with an actionable
-    decline message pointing at the future ``OpenAIResponsesRuntime``.
+    The accepting adapters in the default fixture (Claude / Copilot)
+    open cleanly with the callback supplied. OpenAI-compat raises with
+    an actionable decline message pointing at the future
+    ``OpenAIResponsesRuntime``.
     """
     from airframe import (
         ClaudeCodeRuntime,
-        CodexRuntime,
         CopilotRuntime,
         OpenCodeZenRuntime,
         PermissionDecision,
@@ -983,7 +865,7 @@ def test_session_on_permission_kwarg_raises_only_on_openai_compat(adapters: list
             # Pin the actionable pointer.
             assert "chat completions" in text
             assert "openairesponsesruntime" in text.replace(" ", "")
-        elif isinstance(adapter, ClaudeCodeRuntime | CopilotRuntime | CodexRuntime):
+        elif isinstance(adapter, ClaudeCodeRuntime | CopilotRuntime):
             sess = adapter.session(on_permission=cb)  # type: ignore[attr-defined]
             assert sess is not None
             del sess

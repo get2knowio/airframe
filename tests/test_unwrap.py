@@ -22,7 +22,6 @@ from unittest.mock import MagicMock
 import pytest
 
 from airframe.adapters.claude_code import ClaudeCodeRuntime
-from airframe.adapters.codex import CodexRuntime
 from airframe.adapters.copilot import CopilotRuntime
 from airframe.adapters.opencode_zen import OpenCodeZenRuntime
 
@@ -43,11 +42,6 @@ def test_copilot_unwraps_self() -> None:
     assert runtime.unwrap(CopilotRuntime) is runtime
 
 
-def test_codex_unwraps_self() -> None:
-    runtime = CodexRuntime()
-    assert runtime.unwrap(CodexRuntime) is runtime
-
-
 def test_opencode_zen_unwraps_self() -> None:
     runtime = OpenCodeZenRuntime(api_key="dummy")
     assert runtime.unwrap(OpenCodeZenRuntime) is runtime
@@ -61,10 +55,9 @@ def test_opencode_zen_unwraps_self() -> None:
     [
         ClaudeCodeRuntime,
         CopilotRuntime,
-        CodexRuntime,
         lambda: OpenCodeZenRuntime(api_key="dummy"),
     ],
-    ids=["claude_code", "copilot", "codex", "opencode_zen"],
+    ids=["claude_code", "copilot", "opencode_zen"],
 )
 def test_unwrap_unrelated_type_raises_typeerror(runtime_factory: Any) -> None:
     """Every adapter rejects types it doesn't unwrap to with a clear error.
@@ -113,21 +106,6 @@ def test_copilot_unwrap_session_redirects_to_session() -> None:
         runtime.unwrap(CopilotSession)
 
 
-def test_codex_unwrap_thread_redirects_to_session() -> None:
-    """Phase 1 Iteration G: Thread moved onto AgentSession.
-
-    ``Codex`` is runtime-owned and still unwraps normally;
-    ``Thread`` raises with a redirect.
-    """
-    from openai_codex_sdk import Codex, Thread
-
-    runtime = CodexRuntime()
-    with pytest.raises(TypeError, match="no client exists yet"):
-        runtime.unwrap(Codex)
-    with pytest.raises(TypeError, match="sessions do"):
-        runtime.unwrap(Thread)
-
-
 # --- Native unwrap after client construction returns the live object ----------
 
 
@@ -139,16 +117,6 @@ def test_copilot_unwrap_returns_live_client() -> None:
     mock_client = MagicMock(spec=CopilotClient)
     runtime._client = mock_client  # noqa: SLF001 — test scaffolding
     assert runtime.unwrap(CopilotClient) is mock_client
-
-
-def test_codex_unwrap_returns_live_client() -> None:
-    """``Codex`` is still runtime-owned — unwrap returns it after construction."""
-    from openai_codex_sdk import Codex
-
-    runtime = CodexRuntime()
-    mock_client = MagicMock(spec=Codex)
-    runtime._client = mock_client  # noqa: SLF001 — test scaffolding
-    assert runtime.unwrap(Codex) is mock_client
 
 
 # --- Session-level unwrap (Phase 1 Iteration G — new home for native types) ----
@@ -172,16 +140,6 @@ def test_copilot_session_unwrap_native_before_execute_raises() -> None:
     sess = runtime.session()
     with pytest.raises(TypeError, match="no session exists yet"):
         sess.unwrap(CopilotSession)
-
-
-def test_codex_session_unwrap_native_before_execute_raises() -> None:
-    """``session.unwrap(Thread)`` before the first turn raises."""
-    from openai_codex_sdk import Thread
-
-    runtime = CodexRuntime()
-    sess = runtime.session()
-    with pytest.raises(TypeError, match="no thread exists yet"):
-        sess.unwrap(Thread)
 
 
 def test_opencode_zen_unwrap_builds_client_lazily() -> None:

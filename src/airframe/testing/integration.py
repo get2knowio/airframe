@@ -76,14 +76,12 @@ from airframe.features import Feature
 
 # Per-provider auth-env-var lookup. Missing keys → pytest.skip in
 # the fixture below. Adapters that resolve auth from a file (Claude
-# Code's ``~/.claude/.credentials.json``, Codex's
-# ``~/.codex/auth.json``) skip the env-var check — they'll fail at
-# the live call with a clean :class:`RuntimeAuthError` we then
-# convert to a skip.
+# Code's ``~/.claude/.credentials.json``) skip the env-var check —
+# they'll fail at the live call with a clean
+# :class:`RuntimeAuthError` we then convert to a skip.
 _PROVIDER_AUTH: dict[str, list[str]] = {
     "claude": ["CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY"],
     "github-copilot": ["GITHUB_TOKEN", "GH_TOKEN"],
-    "codex": ["OPENAI_API_KEY", "CODEX_API_KEY"],
     "kimi": ["KIMI_API_KEY"],
     "opencode-zen": ["OPENCODE_API_KEY"],
     "opencode-go": ["OPENCODE_API_KEY"],
@@ -295,9 +293,9 @@ async def test_integration_permission_callback_fires(adapter_runtime: Any) -> No
     """The :class:`PermissionCallback` is invoked at least once during
     a tool-using session.
 
-    Codex's approval policy is session-wide — the callback fires
-    exactly once at session start to derive the policy enum. Claude
-    and Copilot fire per call. Both shapes satisfy the contract.
+    Claude / Copilot / Kimi fire per call. Adapters with session-wide
+    permission models (e.g. a single up-front decision) satisfy the
+    contract too — the assertion is "at least once," not "per call."
     """
     if not adapter_runtime.supports(Feature.PERMISSION_CALLBACK):
         pytest.skip("adapter does not declare PERMISSION_CALLBACK")
