@@ -587,10 +587,10 @@ class AgentSession(Protocol):
     async def cancel(self) -> None:
         """Abort the in-flight turn, if any.
 
-        Cooperative cancellation: the adapter signals its vendor (an
-        ``AbortController.abort()`` on Codex, ``client.interrupt()``
-        on Claude, ``session.abort()`` on Copilot, ``Task.cancel()``
-        on the OpenAI-compatible HTTP request). The cancelled
+        Cooperative cancellation: the adapter signals its vendor
+        (``client.interrupt()`` on Claude, ``session.abort()`` on
+        Copilot, ``Session.cancel()`` on Kimi, ``Task.cancel()`` on
+        the OpenAI-compatible HTTP request). The cancelled
         :meth:`execute` / :meth:`stream` raises
         :class:`~airframe.errors.RuntimeCancelledError`; a stream may
         end without :class:`~airframe.events.TurnComplete`.
@@ -613,7 +613,7 @@ class AgentSession(Protocol):
         """Release the session's vendor-side resources.
 
         Disconnects the vendor session (Claude subprocess link,
-        Copilot session handle, Codex thread, client-side message
+        Copilot session handle, Kimi session, client-side message
         buffer) but leaves the parent :class:`AgentRuntime`'s
         runtime-wide resources (subprocess pool, HTTP client, auth
         tokens) intact. Idempotent and must not raise — same
@@ -640,8 +640,8 @@ class AgentSession(Protocol):
         * :class:`CopilotAgentSession` accepts
           ``unwrap(CopilotSession)`` — returns the underlying vendor
           session once :meth:`_ensure_session` has run.
-        * :class:`CodexAgentSession` accepts ``unwrap(Thread)`` —
-          returns the underlying :class:`Thread` once it has been
+        * :class:`KimiSession` accepts ``unwrap(Session)`` — returns
+          the underlying Kimi Agent SDK session once it has been
           constructed.
         * :class:`OpenAICompatibleSession` accepts no native types
           today — the OpenAI HTTP client lives on the runtime

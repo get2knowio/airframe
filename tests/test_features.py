@@ -124,28 +124,27 @@ def test_unwired_features_stay_false(adapters: list) -> None:
         Feature.VISION_INPUT,
         Feature.FILE_INPUT,
         # Phase 3 Iteration B flipped TOOLS_FUNCTION on OpenAI-compat;
-        # Iteration C will flip it on Claude + Copilot; Iteration D
-        # leaves Codex False (no SDK tool-registration channel).
+        # Iteration C flipped it on Claude + Copilot.
         Feature.TOOLS_FUNCTION,
         # Phase 4 Iteration B flipped the three MCP transport flags on
         # Claude (broadest transport coverage); Iteration C flips
         # STDIO + HTTP on Copilot (SSE keeps a permanent decline);
-        # Iteration D leaves Codex + OpenAI-compat False everywhere.
+        # OpenAI-compat declines all three permanently.
         Feature.TOOLS_MCP_STDIO,
         Feature.TOOLS_MCP_HTTP,
         Feature.TOOLS_MCP_SSE,
-        # Phase 5 Iteration B flipped PERMISSION_CALLBACK on Claude,
-        # Copilot, and Codex; OpenAI-compat declines permanently
-        # (Chat Completions has no permission wire shape).
+        # Phase 5 Iteration B flipped PERMISSION_CALLBACK on Claude
+        # and Copilot; OpenAI-compat declines permanently (Chat
+        # Completions has no permission wire shape).
         Feature.PERMISSION_CALLBACK,
-        # Phase 5 Iteration C flipped LIFECYCLE_HOOKS on all four
-        # adapters. Per-adapter emittable-kinds set differs (see
-        # each adapter's EMITTABLE_HOOK_KINDS ClassVar).
+        # Phase 5 Iteration C flipped LIFECYCLE_HOOKS on all
+        # subprocess/SDK adapters. Per-adapter emittable-kinds set
+        # differs (see each adapter's EMITTABLE_HOOK_KINDS ClassVar).
         Feature.LIFECYCLE_HOOKS,
-        # Phase 5 Iteration D flipped BUDGET_USD_CAP on all four
-        # (client-side accumulation) and BUDGET_TURN_CAP on three
-        # (Claude / Codex / OpenAI-compat). Copilot keeps the
-        # turn-cap decline because its vendor caps internally.
+        # Phase 5 Iteration D flipped BUDGET_USD_CAP across the
+        # board (client-side accumulation) and BUDGET_TURN_CAP on
+        # Claude + OpenAI-compat. Copilot keeps the turn-cap decline
+        # because its vendor caps internally.
         Feature.BUDGET_USD_CAP,
         Feature.BUDGET_TURN_CAP,
     }
@@ -297,11 +296,11 @@ def test_only_claude_code_declares_reasoning_budget_tokens(adapters: list) -> No
 def test_all_adapters_declare_vision_input(adapters: list) -> None:
     """Phase 2 Iteration C flips VISION_INPUT on every adapter.
 
-    All four vendor surfaces have *some* image-input path:
+    Every vendor surface has *some* image-input path:
 
     * Anthropic / Claude Code — prompt-text hint + Read tool.
     * GitHub Copilot — :class:`FileAttachment` on ``send_and_wait``.
-    * OpenAI Codex — :class:`LocalImageInput` on ``Thread.run``.
+    * Moonshot Kimi — ``ImageURLPart`` in the prompt content list.
     * OpenAI-compatible HTTP — content-parts ``image_url`` shape.
 
     Path-only in v0 across the board; bytes / URL is deferred.
@@ -758,7 +757,7 @@ def test_lifecycle_hooks_universal(adapters: list) -> None:
 def test_emittable_hook_kinds_matrix(adapters: list) -> None:
     """The per-adapter ``EMITTABLE_HOOK_KINDS`` matrix.
 
-    Pinned so a regression where (say) Codex drops ``post_tool_use``
+    Pinned so a regression where (say) Copilot drops ``post_tool_use``
     from its emittable set is caught at PR time. ``session_start``
     and ``session_end`` are universal (every adapter synthesises
     them); ``pre_compact`` / ``rate_limit`` are vendor-specific.
@@ -905,9 +904,9 @@ def test_session_on_permission_or_event_none_opens_cleanly(adapters: list) -> No
 async def test_execute_max_turns_kwarg_raises_only_on_copilot(adapters: list) -> None:
     """Phase 5 Iteration D: ``max_turns=`` raises only on Copilot.
 
-    Claude / Codex / OpenAI-compat all flip ``BUDGET_TURN_CAP`` True
-    and honour the kwarg. Copilot keeps the decline because the
-    vendor SDK caps internal turns at the CLI level — exposing a
+    Claude and OpenAI-compat both flip ``BUDGET_TURN_CAP`` True and
+    honour the kwarg. Copilot keeps the decline because the vendor
+    SDK caps internal turns at the CLI level — exposing a
     user-facing ``max_turns=`` would be misleading.
     """
     from airframe import CopilotRuntime

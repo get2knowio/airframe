@@ -7,7 +7,7 @@ the :class:`PermissionCallback` Protocol shape, and the literal
 values on :data:`PermissionDecision`. Per-adapter capability-gate
 tests live in :mod:`tests.test_features`; behavioural permission
 round-trip tests land alongside the wiring in Iteration B (Claude /
-Copilot / Codex accepting paths; OpenAI-compat permanent decline).
+Copilot / Kimi accepting paths; OpenAI-compat permanent decline).
 """
 
 from __future__ import annotations

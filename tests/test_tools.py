@@ -4,9 +4,9 @@ Phase 3 Iteration A — protocol scaffolding. Tests here pin the
 :class:`FunctionTool` field set, the frozen+slots invariants, and the
 ``handler`` signature contract (parsed Pydantic in, awaitable Any out).
 Per-adapter capability-gate tests live in ``tests/test_features.py``
-and the four ``tests/test_*_session.py`` files; behavioural tool
-round-trip tests land alongside the wiring in Iterations B (OpenAI-
-compat), C (Claude + Copilot), and D (Codex declination + probe).
+and the per-adapter ``tests/test_*_session.py`` files; behavioural
+tool round-trip tests land alongside the wiring in Iterations B
+(OpenAI-compat) and C (Claude + Copilot).
 """
 
 from __future__ import annotations
