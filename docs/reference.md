@@ -18,6 +18,7 @@ import airframe
 | `CopilotRuntime` | `github-copilot` | [adapters/copilot.md](./adapters/copilot.md) |
 | `KimiRuntime` | `kimi` | [adapters/kimi.md](./adapters/kimi.md) |
 | `OpenCodeGoRuntime` | `opencode-go` | [adapters/opencode-go.md](./adapters/opencode-go.md) |
+| `OpenCodeServerRuntime` | `opencode` | [adapters/opencode-server.md](./adapters/opencode-server.md) |
 | `OpenCodeZenRuntime` | `opencode-zen` | [adapters/opencode-zen.md](./adapters/opencode-zen.md) |
 | `OpenRouterRuntime` | `openrouter` | [adapters/openrouter.md](./adapters/openrouter.md) |
 
@@ -382,7 +383,14 @@ except RuntimeBudgetExceededError as exc:
 `src/airframe/options.py`.
 
 ```python
-from airframe import ClaudeOptions, CopilotOptions, KimiOptions, OpenAICompatOptions
+from airframe import (
+    BedrockOptions,
+    ClaudeOptions,
+    CopilotOptions,
+    KimiOptions,
+    OpenAICompatOptions,
+    OpenCodeServerOptions,
+)
 
 sess = runtime.session(provider_options=ClaudeOptions(strict_mcp_config=True))
 ```
@@ -391,10 +399,12 @@ Tagged union — passing the wrong namespace raises
 `UnsupportedFeatureError` at the adapter boundary.
 
 Per-namespace fields: see each adapter page
-([Claude](./adapters/claude.md#claudeoptions-provider-options-namespace),
+([Bedrock](./adapters/bedrock.md#bedrockoptions),
+[Claude](./adapters/claude.md#claudeoptions-provider-options-namespace),
 [Copilot](./adapters/copilot.md#copilotoptions-provider-options-namespace),
 [Kimi](./adapters/kimi.md#kimioptions-provider-options-namespace),
-[OpenAI-compat](./adapters/opencode-zen.md#openaicompatoptions-provider-options-namespace)).
+[OpenAI-compat](./adapters/opencode-zen.md#openaicompatoptions-provider-options-namespace),
+[OpenCode Server](./adapters/opencode-server.md#opencodeserveroptions)).
 
 ## Errors
 
@@ -463,8 +473,9 @@ Everything below is importable from `airframe`:
 ```
 AgentRuntime, AgentSession, AgentRuntimeError
 BedrockRuntime, ClaudeCodeRuntime, CopilotRuntime, KimiRuntime,
-OpenCodeGoRuntime, OpenCodeZenRuntime, OpenRouterRuntime
-BedrockOptions, ClaudeOptions, CopilotOptions, KimiOptions, OpenAICompatOptions, ProviderOptions
+OpenCodeGoRuntime, OpenCodeServerRuntime, OpenCodeZenRuntime, OpenRouterRuntime
+BedrockOptions, ClaudeOptions, CopilotOptions, KimiOptions,
+OpenAICompatOptions, OpenCodeServerOptions, ProviderOptions
 ProviderModel, RuntimeResult, ModelInfo, CostRecord
 Feature
 Prompt, PromptPart, ImageInput, FileInput

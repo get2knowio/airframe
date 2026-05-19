@@ -92,7 +92,10 @@ reserved for a future direct-API `AnthropicRuntime`; `"openai"`
 for a future `OpenAIRuntime`. Current adapters cover the
 *subscription* paths (Claude Max, Copilot, ChatGPT Plus,
 opencode-go), the *per-token gateways* (OpenCode Zen, OpenRouter),
-and the *AWS-billed managed* path (Bedrock).
+the *AWS-billed managed* path (Bedrock), and the *self-hosted
+agent server* path (OpenCode Server — wraps `opencode serve` and
+fronts whichever upstream providers `opencode auth login` has
+configured, including ChatGPT-OAuth subscriptions).
 
 `ClaudeCodeRuntime` is the only adapter that accepts Claude
 bindings. `CopilotRuntime` declines them — Claude served via
@@ -105,22 +108,22 @@ contract.
 Current snapshot (run
 `uv run python examples/probe_supports.py` for the live version):
 
-| Feature | Bedrock | Claude | Copilot | Kimi | OpenAI-compat |
-|---|---|---|---|---|---|
-| `STRUCTURED_OUTPUT_JSON_SCHEMA` | ✓ | ✓ | ✓ | ◐ | ✓ |
-| `STREAMING` / `CANCEL` | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `SESSION_RESUME` | ✗ | ✓ | ✓ | ✓ | ✗ |
-| `REASONING_EFFORT` | ✓ (Anthropic) | ✓ | ✓ | ✓ (bool) | ✓ |
-| `REASONING_BUDGET_TOKENS` | ✓ (Anthropic) | ✓ | ✗ | ✗ | ✗ |
-| `VISION_INPUT` | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `FILE_INPUT` | ✓ (Anthropic) | ✓ | ✓ | ✗ | ✗ |
-| `TOOLS_FUNCTION` | ✓ | ✓ | ✓ | ✗ | ✓ |
-| `TOOLS_MCP_STDIO` / `_HTTP` | ✗ | ✓ | ✓ | ✓ | ✗ |
-| `TOOLS_MCP_SSE` | ✗ | ✓ | ✗ | ✓ | ✗ |
-| `PERMISSION_CALLBACK` | ✓ | ✓ | ✓ | ✓ | ✗ |
-| `LIFECYCLE_HOOKS` | ✓ (6 kinds) | ✓ (8 kinds) | ✓ (7 kinds) | ✓ (7 kinds) | ✓ (6 kinds) |
-| `BUDGET_USD_CAP` | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `BUDGET_TURN_CAP` | ✓ | ✓ | ✗ | ✓ | ✓ |
+| Feature | Bedrock | Claude | Copilot | Kimi | OpenAI-compat | OpenCode |
+|---|---|---|---|---|---|---|
+| `STRUCTURED_OUTPUT_JSON_SCHEMA` | ✓ | ✓ | ✓ | ◐ | ✓ | ✗ (SDK gap) |
+| `STREAMING` / `CANCEL` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `SESSION_RESUME` | ✗ | ✓ | ✓ | ✓ | ✗ | ✓ |
+| `REASONING_EFFORT` | ✓ (Anthropic) | ✓ | ✓ | ✓ (bool) | ✓ | ✓ (per-upstream) |
+| `REASONING_BUDGET_TOKENS` | ✓ (Anthropic) | ✓ | ✗ | ✗ | ✗ | ✓ (Anthropic upstream) |
+| `VISION_INPUT` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `FILE_INPUT` | ✓ (Anthropic) | ✓ | ✓ | ✗ | ✗ | ✓ |
+| `TOOLS_FUNCTION` | ✓ | ✓ | ✓ | ✗ | ✓ | ✗ (SDK gap) |
+| `TOOLS_MCP_STDIO` / `_HTTP` | ✗ | ✓ | ✓ | ✓ | ✗ | ✗ (SDK gap) |
+| `TOOLS_MCP_SSE` | ✗ | ✓ | ✗ | ✓ | ✗ | ✗ (SDK gap) |
+| `PERMISSION_CALLBACK` | ✓ | ✓ | ✓ | ✓ | ✗ | ✗ (SDK gap) |
+| `LIFECYCLE_HOOKS` | ✓ (6 kinds) | ✓ (8 kinds) | ✓ (7 kinds) | ✓ (7 kinds) | ✓ (6 kinds) | ✓ (6 kinds) |
+| `BUDGET_USD_CAP` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `BUDGET_TURN_CAP` | ✓ | ✓ | ✗ | ✓ | ✓ | ✓ |
 
 Capability flags are statically declared per adapter. Check
 `runtime.supports(Feature.X)` before invoking a feature; declined
@@ -138,8 +141,11 @@ GitHub's Copilot SDK exposes a session + tool registration model;
 Moonshot's Kimi Agent SDK spawns the `kimi-cli` subprocess and
 streams typed `WireMessage` events; AWS Bedrock's `aioboto3` client
 fronts a multi-vendor model catalog behind the Converse envelope
-and IAM auth; the OpenAI-compatible gateways (OpenCode Zen,
-OpenCode Go, OpenRouter) speak Chat Completions HTTP. Each has its
+and IAM auth; sst/opencode's `opencode-ai` SDK fronts a model-
+agnostic HTTP agent server (`opencode serve`) routing through any
+upstream `opencode auth login` has configured; the OpenAI-compatible
+gateways (OpenCode Zen, OpenCode Go, OpenRouter) speak Chat
+Completions HTTP. Each has its
 own auth chain, error taxonomy, cost-reporting shape,
 structured-output mechanism, and
 models-endpoint shape. Airframe
