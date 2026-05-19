@@ -5,11 +5,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Project shape
 
 Airframe is "JDBC for LLM agent SDKs": a vendor-neutral `AgentRuntime`
-protocol (`src/airframe/protocol.py`) plus four pluggable adapters
-under `src/airframe/adapters/`. Consumer code depends on the protocol;
+protocol (`src/airframe/protocol.py`) plus pluggable adapters under
+`src/airframe/adapters/`. Consumer code depends on the protocol;
 each adapter wraps a different vendor SDK (Claude Agent SDK, GitHub
-Copilot SDK, OpenAI Codex SDK, OpenAI-compatible HTTP). The PyPI
-distribution name is `airframe-agents`; the import name is `airframe`.
+Copilot SDK, Moonshot Kimi Agent SDK, AWS Bedrock Converse via
+aioboto3, OpenAI-compatible HTTP). The PyPI distribution name is
+`airframe-agents`; the import name is `airframe`.
 
 ## Common commands
 
@@ -33,8 +34,8 @@ suite because pytest collects only `test_*.py`):
 
 ```bash
 uv run python examples/probe_claude_code.py
-uv run python examples/probe_codex.py
 uv run python examples/probe_copilot.py
+uv run python examples/probe_kimi.py
 uv run python examples/probe_opencode_zen.py
 uv run python examples/probe_supports.py
 uv run python tests/probe_list_models.py [--provider claude] [--installed-only=false]
@@ -83,13 +84,17 @@ Key invariants when editing:
 - **Provider IDs are strict; no aliases.** `"anthropic"` and
   `"openai"` are reserved for future direct-API adapters; today's
   subscription / gateway / managed adapters use `"claude"`,
-  `"github-copilot"`, `"codex"`, `"opencode-zen"`, `"opencode-go"`,
+  `"github-copilot"`, `"opencode-zen"`, `"opencode-go"`,
   `"openrouter"`, `"bedrock"`, and `"kimi"`. Reserved-but-not-shipped:
   `"bedrock-agents"` (future sibling wrapping `bedrock-agent-runtime`
   — Knowledge Bases, action groups; must not be folded into
   `"bedrock"`); `"moonshot"` (future OpenAI-compat sibling fronting
   `api.moonshot.ai/v1` chat-completions; must not be folded into
-  `"kimi"`, which wraps the Kimi Agent SDK subprocess surface).
+  `"kimi"`, which wraps the Kimi Agent SDK subprocess surface);
+  `"codex"` (reserved for a possible future adapter wrapping
+  OpenAI's official `openai-codex` Python SDK once it leaves alpha
+  — `airframe-agents` 0.7.0 removed the earlier `CodexRuntime`
+  that wrapped the now-unmaintained `openai-codex-sdk` package).
 - **`CopilotRuntime.validate_binding` deliberately rejects
   `claude-*` model IDs** — Claude via Copilot Chat Completions emits
   markdown-fenced JSON instead of honouring tool calls. Route Claude

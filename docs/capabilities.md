@@ -13,27 +13,27 @@ Renaming would be a major-version break.
 
 ## Capability matrix
 
-| Feature | Bedrock | Claude | Codex | Copilot | Kimi | OpenAI-compat |
-|---|---|---|---|---|---|---|
-| `STRUCTURED_OUTPUT_JSON_SCHEMA` | ✓ | ✓ | ✓ | ✓ | ◐ scaffolded | ✓ |
-| `STRUCTURED_OUTPUT_STRICT` | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ |
-| `STREAMING` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `CANCEL` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `SESSION_RESUME` | ✗ | ✓ | ✓ | ✓ | ✓ | ✗ |
-| `REASONING_EFFORT` | ✓ (Anthropic-on-Bedrock) | ✓ | ✓ | ✓ | ✓ (boolean) | ✓ |
-| `REASONING_BUDGET_TOKENS` | ✓ (Anthropic-on-Bedrock) | ✓ | ✗ | ✗ | ✗ | ✗ |
-| `VISION_INPUT` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `FILE_INPUT` | ✓ (Anthropic-on-Bedrock) | ✓ | ✓ | ✓ | ✗ | ✗ |
-| `TOOLS_FUNCTION` | ✓ | ✓ | ✗ | ✓ | ✗ (permanent) | ✓ |
-| `TOOLS_MCP_STDIO` | ✗ (permanent) | ✓ | ✗ | ✓ | ✓ | ✗ |
-| `TOOLS_MCP_HTTP` | ✗ (permanent) | ✓ | ✗ | ✓ | ✓ | ✗ |
-| `TOOLS_MCP_SSE` | ✗ (permanent) | ✓ | ✗ | ✗ | ✓ | ✗ |
-| `TOOLS_MCP_IN_PROCESS` | ✗ | (internal) | ✗ | (internal) | ✗ (permanent) | ✗ |
-| `PERMISSION_CALLBACK` | ✓ | ✓ | ✓ (session-wide) | ✓ | ✓ | ✗ |
-| `LIFECYCLE_HOOKS` | ✓ (6 kinds) | ✓ (8 kinds) | ✓ (6 kinds) | ✓ (7 kinds) | ✓ (7 kinds) | ✓ (6 kinds) |
-| `BUDGET_USD_CAP` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `BUDGET_TURN_CAP` | ✓ | ✓ | ✓ | ✗ | ✓ | ✓ |
-| `SANDBOX` / `SUBAGENTS` | ✗ (planned) | ✗ (planned) | ✗ (planned) | ✗ (planned) | ✗ (planned) | ✗ (planned) |
+| Feature | Bedrock | Claude | Copilot | Kimi | OpenAI-compat |
+|---|---|---|---|---|---|
+| `STRUCTURED_OUTPUT_JSON_SCHEMA` | ✓ | ✓ | ✓ | ◐ scaffolded | ✓ |
+| `STRUCTURED_OUTPUT_STRICT` | ✗ | ✗ | ✗ | ✗ | ✗ |
+| `STREAMING` | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `CANCEL` | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `SESSION_RESUME` | ✗ | ✓ | ✓ | ✓ | ✗ |
+| `REASONING_EFFORT` | ✓ (Anthropic-on-Bedrock) | ✓ | ✓ | ✓ (boolean) | ✓ |
+| `REASONING_BUDGET_TOKENS` | ✓ (Anthropic-on-Bedrock) | ✓ | ✗ | ✗ | ✗ |
+| `VISION_INPUT` | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `FILE_INPUT` | ✓ (Anthropic-on-Bedrock) | ✓ | ✓ | ✗ | ✗ |
+| `TOOLS_FUNCTION` | ✓ | ✓ | ✓ | ✗ (permanent) | ✓ |
+| `TOOLS_MCP_STDIO` | ✗ (permanent) | ✓ | ✓ | ✓ | ✗ |
+| `TOOLS_MCP_HTTP` | ✗ (permanent) | ✓ | ✓ | ✓ | ✗ |
+| `TOOLS_MCP_SSE` | ✗ (permanent) | ✓ | ✗ | ✓ | ✗ |
+| `TOOLS_MCP_IN_PROCESS` | ✗ | (internal) | (internal) | ✗ (permanent) | ✗ |
+| `PERMISSION_CALLBACK` | ✓ | ✓ | ✓ | ✓ | ✗ |
+| `LIFECYCLE_HOOKS` | ✓ (6 kinds) | ✓ (8 kinds) | ✓ (7 kinds) | ✓ (7 kinds) | ✓ (6 kinds) |
+| `BUDGET_USD_CAP` | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `BUDGET_TURN_CAP` | ✓ | ✓ | ✗ | ✓ | ✓ |
+| `SANDBOX` / `SUBAGENTS` | ✗ (planned) | ✗ (planned) | ✗ (planned) | ✗ (planned) | ✗ (planned) |
 
 Run `uv run python examples/probe_supports.py` for the live matrix
 against your installed adapters.
@@ -52,7 +52,8 @@ Per-adapter mechanism:
 - **Claude:** native `output_format={"type":"json_schema","schema":...}`
 - **Copilot:** forced `submit_result` tool call (hidden from
   streaming events)
-- **Codex:** native `TurnOptions.outputSchema`
+- **Kimi:** scaffolded (declared True) but `execute(schema=…)` raises
+  `NotImplementedError` until the MCP forced-tool path lands
 - **OpenAI-compat:** native `response_format={"type":"json_schema",...}`
   (strict=False for compat-vendor portability)
 
@@ -83,7 +84,7 @@ flight; mid-turn it aborts and the awaiting call raises
 Per-adapter mechanism:
 - **Claude:** `ClaudeSDKClient.interrupt()` + task cancellation
 - **Copilot:** `CopilotSession.abort()`
-- **Codex:** `AbortController` plumbed into `TurnOptions.signal`
+- **Kimi:** `Session.cancel()` sets the SDK's async cancel event
 - **OpenAI-compat:** `asyncio.Task.cancel()` → httpx; for `stream()`,
   a flag + `AsyncStream.close()`
 
@@ -121,7 +122,8 @@ input channel.
 Per-adapter mechanism:
 - **Claude:** Read tool (auto-allowed for attachments)
 - **Copilot:** `attachments=[FileAttachment{path}]`
-- **Codex:** `LocalImageInput(path)`
+- **Kimi:** kosong `ImageURLPart` (URL pass-through; bytes / path
+  → `data:` URI)
 - **OpenAI-compat:** content-parts (`{"type":"image_url","image_url":{"url":"data:..base64..."}}`)
 
 `ImageInput` accepts `path=`, `bytes_= + media_type=`, or `url=`.
@@ -141,10 +143,9 @@ Wire shape: `runtime.session(tools=[FunctionTool(name, description, params=Pydan
 The model invokes registered tools; airframe drives the round-trip
 and surfaces results.
 
-Codex declines permanently — its Python SDK has no
-tool-registration channel. Configure tools through
-`~/.codex/config.toml`'s `[[mcp_servers]]` block instead and
-register them as MCP servers on the CLI side.
+Kimi declines permanently — its Python SDK has no
+Python-callable tool channel. Wrap the function as an MCP server
+and pass via `mcp_servers=` instead.
 
 ### `TOOLS_MCP_STDIO` / `_HTTP` / `_SSE`
 
@@ -153,7 +154,7 @@ Wire shape: `runtime.session(mcp_servers=[McpServerRef(name, transport, command=
 Per-transport coverage:
 - **Claude:** all three transports natively
 - **Copilot:** stdio + http; SSE declined (use http instead)
-- **Codex:** all three declined (no Python SDK channel)
+- **Kimi:** all three transports via fastmcp's `MCPConfig` dict shape
 - **OpenAI-compat:** all three declined (Chat Completions has no
   MCP-as-tool slot)
 
@@ -178,11 +179,10 @@ and returns `"allow"` / `"deny"` / `"defer"`.
 Per-adapter shape:
 - **Claude:** per-call via `can_use_tool`
 - **Copilot:** per-call via `on_permission_request`
-- **Codex:** **session-wide** — the callback fires *once* at first
-  `execute()` with a sentinel request to derive the
-  `approval_policy` enum (`"never"` / `"untrusted"` /
-  `"on-request"` / `"on-failure"`); per-call interception isn't
-  possible through the SDK
+- **Kimi:** per-call dispatch from the SDK's `ApprovalRequest` wire
+  messages (`yolo=False` mode). `allow → approve`, `deny → reject`,
+  `defer → reject` with feedback (the SDK's approval channel is
+  synchronous so defer collapses)
 - **OpenAI-compat:** **permanently declined** — Chat Completions
   has no tool-permission wire shape; the *caller* decides whether
   to execute a returned `tool_call`
@@ -207,7 +207,8 @@ The `HookEvent.kind` enum has eight literals, shape-locked:
 Per-adapter emittable subset (`EMITTABLE_HOOK_KINDS` ClassVar):
 - **Claude:** all 8 (native `PreCompact` and `RateLimit` events)
 - **Copilot:** 7 (no `rate_limit` — surfaces as `SessionErrorData`)
-- **Codex:** 6 (no `pre_compact`, no `rate_limit` — SDK has neither)
+- **Kimi:** 7 (no `rate_limit` — Moonshot raises 429s as
+  `APIStatusError` exceptions, not wire events)
 - **OpenAI-compat:** 6 (no `pre_compact` — no compaction concept;
   no `rate_limit` — no discrete throttle event)
 

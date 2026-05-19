@@ -69,7 +69,6 @@ def _builtin_runtime_classes() -> list[type[AgentRuntime]]:
     """
     from airframe.adapters.bedrock import BedrockRuntime
     from airframe.adapters.claude_code import ClaudeCodeRuntime
-    from airframe.adapters.codex import CodexRuntime
     from airframe.adapters.copilot import CopilotRuntime
     from airframe.adapters.kimi import KimiRuntime
     from airframe.adapters.opencode_go import OpenCodeGoRuntime
@@ -79,7 +78,6 @@ def _builtin_runtime_classes() -> list[type[AgentRuntime]]:
     return [
         ClaudeCodeRuntime,
         CopilotRuntime,
-        CodexRuntime,
         OpenCodeZenRuntime,
         OpenCodeGoRuntime,
         OpenRouterRuntime,

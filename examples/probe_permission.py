@@ -12,17 +12,16 @@ through the callback, then the resulting
 
 * The runtime declares
   :data:`~airframe.features.Feature.PERMISSION_CALLBACK` (Claude /
-  Copilot / Codex do after Iteration B; OpenAI-compat declines).
+  Copilot / Kimi do; OpenAI-compat declines).
 * ``session(on_permission=...)`` accepts the registration.
-* The callback fires (per-call on Claude / Copilot; once at session
-  start on Codex — the SDK's approval_policy is session-wide).
+* The callback fires per call on Claude / Copilot / Kimi.
 
 Usage::
 
     uv run python examples/probe_permission.py
     uv run python examples/probe_permission.py --provider claude
     uv run python examples/probe_permission.py --provider github-copilot
-    uv run python examples/probe_permission.py --provider codex
+    uv run python examples/probe_permission.py --provider kimi
     uv run python examples/probe_permission.py --provider opencode  # declines
 
 Defaults to ``claude`` (richest per-call permission channel via
@@ -146,7 +145,7 @@ async def main() -> int:
             file=sys.stderr,
         )
         print(
-            "Install one with: pip install airframe-agents[claude|copilot|codex|openai-compat]",
+            "Install one with: pip install airframe-agents[claude|copilot|kimi|openai-compat]",
             file=sys.stderr,
         )
         return 1
@@ -176,17 +175,12 @@ async def main() -> int:
         await runtime.close()
         return 1
 
-    # Codex's approval_policy is session-wide; the callback fires
-    # once. Claude / Copilot fire per call. Note the difference so
-    # the probe output is unambiguous.
-    if args.provider == "codex":
-        print(
-            "  note: Codex's approval_policy is session-wide; the "
-            "callback fires exactly once at session start to derive "
-            "the ApprovalMode enum. Per-call interception isn't "
-            "possible through the Codex Python SDK."
-        )
-
+    # The probe registers an in-process FunctionTool so the model has
+    # something to ask permission for. Kimi declines tools= permanently
+    # (no Python-callable channel); on Kimi a real run would need to
+    # surface permission via an MCP server instead. The probe will
+    # raise UnsupportedFeatureError on Kimi at session() — that's the
+    # documented behaviour.
     sess = runtime.session(on_permission=callback, tools=[_build_tool()])
     text_chunks = 0
     tool_starts: list[ToolCallStart] = []
@@ -247,9 +241,8 @@ async def main() -> int:
 
     if not callback.received:
         # Soft warning — some adapters / prompts won't trigger any
-        # permission requests (e.g. Codex when policy resolves to
-        # "never" and the SDK never asks; or a prompt the model
-        # answers without tools).
+        # permission requests (e.g. a model that answers without
+        # invoking the registered tool).
         print(
             "\nNOTE: callback never fired. The probe still validated "
             "session(on_permission=...) accepted the registration."

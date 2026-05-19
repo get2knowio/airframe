@@ -4,15 +4,15 @@ build-backend = "hatchling.build"
 
 [project]
 name = "airframe-agents"
-version = "0.6.3"
-description = "Vendor-neutral agent runtime: one protocol, pluggable adapters for Claude Code, GitHub Copilot, OpenAI Codex, and OpenCode Zen."
+version = "0.7.0"
+description = "Vendor-neutral agent runtime: one protocol, pluggable adapters for Claude Code, GitHub Copilot, Moonshot Kimi, AWS Bedrock, and OpenAI-compatible gateways."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
 authors = [
     { name = "Airframe Contributors" },
 ]
-keywords = ["ai", "agents", "claude", "copilot", "codex", "opencode", "llm", "runtime"]
+keywords = ["ai", "agents", "claude", "copilot", "kimi", "bedrock", "opencode", "llm", "runtime"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
@@ -40,7 +40,6 @@ dependencies = [
 # without that header, and the Anthropic SDK manages the dance.
 claude = ["claude-agent-sdk>=0.2.0,<1", "anthropic>=0.40,<1"]
 copilot = ["github-copilot-sdk>=0.3.0"]
-codex = ["openai-codex-sdk>=0.1.11"]
 # `openai-compat` covers every OpenAI-compatible HTTP adapter:
 # OpenCodeZenRuntime (per-token), OpenCodeGoRuntime (subscription),
 # and future siblings (Together, Groq, Fireworks, OpenRouter, ...).
@@ -88,7 +87,6 @@ all = [
     "claude-agent-sdk>=0.2.0,<1",
     "anthropic>=0.40,<1",
     "github-copilot-sdk>=0.3.0",
-    "openai-codex-sdk>=0.1.11",
     "openai>=1.50,<3",
     "aioboto3>=13",
 ]
@@ -113,7 +111,6 @@ test = [
     "claude-agent-sdk>=0.2.0,<1",
     "anthropic>=0.40,<1",
     "github-copilot-sdk>=0.3.0",
-    "openai-codex-sdk>=0.1.11",
     "openai>=1.50,<3",
     "aioboto3>=13",
 ]

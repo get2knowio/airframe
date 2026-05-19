@@ -15,9 +15,12 @@ Per-adapter emission strategy (lands in Iteration C):
   events. The adapter forwards every kind.
 * **GitHub Copilot SDK** — :meth:`CopilotSession.on` subscription
   filtering the typed ``*Data`` events into :class:`HookEvent`.
-* **OpenAI Codex SDK** — synthesised from
-  :class:`ItemStartedEvent` / :class:`ItemCompletedEvent` on the
-  thread event stream. Emits a subset of kinds.
+* **Moonshot Kimi SDK** — synthesised from the ``WireMessage``
+  stream (``ToolCall`` → ``pre_tool_use``, ``ToolResult`` →
+  ``post_tool_use`` / ``tool_failure``, ``CompactionBegin`` →
+  ``pre_compact``, plus execute/close boundary events). Emits 7 of
+  the 8 kinds — only ``rate_limit`` stays unemitted (Moonshot
+  raises 429s as exceptions, not wire events).
 * **OpenAI-compatible HTTP** — synthesised from the client-side
   tool-loop. Cannot emit ``pre_compact`` / ``rate_limit`` honestly;
   the emittable set is documented per adapter.

@@ -8,9 +8,9 @@ only owns the cross-cutting invariants.
 
 Phase 0 shipped the namespaces empty; v0.5.0-readiness populates
 :class:`ClaudeOptions` (three fields), :class:`CopilotOptions`
-(four), :class:`CodexOptions` (four), :class:`OpenAICompatOptions`
-(six) and threads each adapter's fields through into the matching
-vendor SDK at session-build time.
+(four), :class:`OpenAICompatOptions` (six), :class:`BedrockOptions`,
+:class:`KimiOptions` and threads each adapter's fields through into
+the matching vendor SDK at session-build time.
 """
 
 from __future__ import annotations
@@ -19,7 +19,6 @@ from dataclasses import is_dataclass
 
 from airframe import (
     ClaudeOptions,
-    CodexOptions,
     CopilotOptions,
     OpenAICompatOptions,
 )
@@ -33,7 +32,7 @@ def test_all_options_are_frozen_dataclasses() -> None:
     flipping ``frozen=False`` later would be a breaking change to
     consumers relying on hashability.
     """
-    for cls in (ClaudeOptions, CopilotOptions, CodexOptions, OpenAICompatOptions):
+    for cls in (ClaudeOptions, CopilotOptions, OpenAICompatOptions):
         assert is_dataclass(cls), f"{cls.__name__} must be a dataclass"
         # ``__dataclass_params__`` is the canonical introspection surface
         # for the ``frozen`` / ``slots`` flags passed to ``@dataclass``.
@@ -52,7 +51,7 @@ def test_options_have_no_common_base() -> None:
     type-checking on per-adapter options. Each class inherits only
     from :class:`object`.
     """
-    for cls in (ClaudeOptions, CopilotOptions, CodexOptions, OpenAICompatOptions):
+    for cls in (ClaudeOptions, CopilotOptions, OpenAICompatOptions):
         # __mro__ should be (cls, object) — anything in between would
         # signal an accidental shared base.
         assert cls.__mro__ == (cls, object), (
@@ -80,12 +79,6 @@ def test_options_field_inventory() -> None:
         "skill_directories",
         "working_directory",
     }
-    assert set(CodexOptions.__dataclass_fields__) == {
-        "working_directory",
-        "additional_directories",
-        "network_access_enabled",
-        "web_search_enabled",
-    }
     assert set(OpenAICompatOptions.__dataclass_fields__) == {
         "prompt_cache_key",
         "prompt_cache_retention",
@@ -105,7 +98,6 @@ def test_options_constructible_with_no_args() -> None:
     """
     ClaudeOptions()
     CopilotOptions()
-    CodexOptions()
     OpenAICompatOptions()
 
 
@@ -120,5 +112,4 @@ def test_options_are_hashable() -> None:
     """
     assert hash(ClaudeOptions()) == hash(ClaudeOptions())
     assert hash(CopilotOptions()) == hash(CopilotOptions())
-    assert hash(CodexOptions()) == hash(CodexOptions())
     assert hash(OpenAICompatOptions()) == hash(OpenAICompatOptions())

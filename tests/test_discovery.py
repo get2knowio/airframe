@@ -22,7 +22,6 @@ import pytest
 
 from airframe import discovery
 from airframe.adapters.claude_code import ClaudeCodeRuntime
-from airframe.adapters.codex import CodexRuntime
 from airframe.adapters.copilot import CopilotRuntime
 from airframe.adapters.opencode_zen import OpenCodeZenRuntime
 from airframe.discovery import list_providers, runtime_for
@@ -49,7 +48,6 @@ def test_list_providers_returns_all_when_installed_only_false() -> None:
         "bedrock",
         "claude",
         "github-copilot",
-        "codex",
         "kimi",
         "opencode-zen",
         "opencode-go",
@@ -75,13 +73,6 @@ def test_list_providers_filters_when_only_copilot_installed(
 ) -> None:
     _stub_find_spec(monkeypatch, available={"copilot"})
     assert list_providers() == ["github-copilot"]
-
-
-def test_list_providers_filters_when_only_codex_installed(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _stub_find_spec(monkeypatch, available={"openai_codex_sdk"})
-    assert list_providers() == ["codex"]
 
 
 def test_list_providers_filters_when_only_openai_compat_installed(
@@ -139,10 +130,6 @@ def test_runtime_for_github_copilot_returns_copilot_runtime() -> None:
     assert runtime_for("github-copilot") is CopilotRuntime
 
 
-def test_runtime_for_codex_returns_codex_runtime() -> None:
-    assert runtime_for("codex") is CodexRuntime
-
-
 def test_runtime_for_opencode_zen_returns_opencode_zen_runtime() -> None:
     assert runtime_for("opencode-zen") is OpenCodeZenRuntime
 
@@ -186,15 +173,6 @@ def test_runtime_for_uninstalled_claude_names_the_extra(
     with pytest.raises(ImportError) as excinfo:
         runtime_for("claude")
     assert "airframe-agents[claude]" in str(excinfo.value)
-
-
-def test_runtime_for_uninstalled_codex_names_the_extra(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _stub_find_spec(monkeypatch, available=set())
-    with pytest.raises(ImportError) as excinfo:
-        runtime_for("codex")
-    assert "airframe-agents[codex]" in str(excinfo.value)
 
 
 def test_runtime_for_uninstalled_opencode_zen_names_the_openai_compat_extra(
@@ -297,7 +275,6 @@ def test_entry_point_adapter_appears_in_list_providers(
         "bedrock",
         "claude",
         "github-copilot",
-        "codex",
         "kimi",
         "opencode-zen",
         "opencode-go",

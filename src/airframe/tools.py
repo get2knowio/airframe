@@ -26,9 +26,10 @@ Per-vendor routing (lands in Iterations B + C):
   :func:`copilot.define_tool` and passed via
   :meth:`CopilotClient.create_session(tools=...)`. Coexists with the
   forced-``submit_result`` pattern when ``schema=`` is also set.
-* **OpenAI Codex SDK** — declines. ``CodexRuntime`` doesn't expose a
-  Python tool-registration API; tools must be wired through the
-  ``codex`` CLI's config file. ``session(tools=...)`` raises
+* **Kimi Agent SDK** — declines permanently. ``KimiRuntime`` doesn't
+  expose a Python-callable tool channel; wrap the function as an MCP
+  server and pass via ``mcp_servers=`` instead.
+  ``session(tools=...)`` raises
   :class:`~airframe.errors.UnsupportedFeatureError` with
   ``feature=Feature.TOOLS_FUNCTION``.
 
@@ -130,12 +131,7 @@ class McpServerRef:
     Iteration A of Phase 4 ships only the scaffolding: every adapter's
     ``session()`` accepts the kwarg and a non-empty list raises
     :class:`~airframe.errors.UnsupportedFeatureError` until its
-    transport-specific capability flag flips True in Iteration B
-    (Claude — all three transports) and Iteration C (Copilot — stdio
-    + http; SSE keeps a permanent decline). Codex and OpenAI-compat
-    decline all transports permanently in Iteration D.
-
-    Per-vendor routing (lands in Iterations B + C):
+    transport-specific capability flag flips True. Coverage today:
 
     * **Claude Agent SDK** — translated to the matching typed config
       (:class:`McpStdioServerConfig` / :class:`McpHttpServerConfig` /
@@ -148,10 +144,10 @@ class McpServerRef:
       and passed via :meth:`CopilotClient.create_session`. SSE refs
       raise :class:`~airframe.errors.UnsupportedFeatureError` at
       translation time.
-    * **OpenAI Codex SDK** — declines all transports. ``CodexRuntime``
-      has no programmatic MCP-registration channel; wire MCP servers
-      through ``~/.codex/config.toml``'s ``[[mcp_servers]]`` block
-      instead.
+    * **Kimi Agent SDK** — translated to fastmcp's :class:`MCPConfig`
+      dict shape and passed via :meth:`Session.create(mcp_configs=...)`.
+      All three transports honoured; ``auth_token`` materialises as
+      ``Authorization: Bearer …`` on remote transports.
     * **OpenAI-compatible HTTP** — declines all transports. MCP-as-tool
       is a Responses-API shape; the Chat Completions family this base
       wraps cannot serve it. A future ``OpenAIResponsesRuntime``

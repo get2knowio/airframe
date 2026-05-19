@@ -32,8 +32,9 @@ flip True; :data:`Feature.FILE_INPUT` stays False (the SDK has no
 prompt-side file slot — files reach Kimi tools via the session's
 ``work_dir``). ``thinking=`` is session-scoped at the SDK boundary
 (baked at :meth:`Session.create` time, not per-prompt) so a toggle
-between turns rebuilds the SDK session, mirroring how Codex rebuilds
-its :class:`Thread` on a reasoning-effort change.
+between turns rebuilds the SDK session — a session-scoped reasoning
+knob forces a rebuild on toggle to keep the SDK's per-session state
+consistent.
 
 **Iteration E.** Lifecycle hooks + budget caps + pricing.
 :class:`KimiSession` now synthesises seven of airframe's eight
@@ -179,7 +180,7 @@ DEFAULT_KIMI_BASE_URL = "https://api.moonshot.ai/v1"
 #: Shape: ``{model_id → (input_per_1k_usd, output_per_1k_usd,
 #: cache_read_per_1k_usd)}``. Cache-write isn't billed separately on
 #: Moonshot today; we count the write tokens but don't add them to
-#: ``cost_usd``. The Codex / Bedrock plans use the same convention.
+#: ``cost_usd``. The Bedrock pricing path uses the same convention.
 _KIMI_PRICING: dict[str, tuple[float, float, float]] = {
     "kimi-k2-thinking": (0.0006, 0.0025, 0.00015),
     "kimi-k2-thinking-turbo": (0.0015, 0.0050, 0.00015),
@@ -1026,7 +1027,7 @@ class KimiSession(AgentSession):
         )
         # Iteration E: budget enforcement at the turn boundary. Both
         # caps fire before any vendor work — re-using the shared helper
-        # keeps the error shape consistent with Codex / Copilot.
+        # keeps the error shape consistent across adapters.
         _enforce_budget_pre_turn(
             max_turns=max_turns,
             max_budget_usd=max_budget_usd,
@@ -1434,8 +1435,10 @@ class KimiSession(AgentSession):
         The :class:`ToolCall` carries an ``id`` and a ``function``
         sub-object with ``name`` and ``arguments`` (a JSON-string
         slice — partial on streaming, complete on the consolidated
-        ``ToolCall`` wire). The payload mirrors what Codex emits so
-        portable observers see the same shape across adapters.
+        ``ToolCall`` wire). The payload shape (``tool_name``,
+        ``tool_call_id``, optional ``arguments``) matches what the
+        other tool-aware adapters emit so portable observers see the
+        same fields across adapters.
         """
         if self._on_event is None:
             return

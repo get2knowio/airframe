@@ -12,7 +12,8 @@ already exposes:
   ``delta.tool_calls``).
 * GitHub Copilot's ``ASSISTANT_MESSAGE_DELTA`` /
   ``ASSISTANT_REASONING_DELTA`` / ``TOOL_USE_*`` session events.
-* OpenAI Codex's ``ItemStartedEvent`` / ``ItemCompletedEvent``.
+* Moonshot Kimi's ``WireMessage`` stream (``TextPart`` / ``ThinkPart``
+  / ``ToolCall`` / ``ToolResult``).
 
 The union is intentionally small. Five variants cover what every
 adapter can map onto today; vendor-specific events surface via
@@ -55,10 +56,10 @@ class ReasoningDelta:
     Distinct from :class:`TextDelta`: reasoning text is the model's
     private chain-of-thought and is not part of the assistant-visible
     response. Anthropic surfaces it via ``thinking`` content blocks;
-    OpenAI/Codex via ``reasoning`` output items on Responses /
-    ``ItemStartedEvent`` of kind ``reasoning`` on Codex. Adapters that
-    can't surface reasoning text (Copilot, today) simply never emit
-    this variant — capability negotiation lives on
+    OpenAI via ``reasoning`` output items on Responses; Kimi via
+    ``ThinkPart`` wire messages. Adapters that can't surface
+    reasoning text (Copilot, today) simply never emit this variant —
+    capability negotiation lives on
     :data:`~airframe.features.Feature.REASONING_EFFORT`.
     """
 

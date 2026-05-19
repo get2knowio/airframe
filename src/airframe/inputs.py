@@ -13,7 +13,9 @@ Each vendor handles attachments differently:
   inline content blocks.
 * **GitHub Copilot** — :class:`FileAttachment` shape on the session's
   ``send`` call.
-* **OpenAI Codex** — :class:`LocalImageInput` on the Input shape.
+* **Moonshot Kimi** — kosong :class:`ImageURLPart` on the
+  :meth:`Session.prompt` content-parts shape (URL pass-through or
+  ``data:`` URI for bytes / path).
 * **OpenAI-compatible HTTP** — content parts on the user message
   (``[{"type": "text", ...}, {"type": "image_url", ...}, ...]``).
 

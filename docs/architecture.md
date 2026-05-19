@@ -68,15 +68,15 @@ its lifetime.
         ┌─────────────┬─────────┴───┬────────────┬──────────────┐
         ▼             ▼             ▼            ▼              ▼
    ┌──────────┐ ┌────────────┐ ┌──────────┐ ┌──────────┐ ┌──────────────┐
-   │ Bedrock  │ │ ClaudeCode │ │ Codex    │ │ Copilot  │ │ OpenAICompat │
+   │ Bedrock  │ │ ClaudeCode │ │ Copilot  │ │  Kimi    │ │ OpenAICompat │
    │ +Session │ │ +Session   │ │ +Session │ │ +Session │ │ +Session     │
    └──────────┘ └────────────┘ └──────────┘ └──────────┘ └──────────────┘
         │             │             │            │              │
         ▼             ▼             ▼            ▼              ▼
-   aioboto3      claude-agent-  openai-      github-       openai
-   bedrock-      sdk            codex-sdk    copilot-sdk   chat.completions
+   aioboto3      claude-agent-  github-      kimi-agent-   openai
+   bedrock-      sdk            copilot-sdk  sdk           chat.completions
    runtime       (subprocess    (subprocess  (subprocess   over https
-   (Converse      + JSON-RPC)    per turn)   + tool reg)    ↳ subclasses:
+   (Converse      + JSON-RPC)    + tool reg)  + JSONL)      ↳ subclasses:
     API)                                                    OpenCodeGo,
                                                             OpenCodeZen,
                                                             OpenRouter
@@ -99,7 +99,7 @@ The runtime/session split draws a clean line:
 
 | Lives on the runtime | Lives on the session |
 |---|---|
-| Long-lived vendor handles (`CopilotClient`, `Codex`, `AsyncOpenAI`) | Per-conversation vendor handles (`ClaudeSDKClient`, `CopilotSession`, `Thread`, `messages=[]` buffer) |
+| Long-lived vendor handles (`CopilotClient`, `AsyncOpenAI`, `aioboto3` client) | Per-conversation vendor handles (`ClaudeSDKClient`, `CopilotSession`, `kimi_agent_sdk.Session`, `messages=[]` buffer) |
 | Auth resolution (`api_key`, `github_token`) | The system prompt baked into the vendor session |
 | Default model | Per-turn schema (when the vendor bakes it at session-creation, the session may reconnect on schema change) |
 | Capability declarations (`supports(Feature.X)`) | `id: str | None` — the live vendor session_id for resume |
@@ -144,24 +144,24 @@ a single `TextDelta` carrying the full response immediately before
 Each adapter declares which protocol features it implements via
 `runtime.supports(Feature.X)`. Current capability matrix:
 
-| Feature | Claude Code | Copilot | Codex | OpenAI-compat |
+| Feature | Claude Code | Copilot | Kimi | OpenAI-compat |
 |---|---|---|---|---|
-| `STRUCTURED_OUTPUT_JSON_SCHEMA` | ✓ | ✓ | ✓ | ✓ |
+| `STRUCTURED_OUTPUT_JSON_SCHEMA` | ✓ | ✓ | ◐ scaffolded | ✓ |
 | `STRUCTURED_OUTPUT_STRICT` | ✗ | ✗ | ✗ | ✗ |
 | `STREAMING` | ✓ | ✓ | ✓ | ✓ |
 | `CANCEL` | ✓ | ✓ | ✓ | ✓ |
 | `SESSION_RESUME` | ✓ | ✓ | ✓ | ✗ (no server-side session) |
-| `REASONING_EFFORT` | ✓ | ✓ | ✓ | ✓ |
+| `REASONING_EFFORT` | ✓ | ✓ | ✓ (boolean) | ✓ |
 | `REASONING_BUDGET_TOKENS` | ✓ | ✗ | ✗ | ✗ |
 | `VISION_INPUT` | ✓ | ✓ | ✓ | ✓ |
-| `FILE_INPUT` | ✓ | ✓ | ✓ | ✗ (chat-completions has no file slot) |
-| `TOOLS_FUNCTION` | ✓ | ✓ | ✗ (no SDK tool API) | ✓ |
-| `TOOLS_MCP_STDIO` | ✓ | ✓ | ✗ (CLI-config only) | ✗ (Responses-only) |
-| `TOOLS_MCP_HTTP` | ✓ | ✓ | ✗ | ✗ |
-| `TOOLS_MCP_SSE` | ✓ | ✗ (declined, switch to http) | ✗ | ✗ |
-| `TOOLS_MCP_IN_PROCESS` | ✗ (internal `tools=` plumbing) | ✗ | ✗ | ✗ |
-| `PERMISSION_CALLBACK` | ✓ | ✓ | ✓ (session-wide) | ✗ (permanent) |
-| `LIFECYCLE_HOOKS` | ✓ (8 kinds) | ✓ (7 kinds, no `rate_limit`) | ✓ (6 kinds, synthesised) | ✓ (6 kinds, synthesised) |
+| `FILE_INPUT` | ✓ | ✓ | ✗ (no SDK channel) | ✗ (chat-completions has no file slot) |
+| `TOOLS_FUNCTION` | ✓ | ✓ | ✗ (permanent — use MCP) | ✓ |
+| `TOOLS_MCP_STDIO` | ✓ | ✓ | ✓ | ✗ (Responses-only) |
+| `TOOLS_MCP_HTTP` | ✓ | ✓ | ✓ | ✗ |
+| `TOOLS_MCP_SSE` | ✓ | ✗ (declined, switch to http) | ✓ | ✗ |
+| `TOOLS_MCP_IN_PROCESS` | ✗ (internal `tools=` plumbing) | ✗ | ✗ (permanent) | ✗ |
+| `PERMISSION_CALLBACK` | ✓ | ✓ | ✓ | ✗ (permanent) |
+| `LIFECYCLE_HOOKS` | ✓ (8 kinds) | ✓ (7 kinds, no `rate_limit`) | ✓ (7 kinds, no `rate_limit`) | ✓ (6 kinds, synthesised) |
 | `BUDGET_USD_CAP` | ✓ | ✓ | ✓ | ✓ |
 | `BUDGET_TURN_CAP` | ✓ | ✗ (vendor caps internally) | ✓ | ✓ |
 | `SANDBOX` / `SUBAGENTS` | ✗ (planned, signal-gated) | ✗ (planned) | ✗ (planned) | ✗ (planned) |
@@ -182,9 +182,10 @@ probes under `examples/probe_*.py` are the manual counterpart).
 ClassVar[frozenset[str]]` containing the subset of the eight
 [`HookEventKind`](../src/airframe/hooks.py) literals it can
 honestly emit. Claude has all 8 (native `PreCompact` + `RateLimit`
-events); Copilot drops `rate_limit`; Codex and OpenAI-compat drop
-both `pre_compact` and `rate_limit` since they have to synthesise
-events from their respective event streams / tool loops. Consumers
+events); Copilot drops `rate_limit`; Kimi drops `rate_limit`
+(Moonshot raises 429s as exceptions rather than wire events);
+OpenAI-compat drops both `pre_compact` and `rate_limit` since it
+synthesises events from the tool loop. Consumers
 writing portable observers can branch defensively on the per-runtime
 set.
 
@@ -195,11 +196,11 @@ set.
   text is the fallback when `schema=None`.
 * **`session()` is a factory; `AgentSession` is the canonical
   multi-turn handle.** Every vendor's SDK has a per-conversation
-  abstraction (ClaudeSDKClient, CopilotSession, Thread, the
-  client-side message buffer); the protocol mirrors that shape so
-  the per-adapter glue is thin.
+  abstraction (ClaudeSDKClient, CopilotSession,
+  `kimi_agent_sdk.Session`, the client-side message buffer); the
+  protocol mirrors that shape so the per-adapter glue is thin.
 * **`AgentSession.id` is `str | None`.** Adapters with server-side
-  sessions populate it (Claude Code, Copilot, Codex); chat-completions
+  sessions populate it (Claude Code, Copilot, Kimi); chat-completions
   vendors leave it `None` because there's no vendor-side session to
   refer to. Consumer code branching on `session.id is None` can
   treat that as the "stateless adapter" signal.
@@ -210,10 +211,10 @@ set.
   call. Adapters check `provider_id` + maybe a pattern on `model_id`;
   they don't dial home.
 * **`unwrap()` lives on both runtime and session.** Runtime-level
-  vendor types (`CopilotClient`, `Codex`, `AsyncOpenAI`) reach
-  through `runtime.unwrap()`; session-level vendor types
-  (`ClaudeSDKClient`, `CopilotSession`, `Thread`) reach through
-  `session.unwrap()`.
+  vendor types (`CopilotClient`, `AsyncOpenAI`, `aioboto3` client)
+  reach through `runtime.unwrap()`; session-level vendor types
+  (`ClaudeSDKClient`, `CopilotSession`, `kimi_agent_sdk.Session`)
+  reach through `session.unwrap()`.
 
 ## Why errors are vendor-agnostic
 
@@ -294,29 +295,28 @@ These are the sharp edges the adapters absorb so you don't have to.
   turn.
 * Cost telemetry: `AssistantUsageData` events on the session stream.
 
-### Codex SDK
+### Kimi Agent SDK
 
-* Native structured-output mode: the Codex CLI accepts an
-  `--output-schema` flag that constrains the final response to a
-  JSON Schema. The adapter passes `schema.model_json_schema()` via
-  `TurnOptions.outputSchema` and parses `Turn.final_response` as
-  JSON. Simplest adapter as a result. Crucially `outputSchema` is
-  per-`TurnOptions`, not per-`ThreadOptions`, so schema can vary
-  per turn without rebuilding the Thread.
-* Streaming: `Thread.run_streamed()` yields typed thread events.
-  Per-item tail tracking on `ItemUpdatedEvent` / `ItemCompletedEvent`
-  keeps `TextDelta` instances appendable (concatenated deltas
-  reconstruct the message text). `AgentMessageItem` → `TextDelta`;
-  `ReasoningItem` → `ReasoningDelta`.
-* Resume: `Codex.resume_thread(thread_id, ...)` returns a Thread
-  with its id pre-populated; subsequent runs continue the prior
-  conversation.
-* Cancellation: per-turn `AbortController` plumbed into
-  `TurnOptions.signal`; `cancel()` calls `controller.abort()`. The
-  awaiting turn raises `AbortError` → surfaced as
-  `RuntimeCancelledError`.
-* Auth: codex CLI reads `~/.codex/auth.json` directly when present.
-  Adapter falls through to that when no env var is set.
+* Streaming via `Session.prompt()` — an async generator yielding
+  `WireMessage` instances (`TextPart`, `ThinkPart`, `ToolCall`,
+  `ToolResult`, `ApprovalRequest`, `TokenUsage`, etc.). The adapter
+  classifies on `type(wire).__name__` rather than `isinstance` so
+  the unit tests can use `sys.modules`-injected fakes (the SDK can't
+  be co-installed with `claude-agent-sdk`).
+* Resume: `Session.resume(work_dir, session_id)`; multi-turn state
+  persists in the SDK's session store.
+* Cancellation: `Session.cancel()` sets the SDK's async cancel
+  event; the in-flight `prompt()` raises `RunCancelled` → surfaced
+  as `RuntimeCancelledError`.
+* `thinking` is session-scoped (`Session.create(thinking: bool)`).
+  Toggling between turns rebuilds the SDK session and re-resumes by
+  id to preserve conversation state.
+* Permission via `ApprovalRequest.resolve()` (per-call); `defer`
+  collapses to `reject` with feedback because the SDK's approval
+  channel is synchronous.
+* Auth: SDK reads `KIMI_API_KEY` from env; the adapter mutates
+  env for the call duration when an explicit `api_key=` is passed
+  and restores it on `close()`.
 
 ### AWS Bedrock (Converse API)
 
@@ -449,11 +449,11 @@ Adapters compute `cost_usd` two ways:
 
 1. **Vendor-reported.** Claude Agent SDK exposes `total_cost_usd`
    directly. `ClaudeCodeRuntime` propagates it unchanged.
-2. **Computed from token counts.** OpenAI / Codex / Copilot return
-   tokens but not cost. Each adapter ships a stub pricing map
-   (USD per 1K tokens) and computes `cost_usd = (in_tokens / 1000)
-   * in_rate + (out_tokens / 1000) * out_rate`. Models not in the
-   map report `cost_usd=None` (tokens are always populated).
+2. **Computed from token counts.** OpenAI-compat / Copilot / Kimi
+   return tokens but not cost. Each adapter ships a stub pricing
+   map (USD per 1K tokens) and computes `cost_usd = (in_tokens /
+   1000) * in_rate + (out_tokens / 1000) * out_rate`. Models not
+   in the map report `cost_usd=None` (tokens are always populated).
 
 The stub maps will migrate to a dedicated `airframe.pricing` module
 in a later release. Until then, override per-model rates by editing

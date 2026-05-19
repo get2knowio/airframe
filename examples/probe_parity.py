@@ -7,8 +7,8 @@ conditionals. Drives home the point that consumer code stays
 identical regardless of which provider it ends up calling.
 
     uv run python examples/probe_parity.py
-    uv run python examples/probe_parity.py --providers claude,codex
-    AIRFRAME_PROBE_MODEL_CODEX=gpt-5.5 uv run python examples/probe_parity.py
+    uv run python examples/probe_parity.py --providers claude,github-copilot
+    AIRFRAME_PROBE_MODEL_CLAUDE=claude-haiku-4-5 uv run python examples/probe_parity.py
 
 Outcomes per provider:
 
@@ -24,20 +24,12 @@ adapters is the normal case.
 Per-provider model override: set ``AIRFRAME_PROBE_MODEL_<PROVIDER>``
 where ``<PROVIDER>`` is the upper-cased provider ID with hyphens
 swapped for underscores (``AIRFRAME_PROBE_MODEL_GITHUB_COPILOT`` etc.).
-
-Codex auto-detection: when no ``AIRFRAME_PROBE_MODEL_CODEX`` is set
-and ``~/.codex/auth.json`` shows ChatGPT-account auth (``codex login``
-rather than ``OPENAI_API_KEY``), the probe reads the codex CLI's own
-``~/.codex/models_cache.json`` and uses the first listable model
-instead of the SDK default ``gpt-5-codex`` (which OpenAI rejects on
-that auth path).
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
-import json
 import os
 import sys
 import time
@@ -61,51 +53,9 @@ class Answer(BaseModel):
 PROMPT = "What is 17 + 25? Reply with answer and a short rationale."
 
 
-def _codex_subscription_model() -> str | None:
-    """Pick a Codex model that works under ChatGPT-account auth.
-
-    The Codex SDK's default ``gpt-5-codex`` is rejected by OpenAI when
-    the user is authenticated via ``codex login`` (subscription path)
-    instead of an ``OPENAI_API_KEY``. The codex CLI itself caches the
-    actual available models for the active auth in
-    ``~/.codex/models_cache.json`` — we read the first visible entry
-    so the probe Just Works on a fresh ChatGPT-account setup.
-
-    Returns ``None`` when auth mode isn't ``chatgpt`` (the SDK default
-    is correct), when the cache is missing / malformed, or when no
-    listable model is present.
-    """
-    home = Path.home()
-    auth_path = home / ".codex" / "auth.json"
-    cache_path = home / ".codex" / "models_cache.json"
-    if not auth_path.exists() or not cache_path.exists():
-        return None
-    try:
-        auth = json.loads(auth_path.read_text())
-        if auth.get("auth_mode") != "chatgpt":
-            return None
-        cache = json.loads(cache_path.read_text())
-        for entry in cache.get("models", []):
-            if not isinstance(entry, dict):
-                continue
-            if entry.get("visibility") != "list":
-                continue
-            slug = entry.get("slug")
-            if isinstance(slug, str) and slug:
-                return slug
-    except (OSError, json.JSONDecodeError, KeyError):
-        return None
-    return None
-
-
 def _model_override(provider_id: str) -> str | None:
     env_key = "AIRFRAME_PROBE_MODEL_" + provider_id.upper().replace("-", "_")
-    explicit = os.environ.get(env_key)
-    if explicit:
-        return explicit
-    if provider_id == "codex":
-        return _codex_subscription_model()
-    return None
+    return os.environ.get(env_key)
 
 
 async def probe_one(provider_id: str) -> tuple[str, str]:

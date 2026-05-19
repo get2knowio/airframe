@@ -6,13 +6,16 @@ introduces the ``thinking=`` kwarg on :meth:`AgentSession.execute` /
 
 Vendors expose extended-thinking / reasoning-effort differently:
 
-* **OpenAI / Codex / OpenAI-compat** — ``reasoning_effort`` enum
+* **OpenAI / OpenAI-compat** — ``reasoning_effort`` enum
   (``"low" | "medium" | "high"``), and on some models ``"minimal"``.
 * **Anthropic / Claude Code** — ``thinking={"type": "enabled",
   "budget_tokens": N}`` on the Messages API; the Claude Agent SDK
   exposes the same shape on its ``ClaudeAgentOptions``.
 * **GitHub Copilot** — ``reasoning_effort`` enum mirroring OpenAI's,
   passed on session creation.
+* **Moonshot Kimi** — boolean ``thinking`` kwarg on
+  :meth:`Session.create`; the model decides depth itself once
+  enabled, so every airframe effort literal collapses to ``True``.
 
 Airframe collapses these onto one union type that covers both
 shapes — a literal effort level for the portable case, and the
@@ -35,7 +38,7 @@ from typing import Any, Literal
 
 #: Portable literal effort level. Every vendor that exposes
 #: reasoning-effort accepts ``"low" | "medium" | "high"`` (or a
-#: superset that includes them). ``"minimal"`` is OpenAI / Codex only;
+#: superset that includes them). ``"minimal"`` is OpenAI-family only;
 #: adapters that don't honour it coerce to ``"low"`` with a debug-level
 #: log per the implementation plan.
 ReasoningEffort = Literal["minimal", "low", "medium", "high"]

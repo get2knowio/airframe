@@ -11,9 +11,10 @@ vendor's native permission channel:
 * **Claude Agent SDK** — :attr:`ClaudeAgentOptions.can_use_tool`.
 * **GitHub Copilot SDK** — :attr:`CopilotSession.on_permission_request`
   (mandatory at session creation).
-* **OpenAI Codex SDK** — :attr:`Thread.approval_policy` (session-wide
-  enum; the callback fires once at session creation to derive the
-  enum value, since Codex has no per-call permission channel).
+* **Kimi Agent SDK** — per-call dispatch from the
+  :class:`ApprovalRequest` wire messages the SDK emits when
+  ``yolo=False``. The adapter calls
+  :meth:`ApprovalRequest.resolve(...)` with the translated decision.
 * **OpenAI-compatible HTTP** — declines. Chat Completions has no
   permission wire shape; ``on_permission=`` raises
   :class:`~airframe.errors.UnsupportedFeatureError`. A future
@@ -37,10 +38,10 @@ PermissionDecision = Literal["allow", "deny", "defer"]
 
 * ``"allow"`` — let the model invoke the tool. Maps to the vendor's
   "approve" value (Claude ``allow``, Copilot ``approve_once``,
-  Codex auto-approve via ``never`` policy).
+  Kimi ``approve``).
 * ``"deny"`` — block the call; the model sees a tool-execution
   failure and can recover. Maps to vendor "reject" (Claude ``deny``,
-  Copilot ``reject``, Codex ``untrusted`` policy).
+  Copilot ``reject``, Kimi ``reject``).
 * ``"defer"`` — fall through to the vendor's default policy. Useful
   when the airframe-level callback only knows how to decide for a
   subset of tools; everything else routes to the SDK's built-in

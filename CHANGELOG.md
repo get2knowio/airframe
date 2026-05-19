@@ -6,6 +6,65 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+---
+
+## [0.7.0] — 2026-05-19
+
+Major release: adds the `KimiRuntime` adapter and **removes
+`CodexRuntime` and the `[codex]` pip extra**. The Codex removal is a
+breaking change for anyone importing `CodexRuntime` or installing
+`airframe-agents[codex]`; per pre-1.0 SemVer convention the minor
+version is bumped.
+
+### Removed
+
+- **`CodexRuntime` adapter, in full.** Deleted
+  `src/airframe/adapters/codex.py` (~1500 LOC), the `CodexOptions`
+  dataclass, the `[codex]` pip extra (`openai-codex-sdk>=0.1.11`
+  dependency), `examples/probe_codex.py`, `docs/adapters/codex.md`,
+  and the four Codex test modules (`test_codex.py`,
+  `test_codex_session.py`, `test_codex_conformance.py`,
+  `test_codex_integration.py`). All cross-references in src docstrings,
+  per-adapter docs, the README, and `CLAUDE.md` are scrubbed.
+- **`"codex"` no longer appears in `list_providers()`,
+  `runtime_for()`, the `airframe.adapters` entry-point group, or the
+  `airframe.testing.integration._PROVIDER_AUTH` map.**
+
+**Why.** Two things converged. (1) The package
+`airframe-agents` was wrapping — `openai-codex-sdk` on PyPI — has
+murky provenance: it self-declares `author: OpenAI` but it does not
+live in `github.com/openai/codex` (OpenAI's official Codex repo),
+nor has it kept pace with the Codex CLI's recent releases. (2) The
+actually-official Python SDK at `github.com/openai/codex/sdk/python`
+is published as `openai-codex` (currently `0.131.0a4` — still alpha)
+and has a different architecture entirely (JSON-RPC app-server v2
+over stdio); it is not a drop-in replacement, and notably neither
+Python package exposes `client.models.list()` (only the Node
+`@openai/codex` SDK does). That made the post-v0.6.3 false-negative
+in Maverick's `doctor` command — `list_models()` rejecting ChatGPT
+OAuth tokens against `api.openai.com/v1/models` — fundamentally
+unfixable from inside `CodexRuntime.list_models()` without
+hand-rolling more code on top of a package whose maintainership we
+can't verify. Wrapping uncertain-provenance code isn't earning its
+weight pre-1.0, so the cleaner move is to remove the adapter and
+revisit once the official `openai-codex` package leaves alpha.
+
+**Migration.** Direct users of `CodexRuntime` should either pin
+`airframe-agents<0.7` or migrate to a still-supported adapter:
+`ClaudeCodeRuntime`, `CopilotRuntime`, `BedrockRuntime`, or an
+OpenAI-compatible gateway adapter
+(`OpenCodeZenRuntime` / `OpenCodeGoRuntime` /
+`OpenRouterRuntime`). Codex subscription holders can route through
+opencode adapters, which already accept the Codex provider on the
+opencode side.
+
+### Reserved
+
+- **`"codex"` stays reserved** for a possible future adapter wrapping
+  the official `openai-codex` Python SDK once it leaves alpha and
+  surfaces a stable enough JSON-RPC surface to wrap. The provider ID
+  is not re-usable for any other vendor.
+
 ### Added
 
 - **`KimiRuntime`** — new adapter wrapping Moonshot AI's
@@ -58,21 +117,23 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
-- **`docs/auth.md` § CodexRuntime** — refreshed for v0.6.3's
-  opencode-leak fix. The Codex chain is now three steps (explicit
-  → env → `~/.codex/auth.json`), and the OAuth-vs-static-key shape
-  distinction is documented.
-- **README provider table** — Codex row no longer mentions
-  opencode's auth.json (post-v0.6.3); new Kimi row alphabetised
-  between Copilot and OpenCode Go.
-- **README capability matrix** — new Kimi column.
-- **`docs/capabilities.md`** — new Kimi column in the matrix.
+- **README provider table** — new Kimi row alphabetised between
+  Copilot and OpenCode Go; the Codex row is gone.
+- **README capability matrix** — new Kimi column; Codex column
+  dropped.
+- **`docs/capabilities.md`** — new Kimi column; Codex column
+  dropped.
+- **`docs/architecture.md`** — adapter row redrawn for the five
+  remaining families (Claude / Copilot / Kimi / Bedrock / OpenAI-
+  compatible); per-SDK section gains a "### Kimi Agent SDK" entry
+  in place of "### Codex SDK".
 
-### Reserved
+### Moonshot reservation
 
-- `"moonshot"` as a future OpenAI-compat sibling that would front
-  Moonshot's `api.moonshot.ai/v1` chat-completions surface — distinct
-  from `KimiRuntime`, which wraps the Kimi Agent SDK subprocess.
+- `"moonshot"` remains reserved as a future OpenAI-compat sibling
+  that would front Moonshot's `api.moonshot.ai/v1` chat-completions
+  surface — distinct from `KimiRuntime`, which wraps the Kimi Agent
+  SDK subprocess.
 
 ---
 

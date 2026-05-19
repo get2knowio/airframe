@@ -12,8 +12,8 @@ production (explicit constructor argument).
 |---|---|---|
 | **BedrockRuntime** | explicit `aws_access_key_id`/`secret`/`session_token` → `AWS_ACCESS_KEY_ID`+`AWS_SECRET_ACCESS_KEY` env → `AWS_PROFILE` env → default boto3 chain (IAM instance / ECS task / Lambda / IRSA) | `airframe-agents[bedrock]` |
 | **ClaudeCodeRuntime** | `CLAUDE_CODE_OAUTH_TOKEN` → `~/.claude/.credentials.json` → `ANTHROPIC_API_KEY` | `airframe-agents[claude]` |
-| **CodexRuntime** | `api_key=` constructor arg → `OPENAI_API_KEY` env → `CODEX_API_KEY` env → `~/.local/share/opencode/auth.json::openai.key` → implicit `~/.codex/auth.json` (CLI-managed) | `airframe-agents[codex]` |
 | **CopilotRuntime** | `github_token=` constructor arg → `GITHUB_TOKEN` env → `GH_TOKEN` env → `use_logged_in_user=True` (`gh auth login` storage) | `airframe-agents[copilot]` |
+| **KimiRuntime** | `api_key=` constructor arg → `KIMI_API_KEY` env → SDK's own resolution | `airframe-agents[kimi]` |
 | **OpenCodeGoRuntime** | `api_key=` constructor arg → `OPENCODE_API_KEY` env → `~/.local/share/opencode/auth.json::opencode-go.key` | `airframe-agents[openai-compat]` |
 | **OpenCodeZenRuntime** | `api_key=` constructor arg → `OPENCODE_API_KEY` env → `~/.local/share/opencode/auth.json::opencode.key` | `airframe-agents[openai-compat]` |
 | **OpenRouterRuntime** | `api_key=` constructor arg → `OPENROUTER_API_KEY` env | `airframe-agents[openai-compat]` |
@@ -123,59 +123,6 @@ Three sources, checked in order at `execute()` time:
 - Provide an override at construction:
   `ClaudeCodeRuntime(api_key="sk-ant-...")` (the parameter is
   `api_key=` even though the source is named `ANTHROPIC_API_KEY`).
-
-## CodexRuntime
-
-```python
-from airframe import CodexRuntime
-runtime = CodexRuntime()  # env or opencode auth or codex-CLI auth
-runtime_explicit = CodexRuntime(api_key="sk-proj-...")
-```
-
-Three sources, checked in order:
-
-1. **`api_key=` constructor arg** — explicit OpenAI API key.
-   Passed through to `Codex({"apiKey": ...})`.
-2. **`OPENAI_API_KEY` env var** — the standard OpenAI variable.
-   Falls back to **`CODEX_API_KEY`**, the codex-CLI alias. The
-   `openai-codex-sdk` subprocess inherits `os.environ`, so these
-   work without explicit forwarding.
-3. **`~/.codex/auth.json`** — populated by `codex login`. Two
-   shapes are common:
-   - Static-key shape (`{"OPENAI_API_KEY": "sk-..."}` from
-     `codex login --api-key=…`) — lifted into the SDK
-     constructor.
-   - ChatGPT-OAuth bundle shape (`{"OPENAI_API_KEY": null,
-     "auth_mode": "...", "tokens": {"access_token", "refresh_token",
-     "id_token", "account_id"}}` from `codex login` against a
-     ChatGPT Plus/Pro subscription) — **not** lifted. The Codex
-     CLI subprocess reads the file itself and refreshes the OAuth
-     tokens as needed; airframe stays out of that path. Path
-     override: **`CODEX_AUTH_PATH`** env var.
-
-### Notes
-
-- The ChatGPT OAuth bundle shape means `CodexRuntime()` with no
-  env vars **still works** for ChatGPT Plus / Pro users who ran
-  `codex login` previously — the CLI subprocess handles the OAuth
-  dance itself.
-- `list_models()` is stricter than `execute()`: ChatGPT OAuth
-  access tokens aren't valid against `api.openai.com/v1/models`, so
-  when airframe detects the OAuth bundle shape but no static key,
-  `list_models()` raises a tailored `RuntimeAuthError` pointing the
-  user at `codex login --api-key=…` or `OPENAI_API_KEY=`.
-- airframe v0.6.3 fixed a credential-leak where the Codex adapter
-  was reading opencode's auth.json (`~/.local/share/opencode/`)
-  instead of Codex's own. The cross-product read is gone; the
-  `OPENCODE_AUTH_PATH` env override no longer applies to
-  `CodexRuntime`.
-- `codex_path=` overrides the Codex CLI binary path; honours
-  `CODEX_CLI_PATH` env var.
-- `sandbox_mode=` controls the codex subprocess's filesystem
-  sandbox (`"read-only"`, `"workspace-write"`, `"danger-full-access"`).
-  Defaults to `"read-only"`. Lives at the runtime constructor, not
-  in `CodexOptions`, because it's a security-relevant default that
-  shouldn't vary per session.
 
 ## CopilotRuntime
 

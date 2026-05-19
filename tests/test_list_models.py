@@ -10,8 +10,6 @@ Each adapter has its own model-discovery path:
   chain and lets the SDK send the right headers.
 * :class:`CopilotRuntime` — native ``CopilotClient.list_models()``
   (Copilot ships rich metadata: vision, reasoning_effort, context window).
-* :class:`CodexRuntime` — ``AsyncOpenAI.models.list()`` filtered to
-  codex-shaped IDs.
 * :class:`OpenCodeZenRuntime` (via :class:`OpenAICompatibleRuntime`
   base) — ``AsyncOpenAI.models.list()`` joined with ``_METADATA``.
 
@@ -26,14 +24,12 @@ These tests mock at the vendor-SDK boundary and assert that:
 from __future__ import annotations
 
 import json
-from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from airframe.adapters.claude_code import ClaudeCodeRuntime
-from airframe.adapters.codex import CodexRuntime
 from airframe.adapters.copilot import CopilotRuntime
 from airframe.adapters.opencode_zen import OpenCodeZenRuntime
 from airframe.errors import (
@@ -497,7 +493,7 @@ async def test_copilot_list_models_auth_error_classifies(
 
 
 # ---------------------------------------------------------------------------
-# CodexRuntime.list_models — AsyncOpenAI filtered to codex-shaped IDs
+# OpenCodeZenRuntime.list_models — via OpenAICompatibleRuntime base
 # ---------------------------------------------------------------------------
 
 
@@ -536,104 +532,6 @@ def _patch_async_openai(
         return mock_client
 
     monkeypatch.setattr(openai, "AsyncOpenAI", factory)
-
-
-@pytest.mark.asyncio
-async def test_codex_list_models_filters_to_codex_shaped_ids(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """OpenAI /v1/models returns *everything*; codex adapter filters to its tier."""
-    fake_page = _FakeOpenAIPage(
-        data=[
-            _FakeOpenAIModel("gpt-5-codex"),
-            _FakeOpenAIModel("gpt-5-codex-mini"),
-            _FakeOpenAIModel("o5-codex"),
-            # Models we don't surface from the codex adapter:
-            _FakeOpenAIModel("gpt-4o"),
-            _FakeOpenAIModel("text-embedding-3-small"),
-            _FakeOpenAIModel("whisper-1"),
-        ]
-    )
-    _patch_async_openai(monkeypatch, page=fake_page)
-
-    rt = CodexRuntime(api_key="sk-test")
-    models = await rt.list_models()
-
-    ids = {m.id for m in models}
-    assert ids == {"gpt-5-codex", "gpt-5-codex-mini", "o5-codex"}
-    assert all(m.provider_id == "codex" for m in models)
-
-    flagship = next(m for m in models if m.id == "gpt-5-codex")
-    assert flagship.display_name == "GPT-5 Codex"
-    assert flagship.context_window == 256_000
-    assert flagship.pricing_input_per_1k_usd == 0.0015
-    assert flagship.pricing_output_per_1k_usd == 0.0060
-
-
-@pytest.mark.asyncio
-async def test_codex_list_models_without_api_key_raises_auth(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-    monkeypatch.delenv("CODEX_API_KEY", raising=False)
-    # Steer the ~/.codex/auth.json fallback at a path that doesn't exist.
-    monkeypatch.setenv("CODEX_AUTH_PATH", "/tmp/airframe-nonexistent-codex-auth.json")
-    rt = CodexRuntime()
-    with pytest.raises(RuntimeAuthError) as excinfo:
-        await rt.list_models()
-    assert "OPENAI_API_KEY" in str(excinfo.value)
-
-
-@pytest.mark.asyncio
-async def test_codex_list_models_oauth_only_auth_json_raises_tailored_error(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """OAuth-bundle ``~/.codex/auth.json`` (ChatGPT Plus subscription)
-    surfaces a tailored error explaining the mismatch — /v1/models needs
-    a Platform API key, not a ChatGPT OAuth access_token."""
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-    monkeypatch.delenv("CODEX_API_KEY", raising=False)
-    auth_file = tmp_path / "auth.json"
-    auth_file.write_text(
-        json.dumps(
-            {
-                "OPENAI_API_KEY": None,
-                "auth_mode": "chatgpt",
-                "tokens": {
-                    "access_token": "oauth-access-token",
-                    "refresh_token": "oauth-refresh-token",
-                    "id_token": "oauth-id-token",
-                    "account_id": "acct_123",
-                },
-            }
-        )
-    )
-    monkeypatch.setenv("CODEX_AUTH_PATH", str(auth_file))
-    rt = CodexRuntime()
-    with pytest.raises(RuntimeAuthError) as excinfo:
-        await rt.list_models()
-    assert "ChatGPT-OAuth" in str(excinfo.value)
-    assert "Platform" in str(excinfo.value)
-
-
-@pytest.mark.asyncio
-async def test_codex_list_models_auth_error_from_sdk(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from openai import AuthenticationError
-
-    err = AuthenticationError(message="bad key", response=MagicMock(status_code=401), body=None)
-    _patch_async_openai(monkeypatch, page=err)
-
-    rt = CodexRuntime(api_key="sk-bad")
-    with pytest.raises(RuntimeAuthError):
-        await rt.list_models()
-
-
-# ---------------------------------------------------------------------------
-# OpenCodeZenRuntime.list_models — via OpenAICompatibleRuntime base
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio

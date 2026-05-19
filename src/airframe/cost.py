@@ -7,7 +7,7 @@ sink the consumer uses.
 
 Adapters with vendor-computed cost (Claude Agent SDK exposes
 ``total_cost_usd`` directly) populate ``cost_usd`` from the vendor's
-report. Adapters without (raw OpenAI / Codex / Copilot) compute
+report. Adapters without (raw OpenAI-family, Copilot, Kimi) compute
 ``cost_usd`` from token counts × a per-model pricing rate — and emit
 ``cost_usd=None`` when no rate is configured for the model.
 """
@@ -40,8 +40,8 @@ class CostRecord:
             the model consumed *in addition to* ``output_tokens``. Each
             SDK reports these under a different name (Claude SDK's
             ``thinking_tokens``, OpenAI's
-            ``completion_tokens_details.reasoning_tokens``, Codex
-            stretches ``output_tokens``); canonicalised here. ``0`` when
+            ``completion_tokens_details.reasoning_tokens``);
+            canonicalised here. ``0`` when
             the model didn't reason, the adapter doesn't expose the
             counter, or the SDK hasn't wired it yet.
         finish: Provider-reported stop reason (``"stop"``, ``"length"``,

@@ -734,7 +734,6 @@ def test_session_rejects_wrong_provider_options_namespace(adapter_runtime: Any) 
     from airframe.options import (
         BedrockOptions,
         ClaudeOptions,
-        CodexOptions,
         CopilotOptions,
         KimiOptions,
         OpenAICompatOptions,
@@ -743,7 +742,6 @@ def test_session_rejects_wrong_provider_options_namespace(adapter_runtime: Any) 
     matching = {
         "claude": ClaudeOptions,
         "github-copilot": CopilotOptions,
-        "codex": CodexOptions,
         "opencode-zen": OpenAICompatOptions,
         "opencode-go": OpenAICompatOptions,
         "openrouter": OpenAICompatOptions,
@@ -755,7 +753,6 @@ def test_session_rejects_wrong_provider_options_namespace(adapter_runtime: Any) 
     all_namespaces = (
         ClaudeOptions,
         CopilotOptions,
-        CodexOptions,
         OpenAICompatOptions,
         BedrockOptions,
         KimiOptions,
