@@ -400,6 +400,17 @@ Adapter mapping:
 
 ### P1 — Explicit multi-turn / session continuation
 
+**Status:** Largely shipped in v0.3.0 (the `AgentSession` retrofit)
+and v0.4.0+ (`runtime.session(resume=...)` on adapters declaring
+`Feature.SESSION_RESUME`). One remaining gap surfaced by an
+Earlybird adoption attempt: **stateless backend + frontend-owned
+transcript** — the fourth multi-turn shape that none of the
+existing three mechanisms (in-memory session, `resume=`,
+single-call multi-turn loop) serve. Spec'd in
+[`history-seed-plan.md`](./history-seed-plan.md) as a new
+`prior_messages=` kwarg on `session()` + `Feature.HISTORY_SEED`
+flag. v0.9.0 candidate.
+
 **Why.** Today the protocol is "send prompt → get answer; if you
 `reset()` you've nuked the conversation." A consumer that wants to do
 follow-up turns has to keep the runtime instance alive and just call
