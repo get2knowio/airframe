@@ -6,6 +6,17 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+---
+
+## [0.8.0] — 2026-05-20
+
+Minor release: adds the `OpenCodeServerRuntime` adapter wrapping
+`sst/opencode`'s HTTP agent server. New provider ID: `"opencode"`,
+distinct from the existing `"opencode-zen"` / `"opencode-go"` (those
+two wrap OpenCode's OpenAI-compat *gateway* endpoints; this one
+targets the local agent server you start with `opencode serve`).
+Additive; no breaking changes.
+
 ### Added
 
 - **`OpenCodeServerRuntime`** — new adapter wrapping `sst/opencode`'s
