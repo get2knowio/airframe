@@ -684,6 +684,84 @@ Adapters that don't have a native hook (Codex, OpenAI-compat) can
 synthesise the obvious ones from the message/event stream. Adapters
 that do (Claude, Copilot) wire it through.
 
+### P3 — Agent Skills
+
+**Why.** Since this roadmap was first written, "Skills" has
+converged into a **cross-vendor filesystem convention** — a folder
+containing a `SKILL.md` (YAML frontmatter + Markdown body) describing
+a capability the model can autonomously invoke. Four of airframe's
+shipped adapters now implement it the same way:
+
+* **Claude Agent SDK** — `ClaudeAgentOptions(setting_sources=["user",
+  "project"], skills="all" | [...names])`. Discovers
+  `.claude/skills/*/SKILL.md` and `~/.claude/skills/*/SKILL.md`.
+* **GitHub Copilot SDK** — `skill_directories=`, `disabled_skills=`
+  on `create_session`; `skill.invoked` event. SKILL.md support added
+  April 2026, deliberately cross-compatible with Claude/Cursor/Codex
+  skill bundles.
+* **Kimi Agent SDK** — "knowledge-based extensions discovered from
+  layered directories, grouped by scope and injected into the system
+  prompt." Reuses Kimi Code config; no Python-level skills API.
+* **OpenCode (`opencode serve`)** — first-party auto-discovery from
+  `.opencode/skills/`, `~/.config/opencode/skills/`, plus deliberately
+  also `.claude/skills/` and `.agents/skills/` so a single bundle
+  works cross-vendor. Access gated via `opencode.json`
+  `permission.skill` (`allow` / `deny` / `ask`).
+
+`bedrock` (Converse), `opencode-zen`, `opencode-go`, and `openrouter`
+have no skill concept. The reserved `bedrock-agents` adapter has its
+own action-groups / Knowledge-Bases surface that is *not* SKILL.md
+and shouldn't be folded in.
+
+The non-obvious bit is that Skills are a **filesystem contract, not
+an API one** — every vendor's Python surface is just a *filter* over
+what was already discovered on disk; nobody exposes
+`register_skill(...)`. That keeps airframe's abstraction small: pipe
+"where to look" + "which to enable"; don't try to abstract the
+SKILL.md authoring format (it's already cross-vendor).
+
+**Sketch.** A capability flag plus a typed `ProviderOptions` namespace,
+forwarded at session construction:
+
+```python
+class Feature(IntEnum):
+    ...
+    AGENT_SKILLS = auto()
+
+@dataclass(frozen=True, slots=True)
+class SkillsConfig:
+    enabled: Literal["all"] | list[str] | None = "all"
+    search_paths: list[Path] | None = None    # extra roots beyond defaults
+    include_user_global: bool = True          # ~/.claude/skills, etc.
+
+runtime.session(skills=SkillsConfig(enabled=["pdf", "docx"]))
+```
+
+Per-adapter mapping:
+* Claude → `setting_sources=["user", "project"]` + `skills=...`;
+  `search_paths` extend `cwd` / `add_dirs`.
+* Copilot → `skill_directories=` + `disabled_skills=` on
+  `create_session`.
+* Kimi → write/symlink `search_paths` into the layered discovery path
+  Kimi Code already walks; filter via Kimi Code config.
+* OpenCode → translate `enabled=` to `opencode.json`
+  `permission.skill` allow/deny rules; honour the server's
+  auto-discovery for `search_paths`.
+* `bedrock` / `opencode-zen` / `opencode-go` / `openrouter` →
+  `supports(AGENT_SKILLS)` returns `False`; passing a `SkillsConfig`
+  raises `UnsupportedBindingError`.
+
+Phase-0 scaffold first — add the `Feature.AGENT_SKILLS` enum entry
+and an empty `SkillsConfig` namespace returning `False` from every
+adapter — then a substantive phase that wires the four supporting
+adapters and adds a conformance test (fixture dir containing a known
+SKILL.md ⇒ the model can name and invoke it).
+
+**Don't.** Don't fake skills on non-supporting adapters by inlining
+SKILL.md content into the system prompt. `supports()` exists so
+consumers can fall back themselves; vendor shimming is the kind of
+"helpful" abstraction the codebase deliberately avoids.
+
 ### P4 — Working-directory / sandbox
 
 **Why.** Three of four agentic SDKs expose CWD + sandbox toggles.
