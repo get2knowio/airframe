@@ -21,7 +21,6 @@ from airframe.testing.contracts import (  # noqa: F401
     test_runtime_result_has_reasoning_field,
     test_runtime_transient_error_carries_rate_limit_attr,
     test_session_accepts_cache_kwarg,
-    test_session_accepts_compaction_kwarg,
     test_session_accepts_metadata_kwarg,
     test_session_accepts_slash_commands_kwarg,
     test_session_cancel_when_idle_is_noop,

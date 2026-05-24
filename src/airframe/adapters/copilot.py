@@ -56,7 +56,6 @@ from typing import TYPE_CHECKING, Any, ClassVar, TypeVar
 from pydantic import BaseModel, ValidationError
 
 from airframe.cache import CacheConfig
-from airframe.compaction import CompactionConfig
 from airframe.cost import CostRecord
 from airframe.errors import (
     AgentRuntimeError,
@@ -399,7 +398,6 @@ class CopilotRuntime(AgentRuntime):
         metadata: RequestMetadata | None = None,
         cache: CacheConfig | None = None,
         slash_commands: SlashCommandsConfig | None = None,
-        compaction: CompactionConfig | None = None,
     ) -> AgentSession:
         """Open a bespoke :class:`CopilotAgentSession`.
 
@@ -511,8 +509,6 @@ class CopilotRuntime(AgentRuntime):
         # Phase 6 — PROMPT_CACHE_CONTROL soft contract: Copilot's SDK
         # has no explicit cache-key channel. Silently drop.
         del cache
-        # Phase 6 — COMPACTION_CONTROL scaffolding. Silently drop.
-        del compaction
         copilot_options = (
             provider_options if isinstance(provider_options, CopilotOptions) else None
         )

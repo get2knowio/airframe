@@ -47,10 +47,6 @@ The associated APIs:
 * :data:`Feature.SLASH_COMMANDS` — adapter discovers + invokes
   user-triggered slash commands from the filesystem. Scaffolding
   only today; namespace locked for forward compat. Phase 6.
-* :data:`Feature.COMPACTION_CONTROL` — adapter honours
-  :class:`~airframe.compaction.CompactionConfig` for trigger
-  threshold + summariser prompt. Scaffolding only today;
-  configuration sibling of the ``pre_compact`` hook event. Phase 6.
 * :data:`Feature.VISION_INPUT` — image content parts on
   ``prompt=``. Phase 2.
 * :data:`Feature.FILE_INPUT` — document / PDF content parts on
@@ -201,14 +197,6 @@ class Feature(StrEnum):
     Agent Skills — same YAML-frontmatter convention, different
     trigger semantics (user-invoked vs model-invoked). Scaffolding
     only today; no adapter currently returns ``True``."""
-
-    COMPACTION_CONTROL = "compaction_control"
-    """Adapter honours :class:`~airframe.compaction.CompactionConfig`
-    (trigger / threshold / summariser prompt) on
-    :meth:`session(compaction=...)`. The :mod:`airframe.hooks`
-    ``pre_compact`` event is the *observation* sibling; this is the
-    *configuration* side. Scaffolding only today; no adapter
-    currently returns ``True``."""
 
     SANDBOX = "sandbox"
     """``session(sandbox=...)`` constrains tool filesystem / network access."""

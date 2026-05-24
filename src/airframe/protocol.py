@@ -42,7 +42,6 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from airframe.cache import CacheConfig
-    from airframe.compaction import CompactionConfig
     from airframe.events import RuntimeEvent
     from airframe.features import Feature
     from airframe.hooks import HookEvent
@@ -444,7 +443,6 @@ class AgentRuntime(Protocol):
         metadata: RequestMetadata | None = None,
         cache: CacheConfig | None = None,
         slash_commands: SlashCommandsConfig | None = None,
-        compaction: CompactionConfig | None = None,
     ) -> AgentSession:
         """Open a multi-turn session against this runtime.
 
@@ -561,23 +559,11 @@ class AgentRuntime(Protocol):
                 without the cache speed-up.
             slash_commands: Optional
                 :class:`~airframe.slash_commands.SlashCommandsConfig`
-                enabling user-invokable slash commands discovered
-                from the filesystem. Scaffolding only today — no
-                adapter declares
-                :data:`~airframe.features.Feature.SLASH_COMMANDS`,
-                so this kwarg is accepted but silently dropped on
-                every adapter for now. Locks the namespace shape
-                for forward compat when the discovery + invocation
-                surface lands.
-            compaction: Optional
-                :class:`~airframe.compaction.CompactionConfig`
-                controlling auto-compaction trigger / threshold /
-                summariser prompt. Scaffolding only today — no
-                adapter declares
-                :data:`~airframe.features.Feature.COMPACTION_CONTROL`,
-                so this kwarg is accepted but silently dropped
-                everywhere. Configuration sibling of the
-                ``pre_compact`` hook event (which IS wired today).
+                controlling filesystem discovery of user-invokable
+                slash commands. Every adapter declares
+                :data:`~airframe.features.Feature.SLASH_COMMANDS`
+                because discovery is filesystem-only and adapter-
+                agnostic — see :meth:`AgentSession.list_slash_commands`.
 
         Returns:
             A fresh :class:`AgentSession`.

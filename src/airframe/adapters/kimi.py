@@ -113,7 +113,6 @@ from typing import TYPE_CHECKING, Any, ClassVar, TypeVar
 from pydantic import BaseModel
 
 from airframe.cache import CacheConfig
-from airframe.compaction import CompactionConfig
 from airframe.cost import CostRecord
 from airframe.errors import (
     RuntimeAuthError,
@@ -662,7 +661,6 @@ class KimiRuntime(AgentRuntime):
         metadata: RequestMetadata | None = None,
         cache: CacheConfig | None = None,
         slash_commands: SlashCommandsConfig | None = None,
-        compaction: CompactionConfig | None = None,
     ) -> AgentSession:
         """Open a :class:`KimiSession`.
 
@@ -746,8 +744,6 @@ class KimiRuntime(AgentRuntime):
         # Phase 6 — PROMPT_CACHE_CONTROL soft contract: Kimi has no
         # explicit cache-key channel; silently drop.
         del cache
-        # Phase 6 — COMPACTION_CONTROL scaffolding. Silently drop.
-        del compaction
         return KimiSession(
             self,
             resume=resume,

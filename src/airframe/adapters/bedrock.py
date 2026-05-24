@@ -129,7 +129,6 @@ from typing import TYPE_CHECKING, Any, ClassVar, TypeVar
 from pydantic import BaseModel, ValidationError
 
 from airframe.cache import CacheConfig
-from airframe.compaction import CompactionConfig
 from airframe.cost import CostRecord
 from airframe.errors import (
     RuntimeAuthError,
@@ -578,7 +577,6 @@ class BedrockRuntime(AgentRuntime):
         metadata: RequestMetadata | None = None,
         cache: CacheConfig | None = None,
         slash_commands: SlashCommandsConfig | None = None,
-        compaction: CompactionConfig | None = None,
     ) -> AgentSession:
         # Iteration B accepts the structural kwargs but only ``system`` /
         # ``model`` are honoured; later iterations wire tools/MCP/hooks/
@@ -593,8 +591,6 @@ class BedrockRuntime(AgentRuntime):
         # models, but airframe doesn't yet translate the portable
         # CacheConfig into that shape. Silently drop for v1.
         del cache
-        # Phase 6 — COMPACTION_CONTROL scaffolding. Silently drop.
-        del compaction
         if resume is not None:
             raise UnsupportedFeatureError(
                 "BedrockSession: SESSION_RESUME is not supported — Converse is "

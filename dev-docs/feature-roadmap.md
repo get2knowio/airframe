@@ -1112,14 +1112,24 @@ config now, defer the runtime invocation surface to a real phase.
 
 ### P4 — Compaction control (not just observation)
 
-**Status:** Scaffolding shipped on `main` (this commit). The
-`CompactionConfig` dataclass + `Feature.COMPACTION_CONTROL` enum
-entry + `session(compaction=...)` kwarg are in place; no adapter
-flips the feature flag to `True` yet (the per-vendor translation
-into Claude's `fold_session_summary` / OpenAI Responses'
-`context_management` shape plus a session-level `compact()` method
-on `AgentSession` is deferred until a consumer with long-running
-sessions asks). Namespace shape is locked for forward compat.
+**Status:** *Not pursued.* The scaffolding was added and then
+removed — the vendor SDKs airframe wraps don't expose what we'd
+need for an honest implementation. Claude Agent SDK's
+`ClaudeAgentOptions` has `session_store` / `session_store_flush` /
+`fork_session` but no `fold_session_summary` knob; Copilot's SDK
+emits `compaction_start`/`compaction_complete` events but no
+trigger threshold or summariser-prompt control; Kimi exposes
+`CompactionBegin` events with the same observation-only shape;
+OpenAI Chat Completions has no server-side compaction at all
+(client owns the messages buffer). Real configuration would
+require either upstream changes in the vendor SDKs or a
+client-side compaction loop that's only meaningful on OAI-compat
+— neither passes the "honest cross-vendor abstraction" bar.
+
+The *observation* side stays — the `pre_compact` hook event lets
+consumers see compaction happen on the adapters where the SDK
+surfaces it. That's already wired today via the lifecycle hooks
+surface.
 
 **Why.** The lifecycle hooks proposal lets consumers *observe*
 compaction (`pre_compact` event); it doesn't let them *configure*
