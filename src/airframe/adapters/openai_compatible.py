@@ -61,7 +61,14 @@ from airframe.errors import (
     RuntimeTransientError,
     UnsupportedFeatureError,
 )
-from airframe.events import RuntimeEvent, TextDelta, ToolCallResult, ToolCallStart, TurnComplete
+from airframe.events import (
+    ReasoningDelta,
+    RuntimeEvent,
+    TextDelta,
+    ToolCallResult,
+    ToolCallStart,
+    TurnComplete,
+)
 from airframe.features import Feature
 from airframe.inputs import Prompt
 from airframe.models import ModelInfo
@@ -225,6 +232,7 @@ class OpenAICompatibleRuntime(AgentRuntime):
             Feature.BUDGET_USD_CAP,
             Feature.BUDGET_TURN_CAP,
             Feature.RATE_LIMIT_TELEMETRY,
+            Feature.REASONING_OUTPUT,
         }
     )
 
@@ -549,6 +557,7 @@ class OpenAICompatibleRuntime(AgentRuntime):
         model_id: str,
         schema: type[BaseModel] | None,
         rate_limit: RateLimitInfo | None = None,
+        reasoning: str | None = None,
     ) -> RuntimeResult:
         if not response.choices:
             raise RuntimeProtocolError(
@@ -563,6 +572,14 @@ class OpenAICompatibleRuntime(AgentRuntime):
         structured: Any = None
         if schema is not None:
             structured = self._parse_structured(text, schema=schema)
+
+        # DeepSeek-R1 and several compat reasoning models surface the
+        # chain-of-thought trace on ``message.reasoning_content``; a few
+        # vendors use ``message.reasoning``. Caller-supplied
+        # ``reasoning`` (from the streaming accumulator) wins when
+        # present — the response object will be empty in that path.
+        if reasoning is None:
+            reasoning = _extract_message_reasoning(message)
 
         usage = response.usage
         input_tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
@@ -598,6 +615,7 @@ class OpenAICompatibleRuntime(AgentRuntime):
             structured=structured,
             cost=cost,
             finish=finish,
+            reasoning=reasoning,
             rate_limit=rate_limit,
             raw=response,
         )
@@ -981,6 +999,7 @@ class OpenAICompatibleSession:
         # by a mid-turn tool call ("First I'll look this up... [tool
         # call] ... The answer is 42").
         text_chunks_user_turn: list[str] = []
+        reasoning_chunks_user_turn: list[str] = []
         usage: Any = None
         committed = False
         try:
@@ -1026,6 +1045,10 @@ class OpenAICompatibleSession:
                                     model_turn_text.append(content)
                                     text_chunks_user_turn.append(content)
                                     yield TextDelta(text=content)
+                                reasoning_delta_text = _extract_delta_reasoning(delta)
+                                if reasoning_delta_text:
+                                    reasoning_chunks_user_turn.append(reasoning_delta_text)
+                                    yield ReasoningDelta(text=reasoning_delta_text)
                                 delta_tool_calls = getattr(delta, "tool_calls", None) or []
                                 for dtc in delta_tool_calls:
                                     _accumulate_tool_call_delta(tool_calls_by_index, dtc)
@@ -1050,11 +1073,15 @@ class OpenAICompatibleSession:
                         model_id=model_id,
                         finish=this_finish,
                     )
+                    full_reasoning = (
+                        "".join(reasoning_chunks_user_turn) if reasoning_chunks_user_turn else None
+                    )
                     result = RuntimeResult(
                         text=full_text,
                         structured=structured,
                         cost=cost,
                         finish=this_finish,
+                        reasoning=full_reasoning,
                         raw=None,
                     )
                     self._messages.append({"role": "assistant", "content": full_text})
@@ -1236,6 +1263,43 @@ class OpenAICompatibleSession:
             f"to {cls!r}; the AsyncOpenAI client lives on the runtime — "
             f"call runtime.unwrap(AsyncOpenAI) instead."
         )
+
+
+def _extract_message_reasoning(message: Any) -> str | None:
+    """Pull the model's reasoning trace off a non-streaming response message.
+
+    DeepSeek-R1 and several derivative reasoning models surface the
+    chain-of-thought as ``message.reasoning_content``. A few vendors
+    use ``message.reasoning`` instead. Returns the first non-empty
+    field found; ``None`` when neither is present (the standard
+    OpenAI Chat Completions shape doesn't expose reasoning text on
+    Chat Completions — only the token count via
+    ``usage.completion_tokens_details.reasoning_tokens``).
+    """
+    reasoning_content = getattr(message, "reasoning_content", None)
+    if reasoning_content:
+        return str(reasoning_content)
+    reasoning = getattr(message, "reasoning", None)
+    if reasoning:
+        return str(reasoning)
+    return None
+
+
+def _extract_delta_reasoning(delta: Any) -> str | None:
+    """Pull reasoning text off one streaming ``ChatCompletionChunk`` delta.
+
+    Mirrors :func:`_extract_message_reasoning` for the streaming wire:
+    the same two field names (``reasoning_content`` /
+    ``reasoning``) arrive piecewise on the ``delta`` object. Returns
+    ``None`` when the delta carried no reasoning content.
+    """
+    reasoning_content = getattr(delta, "reasoning_content", None)
+    if reasoning_content:
+        return str(reasoning_content)
+    reasoning = getattr(delta, "reasoning", None)
+    if reasoning:
+        return str(reasoning)
+    return None
 
 
 def _parse_openai_rate_limit_headers(headers: Any) -> RateLimitInfo | None:

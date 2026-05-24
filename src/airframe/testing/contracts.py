@@ -772,6 +772,36 @@ def test_session_rejects_wrong_provider_options_namespace(adapter_runtime: Any) 
 # ---------------------------------------------------------------------------
 
 
+def test_runtime_result_has_reasoning_field(adapter_runtime: Any) -> None:
+    """``RuntimeResult.reasoning`` exists with ``None`` default.
+
+    The field lives on :class:`~airframe.protocol.RuntimeResult` for
+    every adapter regardless of whether the adapter populates it.
+    Adapters declaring
+    :data:`~airframe.features.Feature.REASONING_OUTPUT` populate it
+    when the model emitted a reasoning trace; everyone else leaves
+    it at the default. Consumers can branch on ``result.reasoning is
+    not None`` without first checking ``supports()``.
+    """
+    from airframe.cost import CostRecord
+    from airframe.protocol import RuntimeResult
+
+    cost = CostRecord(
+        provider_id=adapter_runtime.PROVIDER_ID,
+        model_id="dummy",
+        cost_usd=None,
+        input_tokens=0,
+        output_tokens=0,
+        cache_read_tokens=0,
+        cache_write_tokens=0,
+        finish=None,
+    )
+    rr = RuntimeResult(text="", structured=None, cost=cost, finish=None)
+    assert rr.reasoning is None
+    assert hasattr(rr, "reasoning")
+    del adapter_runtime
+
+
 def test_runtime_result_has_rate_limit_field(adapter_runtime: Any) -> None:
     """``RuntimeResult.rate_limit`` exists with ``None`` default.
 
@@ -829,6 +859,7 @@ __all__ = [
     "test_emittable_hook_kinds_subset_of_eight_literals",
     "test_plain_text_execute_path_is_wired",
     "test_runtime_result_has_rate_limit_field",
+    "test_runtime_result_has_reasoning_field",
     "test_runtime_transient_error_carries_rate_limit_attr",
     "test_session_cancel_when_idle_is_noop",
     "test_session_close_is_idempotent",

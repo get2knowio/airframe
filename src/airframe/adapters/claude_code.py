@@ -329,6 +329,7 @@ class ClaudeCodeRuntime(AgentRuntime):
             Feature.BUDGET_USD_CAP,
             Feature.BUDGET_TURN_CAP,
             Feature.RATE_LIMIT_TELEMETRY,
+            Feature.REASONING_OUTPUT,
         }
     )
 
@@ -869,6 +870,15 @@ class ClaudeCodeSession:
         # time so :attr:`RuntimeResult.rate_limit` reflects the latest
         # quota across all windows the session has heard from.
         self._rate_limit_windows: dict[str, RateLimitWindow] = {}
+        # Phase 6 — REASONING_OUTPUT. Claude emits the model's
+        # extended-thinking trace as :class:`ThinkingBlock` content
+        # blocks on :class:`AssistantMessage` (non-streaming) and as
+        # ``thinking_delta`` events on the streaming wire (already
+        # surfaced as :class:`ReasoningDelta`). The buffer accumulates
+        # both shapes per turn; ``_build_result`` snapshots it onto
+        # :attr:`RuntimeResult.reasoning` and resets at the start of
+        # the next turn via :meth:`_reset_reasoning_buffer`.
+        self._reasoning_buffer: list[str] = []
 
     async def execute(
         self,
@@ -993,6 +1003,7 @@ class ClaudeCodeSession:
         has_attachments = bool(images or files)
         prompt_str = _build_claude_prompt(text, images, files)
         self._stream_cancelled = False
+        self._reset_reasoning_buffer()
         try:
             client = await self._ensure_client(
                 schema=schema,
@@ -1030,6 +1041,8 @@ class ClaudeCodeSession:
                     continue
                 if isinstance(msg, StreamEvent):
                     for event in _events_from_stream_event(msg):
+                        if isinstance(event, ReasoningDelta):
+                            self._reasoning_buffer.append(event.text)
                         yield event
                     continue
                 if isinstance(msg, AssistantMessage):
@@ -1037,7 +1050,11 @@ class ClaudeCodeSession:
                     # text via StreamEvent (older CLI versions, or content
                     # blocks that arrived intact). Emit a TextDelta per
                     # TextBlock so consumers always see the assistant text
-                    # at least once before TurnComplete.
+                    # at least once before TurnComplete. Reasoning gets
+                    # the same fallback treatment — absorb ThinkingBlock
+                    # content only if streaming didn't surface any.
+                    if not self._reasoning_buffer:
+                        self._absorb_reasoning_from_assistant_message(msg)
                     for block in msg.content:
                         if isinstance(block, TextBlock) and block.text:
                             yield TextDelta(text=block.text)
@@ -1299,17 +1316,49 @@ class ClaudeCodeSession:
         return client
 
     async def _query_and_drain(self, client: Any, prompt: str) -> Any:
-        from claude_agent_sdk import RateLimitEvent, ResultMessage
+        from claude_agent_sdk import AssistantMessage, RateLimitEvent, ResultMessage
 
+        self._reset_reasoning_buffer()
         await client.query(prompt)
         final: Any = None
         async for msg in client.receive_response():
             if isinstance(msg, RateLimitEvent):
                 self._absorb_rate_limit_event(msg)
                 continue
+            if isinstance(msg, AssistantMessage):
+                self._absorb_reasoning_from_assistant_message(msg)
+                continue
             if isinstance(msg, ResultMessage):
                 final = msg
         return final
+
+    def _reset_reasoning_buffer(self) -> None:
+        """Drop any reasoning text captured during the previous turn."""
+        self._reasoning_buffer.clear()
+
+    def _absorb_reasoning_from_assistant_message(self, msg: Any) -> None:
+        """Collect ``ThinkingBlock.thinking`` text from an AssistantMessage.
+
+        Claude packages the model's extended-thinking trace as
+        :class:`ThinkingBlock` content blocks. The blocks may be
+        interleaved with :class:`TextBlock` / :class:`ToolUseBlock`
+        entries; we only consume the thinking text and ignore the
+        rest (other blocks are handled by the streaming path or by
+        :meth:`_build_result`).
+        """
+        from claude_agent_sdk import ThinkingBlock
+
+        for block in getattr(msg, "content", None) or []:
+            if isinstance(block, ThinkingBlock):
+                text = getattr(block, "thinking", None)
+                if text:
+                    self._reasoning_buffer.append(text)
+
+    def _reasoning_snapshot(self) -> str | None:
+        """Snapshot the per-turn reasoning trace, or ``None`` if empty."""
+        if not self._reasoning_buffer:
+            return None
+        return "".join(self._reasoning_buffer)
 
     def _absorb_rate_limit_event(self, event: Any) -> None:
         """Update ``_rate_limit_windows`` from a Claude ``RateLimitEvent``.
@@ -1385,6 +1434,7 @@ class ClaudeCodeSession:
         cost = self._runtime._cost_from_result(result_msg, model_id=self._model_id)
 
         rate_limit = self._rate_limit_snapshot()
+        reasoning = self._reasoning_snapshot()
 
         if schema is None:
             return RuntimeResult(
@@ -1392,6 +1442,7 @@ class ClaudeCodeSession:
                 structured=None,
                 cost=cost,
                 finish=result_msg.stop_reason,
+                reasoning=reasoning,
                 rate_limit=rate_limit,
                 raw=result_msg,
             )
@@ -1413,6 +1464,7 @@ class ClaudeCodeSession:
             structured=structured,
             cost=cost,
             finish=result_msg.stop_reason,
+            reasoning=reasoning,
             rate_limit=rate_limit,
             raw=result_msg,
         )

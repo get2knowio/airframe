@@ -152,6 +152,13 @@ def test_unwired_features_stay_false(adapters: list) -> None:
         # OpenAI-compatible base (parses ``x-ratelimit-*`` headers via
         # ``with_raw_response.create``). Other adapters still ``False``.
         Feature.RATE_LIMIT_TELEMETRY,
+        # Phase 6 — REASONING_OUTPUT flipped on Claude (consumes
+        # ``ThinkingBlock`` content on AssistantMessage + accumulates
+        # streamed ``ReasoningDelta``) and on the OpenAI-compatible base
+        # (defensively reads ``message.reasoning_content`` /
+        # ``delta.reasoning_content`` for DeepSeek-R1 derivatives —
+        # vendors that don't surface reasoning leave the field None).
+        Feature.REASONING_OUTPUT,
     }
     must_be_false = [f for f in Feature if f not in any_adapter_may_support]
     for adapter in adapters:

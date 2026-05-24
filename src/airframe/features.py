@@ -32,6 +32,8 @@ The associated APIs:
   ``"high"``). Phase 2.
 * :data:`Feature.REASONING_BUDGET_TOKENS` — ``thinking={"budget_tokens":N}``
   form. Claude-only today. Phase 2.
+* :data:`Feature.REASONING_OUTPUT` — adapter surfaces the model's
+  reasoning trace on :attr:`RuntimeResult.reasoning`. Phase 6.
 * :data:`Feature.VISION_INPUT` — image content parts on
   ``prompt=``. Phase 2.
 * :data:`Feature.FILE_INPUT` — document / PDF content parts on
@@ -102,6 +104,15 @@ class Feature(StrEnum):
 
     REASONING_BUDGET_TOKENS = "reasoning_budget_tokens"
     """``thinking={"budget_tokens": N}`` form for explicit reasoning budget."""
+
+    REASONING_OUTPUT = "reasoning_output"
+    """Adapter surfaces the model's reasoning trace on
+    :attr:`RuntimeResult.reasoning` (and concatenates streamed
+    :class:`~airframe.events.ReasoningDelta` payloads into the trailing
+    :class:`~airframe.events.TurnComplete`). Distinct from
+    :data:`REASONING_EFFORT`: the latter is "I can ask the model to
+    think harder"; this is "I can show you what it thought."
+    """
 
     VISION_INPUT = "vision_input"
     """``prompt=`` accepts image content parts (path / bytes / URL)."""

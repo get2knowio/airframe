@@ -101,6 +101,14 @@ class RuntimeResult:
         finish: Provider-reported stop reason
             (``"stop"`` / ``"length"`` / ``"tool_calls"`` /
             ``"end_turn"`` / ``None``).
+        reasoning: The model's finalised reasoning / extended-thinking
+            trace as plain text, when the adapter declares
+            :data:`~airframe.features.Feature.REASONING_OUTPUT` and the
+            model emitted one. ``None`` otherwise. Streaming yields
+            this same content piecewise as
+            :class:`~airframe.events.ReasoningDelta`; the trailing
+            :class:`~airframe.events.TurnComplete` carries the
+            concatenation here.
         rate_limit: Typed
             :class:`~airframe.rate_limit.RateLimitInfo` snapshot when
             the vendor surfaced quota data on this call. ``None`` for
@@ -117,6 +125,7 @@ class RuntimeResult:
     structured: Any
     cost: CostRecord
     finish: str | None
+    reasoning: str | None = None
     rate_limit: RateLimitInfo | None = None
     raw: Any = field(default=None, repr=False)
 
