@@ -45,6 +45,7 @@ if TYPE_CHECKING:
     from airframe.features import Feature
     from airframe.hooks import HookEvent
     from airframe.inputs import Prompt
+    from airframe.metadata import RequestMetadata
     from airframe.models import ModelInfo
     from airframe.options import ProviderOptions
     from airframe.permission import PermissionCallback
@@ -163,6 +164,7 @@ class AgentRuntime(Protocol):
         model: ProviderModel | None = None,
         thinking: ThinkingMode = None,
         timeout: float = 600.0,
+        metadata: RequestMetadata | None = None,
     ) -> RuntimeResult:
         """Send one prompt, return a canonical typed result.
 
@@ -209,6 +211,12 @@ class AgentRuntime(Protocol):
                 raise on dict-shaped values. ``None`` (default) sends
                 no reasoning configuration; the model decides.
             timeout: Hard wall-clock budget for the call.
+            metadata: Optional :class:`~airframe.metadata.RequestMetadata`
+                for abuse-detection / attribution / audit tags. Forwarded
+                to the vendor's native channel by adapters declaring
+                :data:`~airframe.features.Feature.REQUEST_METADATA`;
+                silently dropped by adapters that don't (soft contract —
+                no :class:`UnsupportedFeatureError`).
 
         Returns:
             :class:`RuntimeResult` with text + (optional) structured
@@ -369,6 +377,7 @@ class AgentRuntime(Protocol):
         on_permission: PermissionCallback | None = None,
         on_event: Callable[[HookEvent], None] | None = None,
         provider_options: ProviderOptions | None = None,
+        metadata: RequestMetadata | None = None,
     ) -> AgentSession:
         """Open a multi-turn session against this runtime.
 
@@ -463,6 +472,17 @@ class AgentRuntime(Protocol):
                 ``fork_session`` / ``strict_mcp_config`` as of v0.5.0;
                 the other namespaces are open-but-empty (additive
                 growth as fields land).
+            metadata: Optional :class:`~airframe.metadata.RequestMetadata`
+                forwarded on every turn this session runs. Adapters
+                declaring
+                :data:`~airframe.features.Feature.REQUEST_METADATA`
+                forward to the vendor's native channel (OpenAI
+                ``user=`` / ``metadata=``, Claude
+                ``ClaudeAgentOptions.user``); others silently drop
+                the tag. Soft contract — no
+                :class:`UnsupportedFeatureError` on a non-supporting
+                adapter, because the call's correctness doesn't
+                depend on the tag reaching the vendor.
 
         Returns:
             A fresh :class:`AgentSession`.

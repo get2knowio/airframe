@@ -772,6 +772,26 @@ def test_session_rejects_wrong_provider_options_namespace(adapter_runtime: Any) 
 # ---------------------------------------------------------------------------
 
 
+async def test_session_accepts_metadata_kwarg(adapter_runtime: Any) -> None:
+    """``session(metadata=RequestMetadata(...))`` is accepted by every adapter.
+
+    The :data:`~airframe.features.Feature.REQUEST_METADATA` flag is a
+    *soft* contract — passing the kwarg to a non-supporting adapter
+    silently drops the tag rather than raising
+    :class:`UnsupportedFeatureError`. The call's correctness doesn't
+    depend on the tag reaching the vendor; consumers who care branch
+    on ``supports()`` first.
+
+    This test exercises only the structural acceptance — the field's
+    actual forwarding (when the adapter declares support) lives in
+    per-adapter unit tests.
+    """
+    from airframe.metadata import RequestMetadata
+
+    sess = adapter_runtime.session(metadata=RequestMetadata(user_id="acct-test"))
+    await sess.close()
+
+
 def test_runtime_result_has_reasoning_field(adapter_runtime: Any) -> None:
     """``RuntimeResult.reasoning`` exists with ``None`` default.
 
@@ -861,6 +881,7 @@ __all__ = [
     "test_runtime_result_has_rate_limit_field",
     "test_runtime_result_has_reasoning_field",
     "test_runtime_transient_error_carries_rate_limit_attr",
+    "test_session_accepts_metadata_kwarg",
     "test_session_cancel_when_idle_is_noop",
     "test_session_close_is_idempotent",
     "test_session_close_on_fresh_session_is_safe",

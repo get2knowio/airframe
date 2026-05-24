@@ -66,6 +66,7 @@ from airframe.events import (
 from airframe.features import Feature
 from airframe.hooks import HookEvent, HookEventKind
 from airframe.inputs import FileInput, ImageInput, Prompt, PromptPart
+from airframe.metadata import RequestMetadata
 from airframe.models import (
     CAPABILITY_REASONING_EFFORT,
     CAPABILITY_STREAMING,
@@ -153,6 +154,7 @@ __all__ = [
     "RateLimitWindow",
     "ReasoningDelta",
     "ReasoningEffort",
+    "RequestMetadata",
     "RuntimeAuthError",
     "RuntimeBudgetExceededError",
     "RuntimeCancelledError",

@@ -77,6 +77,7 @@ from airframe.events import (
 )
 from airframe.features import Feature
 from airframe.inputs import Prompt
+from airframe.metadata import RequestMetadata
 from airframe.models import ModelInfo
 from airframe.options import CopilotOptions
 from airframe.protocol import (
@@ -306,6 +307,7 @@ class CopilotRuntime(AgentRuntime):
         model: ProviderModel | None = None,
         thinking: ThinkingMode = None,
         timeout: float = 600.0,
+        metadata: RequestMetadata | None = None,
     ) -> RuntimeResult:
         # Phase 1 Iteration G: ``execute()`` is documented sugar for
         # ``runtime.session(...).execute(...) + close()``. Single-turn,
@@ -314,7 +316,7 @@ class CopilotRuntime(AgentRuntime):
         # calls. Consumers wanting session warmth across turns open a
         # session explicitly.
         del persona  # accepted in the protocol but not consumed by Copilot
-        sess = self.session(system=system, model=model)
+        sess = self.session(system=system, model=model, metadata=metadata)
         try:
             return await sess.execute(prompt, schema=schema, thinking=thinking, timeout=timeout)
         finally:
@@ -389,6 +391,7 @@ class CopilotRuntime(AgentRuntime):
         on_permission: PermissionCallback | None = None,
         on_event: Callable[[HookEvent], None] | None = None,
         provider_options: ProviderOptions | None = None,
+        metadata: RequestMetadata | None = None,
     ) -> AgentSession:
         """Open a bespoke :class:`CopilotAgentSession`.
 
@@ -493,6 +496,10 @@ class CopilotRuntime(AgentRuntime):
             expected_type=CopilotOptions,
             adapter_label=self.label,
         )
+        # Phase 6 — REQUEST_METADATA soft contract: Copilot's SDK has no
+        # native metadata channel, so the tag is silently dropped.
+        # Consumers who care branch on supports(Feature.REQUEST_METADATA).
+        del metadata
         copilot_options = (
             provider_options if isinstance(provider_options, CopilotOptions) else None
         )

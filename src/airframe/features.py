@@ -34,6 +34,11 @@ The associated APIs:
   form. Claude-only today. Phase 2.
 * :data:`Feature.REASONING_OUTPUT` — adapter surfaces the model's
   reasoning trace on :attr:`RuntimeResult.reasoning`. Phase 6.
+* :data:`Feature.REQUEST_METADATA` — adapter forwards
+  :class:`~airframe.metadata.RequestMetadata` to a native vendor
+  channel (abuse-detection / attribution tag). Soft contract:
+  non-supporting adapters silently drop the kwarg rather than
+  raising. Phase 6.
 * :data:`Feature.VISION_INPUT` — image content parts on
   ``prompt=``. Phase 2.
 * :data:`Feature.FILE_INPUT` — document / PDF content parts on
@@ -155,6 +160,13 @@ class Feature(StrEnum):
     """Adapters populate :class:`~airframe.rate_limit.RateLimitInfo` on
     :attr:`RuntimeResult.rate_limit` (success) and
     :attr:`RuntimeTransientError.rate_limit` (throttle)."""
+
+    REQUEST_METADATA = "request_metadata"
+    """Adapter forwards :class:`~airframe.metadata.RequestMetadata` to
+    a native vendor channel (OpenAI ``user=`` / ``metadata=``,
+    Anthropic ``metadata={"user_id": ...}``). Soft contract — adapters
+    that return ``False`` silently drop the kwarg rather than
+    raising; consumers who care branch on this flag."""
 
     SANDBOX = "sandbox"
     """``session(sandbox=...)`` constrains tool filesystem / network access."""

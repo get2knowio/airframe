@@ -149,6 +149,7 @@ from airframe.events import (
 )
 from airframe.features import Feature
 from airframe.inputs import FileInput, ImageInput, Prompt
+from airframe.metadata import RequestMetadata
 from airframe.models import (
     CAPABILITY_STREAMING,
     CAPABILITY_STRUCTURED_OUTPUT,
@@ -499,12 +500,13 @@ class BedrockRuntime(AgentRuntime):
         model: ProviderModel | None = None,
         thinking: ThinkingMode = None,
         timeout: float = 600.0,
+        metadata: RequestMetadata | None = None,
     ) -> RuntimeResult:
         # Documented sugar for ``runtime.session(...).execute(...) + close()``.
         # Single-turn, ephemeral — the runtime client is shared, so the
         # only per-call setup is the BedrockSession itself.
         del persona  # accepted in the protocol but not consumed by Bedrock
-        sess = self.session(system=system, model=model)
+        sess = self.session(system=system, model=model, metadata=metadata)
         try:
             return await sess.execute(prompt, schema=schema, thinking=thinking, timeout=timeout)
         finally:
@@ -568,11 +570,16 @@ class BedrockRuntime(AgentRuntime):
         on_permission: PermissionCallback | None = None,
         on_event: Callable[[HookEvent], None] | None = None,
         provider_options: ProviderOptions | None = None,
+        metadata: RequestMetadata | None = None,
     ) -> AgentSession:
         # Iteration B accepts the structural kwargs but only ``system`` /
         # ``model`` are honoured; later iterations wire tools/MCP/hooks/
         # permission/options. Per the "no silent fallbacks" principle,
         # passing a non-None decline-target raises.
+        # Phase 6 — REQUEST_METADATA soft contract: Bedrock Converse
+        # has no per-request user_id channel today (only ``inferenceConfig``
+        # tags on some Anthropic-family models). Silently drop for v1.
+        del metadata
         if resume is not None:
             raise UnsupportedFeatureError(
                 "BedrockSession: SESSION_RESUME is not supported — Converse is "

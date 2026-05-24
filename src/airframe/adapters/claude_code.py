@@ -81,6 +81,7 @@ from airframe.events import (
 )
 from airframe.features import Feature
 from airframe.inputs import Prompt
+from airframe.metadata import RequestMetadata
 from airframe.models import ModelInfo
 from airframe.options import ClaudeOptions
 from airframe.protocol import (
@@ -330,6 +331,7 @@ class ClaudeCodeRuntime(AgentRuntime):
             Feature.BUDGET_TURN_CAP,
             Feature.RATE_LIMIT_TELEMETRY,
             Feature.REASONING_OUTPUT,
+            Feature.REQUEST_METADATA,
         }
     )
 
@@ -383,6 +385,7 @@ class ClaudeCodeRuntime(AgentRuntime):
         model: ProviderModel | None = None,
         thinking: ThinkingMode = None,
         timeout: float = 600.0,
+        metadata: RequestMetadata | None = None,
     ) -> RuntimeResult:
         # Phase 1 Iteration G: ``execute()`` is documented sugar for
         # ``runtime.session(...).execute(...) + close()``. Single-turn,
@@ -390,7 +393,7 @@ class ClaudeCodeRuntime(AgentRuntime):
         # disconnected per call. Consumers wanting context warmth across
         # calls open a session explicitly and reuse it.
         del persona  # accepted in the protocol but not consumed by Claude
-        sess = self.session(system=system, model=model)
+        sess = self.session(system=system, model=model, metadata=metadata)
         try:
             return await sess.execute(prompt, schema=schema, thinking=thinking, timeout=timeout)
         finally:
@@ -450,6 +453,7 @@ class ClaudeCodeRuntime(AgentRuntime):
         on_permission: PermissionCallback | None = None,
         on_event: Callable[[HookEvent], None] | None = None,
         provider_options: ProviderOptions | None = None,
+        metadata: RequestMetadata | None = None,
     ) -> AgentSession:
         """Open a bespoke :class:`ClaudeCodeSession`.
 
@@ -556,6 +560,7 @@ class ClaudeCodeRuntime(AgentRuntime):
             on_permission=on_permission,
             on_event=on_event,
             provider_options=claude_options,
+            metadata=metadata,
         )
 
     async def list_models(self) -> list[ModelInfo]:
@@ -788,6 +793,7 @@ class ClaudeCodeSession:
         on_permission: PermissionCallback | None = None,
         on_event: Callable[[HookEvent], None] | None = None,
         provider_options: ClaudeOptions | None = None,
+        metadata: RequestMetadata | None = None,
     ) -> None:
         self._runtime = runtime
         self._resume = resume
@@ -879,6 +885,14 @@ class ClaudeCodeSession:
         # :attr:`RuntimeResult.reasoning` and resets at the start of
         # the next turn via :meth:`_reset_reasoning_buffer`.
         self._reasoning_buffer: list[str] = []
+        # Phase 6 — REQUEST_METADATA. Only the ``user_id`` field maps
+        # to a real Claude Agent SDK channel (``ClaudeAgentOptions.user``);
+        # ``request_id`` / ``tags`` are silently dropped (no agent-SDK
+        # channel). The ``user`` value joins the cache-key fragment so
+        # changing it forces a reconnect — Claude bakes ``user`` at
+        # connect time.
+        self._metadata: RequestMetadata | None = metadata
+        self._metadata_fingerprint = metadata.user_id if metadata else None
 
     async def execute(
         self,
@@ -1183,10 +1197,11 @@ class ClaudeCodeSession:
         permission_fragment = f"perm={self._permission_fingerprint}"
         max_turns_fragment = f"max_turns={max_turns}"
         provider_options_fragment = f"po={_claude_options_fingerprint(self._provider_options)}"
+        metadata_fragment = f"md={self._metadata_fingerprint}"
         cache_key = (
             f"{schema_fragment}|{thinking_fragment}|{attachments_fragment}|"
             f"{tools_fragment}|{mcp_fragment}|{permission_fragment}|"
-            f"{max_turns_fragment}|{provider_options_fragment}"
+            f"{max_turns_fragment}|{provider_options_fragment}|{metadata_fragment}"
         )
         if self._client is not None and self._client_key == cache_key:
             return self._client
@@ -1243,6 +1258,8 @@ class ClaudeCodeSession:
             options_kwargs["can_use_tool"] = _translate_permission_for_claude(self._on_permission)
         if self._on_event is not None:
             options_kwargs["hooks"] = _build_claude_hooks_config(self._on_event, session=self)
+        if self._metadata is not None and self._metadata.user_id:
+            options_kwargs["user"] = self._metadata.user_id
         po = self._provider_options
         if po is not None:
             if po.append_system_prompt is not None:

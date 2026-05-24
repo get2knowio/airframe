@@ -137,6 +137,7 @@ from airframe.events import (
     TurnComplete,
 )
 from airframe.features import Feature
+from airframe.metadata import RequestMetadata
 from airframe.models import ModelInfo
 from airframe.options import OpenCodeServerOptions
 from airframe.protocol import (
@@ -382,13 +383,14 @@ class OpenCodeServerRuntime(AgentRuntime):
         model: ProviderModel | None = None,
         thinking: ThinkingMode = None,
         timeout: float = 600.0,
+        metadata: RequestMetadata | None = None,
     ) -> RuntimeResult:
         # Documented sugar for ``runtime.session(...).execute(...) + close()``.
         # Iteration A's session raises ``UnsupportedFeatureError`` on
         # ``execute()`` since no behaviour is wired yet — Iteration B
         # flips the matching Feature flags and fills the session methods.
         del persona  # accepted on the protocol but not consumed here
-        sess = self.session(system=system, model=model)
+        sess = self.session(system=system, model=model, metadata=metadata)
         try:
             return await sess.execute(prompt, schema=schema, thinking=thinking, timeout=timeout)
         finally:
@@ -468,6 +470,7 @@ class OpenCodeServerRuntime(AgentRuntime):
         on_permission: PermissionCallback | None = None,
         on_event: Callable[[HookEvent], None] | None = None,
         provider_options: ProviderOptions | None = None,
+        metadata: RequestMetadata | None = None,
     ) -> AgentSession:
         """Open a session.
 
@@ -524,6 +527,10 @@ class OpenCodeServerRuntime(AgentRuntime):
             expected_type=OpenCodeServerOptions,
             adapter_label=self.label,
         )
+        # Phase 6 — REQUEST_METADATA soft contract: OpenCode's server
+        # HTTP API has no per-request metadata channel today. Silently
+        # drop for v1; consumers branch on supports() if they care.
+        del metadata
         opencode_options = (
             provider_options if isinstance(provider_options, OpenCodeServerOptions) else None
         )

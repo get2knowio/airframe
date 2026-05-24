@@ -159,6 +159,13 @@ def test_unwired_features_stay_false(adapters: list) -> None:
         # ``delta.reasoning_content`` for DeepSeek-R1 derivatives —
         # vendors that don't surface reasoning leave the field None).
         Feature.REASONING_OUTPUT,
+        # Phase 6 — REQUEST_METADATA flipped on Claude (``user_id`` →
+        # ``ClaudeAgentOptions.user``) and on the OpenAI-compatible
+        # base (``user_id`` → ``user=``, ``tags`` → ``metadata=``,
+        # ``request_id`` → ``X-Request-ID`` header). Other adapters
+        # accept the kwarg but drop it silently (soft contract — no
+        # UnsupportedFeatureError).
+        Feature.REQUEST_METADATA,
     }
     must_be_false = [f for f in Feature if f not in any_adapter_may_support]
     for adapter in adapters:

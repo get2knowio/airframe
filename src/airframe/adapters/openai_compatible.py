@@ -71,6 +71,7 @@ from airframe.events import (
 )
 from airframe.features import Feature
 from airframe.inputs import Prompt
+from airframe.metadata import RequestMetadata
 from airframe.models import ModelInfo
 from airframe.options import OpenAICompatOptions
 from airframe.protocol import (
@@ -233,6 +234,7 @@ class OpenAICompatibleRuntime(AgentRuntime):
             Feature.BUDGET_TURN_CAP,
             Feature.RATE_LIMIT_TELEMETRY,
             Feature.REASONING_OUTPUT,
+            Feature.REQUEST_METADATA,
         }
     )
 
@@ -303,13 +305,14 @@ class OpenAICompatibleRuntime(AgentRuntime):
         model: ProviderModel | None = None,
         thinking: ThinkingMode = None,
         timeout: float = 600.0,
+        metadata: RequestMetadata | None = None,
     ) -> RuntimeResult:
         # Phase 1 Iteration G: ``execute()`` is documented sugar for
         # ``runtime.session(...).execute(...) + close()``. Single-turn,
         # ephemeral. Consumers wanting context warmth across calls open
         # a session explicitly and reuse it.
         del persona  # accepted in the protocol but not consumed by this family
-        sess = self.session(system=system, model=model)
+        sess = self.session(system=system, model=model, metadata=metadata)
         try:
             return await sess.execute(prompt, schema=schema, thinking=thinking, timeout=timeout)
         finally:
@@ -359,6 +362,7 @@ class OpenAICompatibleRuntime(AgentRuntime):
         on_permission: PermissionCallback | None = None,
         on_event: Callable[[HookEvent], None] | None = None,
         provider_options: ProviderOptions | None = None,
+        metadata: RequestMetadata | None = None,
     ) -> AgentSession:
         """Open a bespoke :class:`OpenAICompatibleSession`.
 
@@ -483,6 +487,7 @@ class OpenAICompatibleRuntime(AgentRuntime):
             tools=tools,
             on_event=on_event,
             provider_options=compat_options,
+            metadata=metadata,
         )
 
     async def list_models(self) -> list[ModelInfo]:
@@ -722,6 +727,7 @@ class OpenAICompatibleSession:
         tools: list[FunctionTool] | None = None,
         on_event: Callable[[HookEvent], None] | None = None,
         provider_options: OpenAICompatOptions | None = None,
+        metadata: RequestMetadata | None = None,
     ) -> None:
         self._runtime = runtime
         self._model = model
@@ -751,6 +757,12 @@ class OpenAICompatibleSession:
         # so passing these to non-OpenAI compat endpoints is a no-op
         # rather than an error.
         self._provider_options: OpenAICompatOptions | None = provider_options
+        # Phase 6 — REQUEST_METADATA. ``user_id`` → ``user=`` kwarg on
+        # chat.completions.create (abuse-detection tag). ``tags`` →
+        # ``metadata=`` kwarg (typed ``Dict[str, str]`` on the OpenAI
+        # SDK). ``request_id`` → ``extra_headers={"X-Request-ID": ...}``
+        # — defensive, not all compat vendors echo it.
+        self._metadata: RequestMetadata | None = metadata
         # Tools are fixed for the session's lifetime — translated once
         # and reused on every chat.completions.create() call. ``None``
         # / ``[]`` both mean "don't send the kwarg" so the wire shape
@@ -853,6 +865,7 @@ class OpenAICompatibleSession:
             if self._tools_wire is not None:
                 create_kwargs["tools"] = self._tools_wire
             self._apply_provider_options(create_kwargs)
+            self._apply_request_metadata(create_kwargs)
             try:
                 raw = await client.chat.completions.with_raw_response.create(**create_kwargs)
                 response = raw.parse()
@@ -1021,6 +1034,7 @@ class OpenAICompatibleSession:
                 if self._tools_wire is not None:
                     stream_kwargs["tools"] = self._tools_wire
                 self._apply_provider_options(stream_kwargs)
+                self._apply_request_metadata(stream_kwargs)
                 try:
                     stream = await client.chat.completions.create(**stream_kwargs)
                 except Exception as exc:
@@ -1201,6 +1215,35 @@ class OpenAICompatibleSession:
         # Runtime owns the AsyncOpenAI client; never tear it down here.
         # Cancel any in-flight work as a courtesy.
         await self.cancel()
+
+    def _apply_request_metadata(self, kwargs: dict[str, Any]) -> None:
+        """Merge :class:`RequestMetadata` fields into a create() kwargs dict.
+
+        Maps the cross-vendor metadata namespace onto OpenAI's three
+        request-level channels:
+
+        * ``user_id`` → ``user=`` (abuse-detection tag).
+        * ``tags`` → ``metadata=`` (typed ``Dict[str, str]``).
+        * ``request_id`` → ``extra_headers={"X-Request-ID": ...}``.
+
+        Compat vendors that don't honour one of these silently drop
+        it server-side — the call still succeeds. Per the soft
+        contract, this is not a feature gate.
+        """
+        md = self._metadata
+        if md is None:
+            return
+        if md.user_id:
+            kwargs["user"] = md.user_id
+        if md.tags:
+            existing = kwargs.get("metadata")
+            kwargs["metadata"] = (
+                {**existing, **md.tags} if isinstance(existing, dict) else dict(md.tags)
+            )
+        if md.request_id:
+            extra = kwargs.get("extra_headers")
+            header = {"X-Request-ID": md.request_id}
+            kwargs["extra_headers"] = {**extra, **header} if isinstance(extra, dict) else header
 
     def _apply_provider_options(self, kwargs: dict[str, Any]) -> None:
         """Merge :class:`OpenAICompatOptions` fields into a create() kwargs dict.

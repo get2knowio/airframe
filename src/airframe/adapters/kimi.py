@@ -128,6 +128,7 @@ from airframe.events import (
 )
 from airframe.features import Feature
 from airframe.inputs import ImageInput, Prompt
+from airframe.metadata import RequestMetadata
 from airframe.models import ModelInfo
 from airframe.options import KimiOptions
 from airframe.protocol import (
@@ -599,11 +600,12 @@ class KimiRuntime(AgentRuntime):
         model: ProviderModel | None = None,
         thinking: ThinkingMode = None,
         timeout: float = 600.0,
+        metadata: RequestMetadata | None = None,
     ) -> RuntimeResult:
         # Iteration A scaffold: the protocol surface is in place but no
         # behaviour is wired. Iteration B replaces this body with the
         # real kimi-agent-sdk Session-driven implementation.
-        del prompt, schema, system, persona, model, thinking, timeout
+        del prompt, schema, system, persona, model, thinking, timeout, metadata
         raise NotImplementedError(
             "KimiRuntime.execute() is not yet wired — Iteration B of the "
             "Kimi adapter plan (dev-docs/kimi-adapter-plan.md) lands the "
@@ -652,6 +654,7 @@ class KimiRuntime(AgentRuntime):
         on_permission: PermissionCallback | None = None,
         on_event: Callable[[HookEvent], None] | None = None,
         provider_options: ProviderOptions | None = None,
+        metadata: RequestMetadata | None = None,
     ) -> AgentSession:
         """Open a :class:`KimiSession`.
 
@@ -729,6 +732,9 @@ class KimiRuntime(AgentRuntime):
                 f"each ApprovalRequest through your callback. Pick one.",
                 feature=Feature.PERMISSION_CALLBACK,
             )
+        # Phase 6 — REQUEST_METADATA soft contract: Kimi Agent SDK has
+        # no metadata channel today; the tag is silently dropped.
+        del metadata
         return KimiSession(
             self,
             resume=resume,
