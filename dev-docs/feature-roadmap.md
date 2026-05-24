@@ -994,6 +994,15 @@ surface it on `ContextUsageCategory`-style telemetry.
 
 ### P3 — Prompt-cache controls (keys + retention)
 
+**Status:** Shipped on `main` (this commit). `Feature.PROMPT_CACHE_CONTROL`
+declared by the `OpenAICompatibleRuntime` base (`CacheConfig.key` →
+`prompt_cache_key=`; `retention="short"`/`"long"` →
+`"in_memory"`/`"24h"`). The portable `cache=` value takes precedence
+over the OpenAI-specific `OpenAICompatOptions.prompt_cache_key` so
+consumers setting both get the cross-vendor surface through. All
+other adapters accept `cache=` and silently drop it per the soft
+contract — same shape as `metadata=`.
+
 **Why.** §1's matrix at lines 55–56 splits prompt caching into
 *read stats* (✓ shipped — surfaced in `CostRecord`) and *controls*
 (✗ — no airframe surface). OpenAI exposes `prompt_cache_key` and

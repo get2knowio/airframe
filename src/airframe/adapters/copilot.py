@@ -55,6 +55,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, TypeVar
 
 from pydantic import BaseModel, ValidationError
 
+from airframe.cache import CacheConfig
 from airframe.cost import CostRecord
 from airframe.errors import (
     AgentRuntimeError,
@@ -308,6 +309,7 @@ class CopilotRuntime(AgentRuntime):
         thinking: ThinkingMode = None,
         timeout: float = 600.0,
         metadata: RequestMetadata | None = None,
+        cache: CacheConfig | None = None,
     ) -> RuntimeResult:
         # Phase 1 Iteration G: ``execute()`` is documented sugar for
         # ``runtime.session(...).execute(...) + close()``. Single-turn,
@@ -316,7 +318,7 @@ class CopilotRuntime(AgentRuntime):
         # calls. Consumers wanting session warmth across turns open a
         # session explicitly.
         del persona  # accepted in the protocol but not consumed by Copilot
-        sess = self.session(system=system, model=model, metadata=metadata)
+        sess = self.session(system=system, model=model, metadata=metadata, cache=cache)
         try:
             return await sess.execute(prompt, schema=schema, thinking=thinking, timeout=timeout)
         finally:
@@ -392,6 +394,7 @@ class CopilotRuntime(AgentRuntime):
         on_event: Callable[[HookEvent], None] | None = None,
         provider_options: ProviderOptions | None = None,
         metadata: RequestMetadata | None = None,
+        cache: CacheConfig | None = None,
     ) -> AgentSession:
         """Open a bespoke :class:`CopilotAgentSession`.
 
@@ -500,6 +503,9 @@ class CopilotRuntime(AgentRuntime):
         # native metadata channel, so the tag is silently dropped.
         # Consumers who care branch on supports(Feature.REQUEST_METADATA).
         del metadata
+        # Phase 6 — PROMPT_CACHE_CONTROL soft contract: Copilot's SDK
+        # has no explicit cache-key channel. Silently drop.
+        del cache
         copilot_options = (
             provider_options if isinstance(provider_options, CopilotOptions) else None
         )

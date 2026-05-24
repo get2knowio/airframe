@@ -41,6 +41,9 @@ The associated APIs:
   raising. Phase 6.
 * :data:`Feature.COUNT_TOKENS` — adapter exposes
   :meth:`AgentRuntime.count_tokens`. Phase 6.
+* :data:`Feature.PROMPT_CACHE_CONTROL` — adapter forwards
+  :class:`~airframe.cache.CacheConfig` to the vendor's explicit
+  cache-key channel. Soft contract. Phase 6.
 * :data:`Feature.VISION_INPUT` — image content parts on
   ``prompt=``. Phase 2.
 * :data:`Feature.FILE_INPUT` — document / PDF content parts on
@@ -175,6 +178,14 @@ class Feature(StrEnum):
     method that returns the model's tokeniser-accurate count for a
     prompt, *without* paying for a turn. Adapters that return
     ``False`` raise :class:`UnsupportedFeatureError` when called."""
+
+    PROMPT_CACHE_CONTROL = "prompt_cache_control"
+    """Adapter forwards :class:`~airframe.cache.CacheConfig` to a
+    native vendor cache-key channel (OpenAI's ``prompt_cache_key`` /
+    ``prompt_cache_retention``). Soft contract — adapters that return
+    ``False`` silently drop the kwarg; the call still succeeds, just
+    without the speed-up / cost reduction explicit caching would
+    have provided. Consumers who care branch on this flag."""
 
     SANDBOX = "sandbox"
     """``session(sandbox=...)`` constrains tool filesystem / network access."""

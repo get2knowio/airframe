@@ -60,6 +60,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, TypeVar
 
 from pydantic import BaseModel
 
+from airframe.cache import CacheConfig
 from airframe.cost import CostRecord
 from airframe.errors import (
     AgentRuntimeError,
@@ -387,6 +388,7 @@ class ClaudeCodeRuntime(AgentRuntime):
         thinking: ThinkingMode = None,
         timeout: float = 600.0,
         metadata: RequestMetadata | None = None,
+        cache: CacheConfig | None = None,
     ) -> RuntimeResult:
         # Phase 1 Iteration G: ``execute()`` is documented sugar for
         # ``runtime.session(...).execute(...) + close()``. Single-turn,
@@ -394,7 +396,7 @@ class ClaudeCodeRuntime(AgentRuntime):
         # disconnected per call. Consumers wanting context warmth across
         # calls open a session explicitly and reuse it.
         del persona  # accepted in the protocol but not consumed by Claude
-        sess = self.session(system=system, model=model, metadata=metadata)
+        sess = self.session(system=system, model=model, metadata=metadata, cache=cache)
         try:
             return await sess.execute(prompt, schema=schema, thinking=thinking, timeout=timeout)
         finally:
@@ -455,6 +457,7 @@ class ClaudeCodeRuntime(AgentRuntime):
         on_event: Callable[[HookEvent], None] | None = None,
         provider_options: ProviderOptions | None = None,
         metadata: RequestMetadata | None = None,
+        cache: CacheConfig | None = None,
     ) -> AgentSession:
         """Open a bespoke :class:`ClaudeCodeSession`.
 
@@ -551,6 +554,11 @@ class ClaudeCodeRuntime(AgentRuntime):
         # happy without a runtime isinstance second-check.
         claude_options = provider_options if isinstance(provider_options, ClaudeOptions) else None
         model_id = self._resolve_model(model) if model is not None else self._default_model
+        # Phase 6 — PROMPT_CACHE_CONTROL soft contract: Claude Agent SDK
+        # manages caching via session warmth, not an explicit key channel,
+        # so the airframe cache= value is silently dropped here. The
+        # decline matches the soft contract metadata= follows.
+        del cache
         return ClaudeCodeSession(
             self,
             resume=resume,

@@ -112,6 +112,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, TypeVar
 
 from pydantic import BaseModel
 
+from airframe.cache import CacheConfig
 from airframe.cost import CostRecord
 from airframe.errors import (
     RuntimeAuthError,
@@ -601,11 +602,12 @@ class KimiRuntime(AgentRuntime):
         thinking: ThinkingMode = None,
         timeout: float = 600.0,
         metadata: RequestMetadata | None = None,
+        cache: CacheConfig | None = None,
     ) -> RuntimeResult:
         # Iteration A scaffold: the protocol surface is in place but no
         # behaviour is wired. Iteration B replaces this body with the
         # real kimi-agent-sdk Session-driven implementation.
-        del prompt, schema, system, persona, model, thinking, timeout, metadata
+        del prompt, schema, system, persona, model, thinking, timeout, metadata, cache
         raise NotImplementedError(
             "KimiRuntime.execute() is not yet wired — Iteration B of the "
             "Kimi adapter plan (dev-docs/kimi-adapter-plan.md) lands the "
@@ -655,6 +657,7 @@ class KimiRuntime(AgentRuntime):
         on_event: Callable[[HookEvent], None] | None = None,
         provider_options: ProviderOptions | None = None,
         metadata: RequestMetadata | None = None,
+        cache: CacheConfig | None = None,
     ) -> AgentSession:
         """Open a :class:`KimiSession`.
 
@@ -735,6 +738,9 @@ class KimiRuntime(AgentRuntime):
         # Phase 6 — REQUEST_METADATA soft contract: Kimi Agent SDK has
         # no metadata channel today; the tag is silently dropped.
         del metadata
+        # Phase 6 — PROMPT_CACHE_CONTROL soft contract: Kimi has no
+        # explicit cache-key channel; silently drop.
+        del cache
         return KimiSession(
             self,
             resume=resume,

@@ -810,6 +810,21 @@ async def test_count_tokens_agrees_with_supports_flag(adapter_runtime: Any) -> N
             await adapter_runtime.count_tokens("hello")
 
 
+async def test_session_accepts_cache_kwarg(adapter_runtime: Any) -> None:
+    """``session(cache=CacheConfig(...))`` is accepted by every adapter.
+
+    Same soft-contract shape as ``metadata=``. Passing ``cache=`` to a
+    non-supporting adapter silently drops the kwarg rather than
+    raising — the call still succeeds correctly, just without the
+    cache speed-up. Consumers who care branch on
+    :data:`~airframe.features.Feature.PROMPT_CACHE_CONTROL`.
+    """
+    from airframe.cache import CacheConfig
+
+    sess = adapter_runtime.session(cache=CacheConfig(key="conformance-key"))
+    await sess.close()
+
+
 async def test_session_accepts_metadata_kwarg(adapter_runtime: Any) -> None:
     """``session(metadata=RequestMetadata(...))`` is accepted by every adapter.
 
@@ -920,6 +935,7 @@ __all__ = [
     "test_runtime_result_has_rate_limit_field",
     "test_runtime_result_has_reasoning_field",
     "test_runtime_transient_error_carries_rate_limit_attr",
+    "test_session_accepts_cache_kwarg",
     "test_session_accepts_metadata_kwarg",
     "test_session_cancel_when_idle_is_noop",
     "test_session_close_is_idempotent",

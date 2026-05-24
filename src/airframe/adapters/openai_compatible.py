@@ -50,6 +50,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, TypeVar
 
 from pydantic import BaseModel
 
+from airframe.cache import CacheConfig
 from airframe.cost import CostRecord
 from airframe.errors import (
     AgentRuntimeError,
@@ -236,6 +237,7 @@ class OpenAICompatibleRuntime(AgentRuntime):
             Feature.REASONING_OUTPUT,
             Feature.REQUEST_METADATA,
             Feature.COUNT_TOKENS,
+            Feature.PROMPT_CACHE_CONTROL,
         }
     )
 
@@ -307,13 +309,14 @@ class OpenAICompatibleRuntime(AgentRuntime):
         thinking: ThinkingMode = None,
         timeout: float = 600.0,
         metadata: RequestMetadata | None = None,
+        cache: CacheConfig | None = None,
     ) -> RuntimeResult:
         # Phase 1 Iteration G: ``execute()`` is documented sugar for
         # ``runtime.session(...).execute(...) + close()``. Single-turn,
         # ephemeral. Consumers wanting context warmth across calls open
         # a session explicitly and reuse it.
         del persona  # accepted in the protocol but not consumed by this family
-        sess = self.session(system=system, model=model, metadata=metadata)
+        sess = self.session(system=system, model=model, metadata=metadata, cache=cache)
         try:
             return await sess.execute(prompt, schema=schema, thinking=thinking, timeout=timeout)
         finally:
@@ -364,6 +367,7 @@ class OpenAICompatibleRuntime(AgentRuntime):
         on_event: Callable[[HookEvent], None] | None = None,
         provider_options: ProviderOptions | None = None,
         metadata: RequestMetadata | None = None,
+        cache: CacheConfig | None = None,
     ) -> AgentSession:
         """Open a bespoke :class:`OpenAICompatibleSession`.
 
@@ -489,6 +493,7 @@ class OpenAICompatibleRuntime(AgentRuntime):
             on_event=on_event,
             provider_options=compat_options,
             metadata=metadata,
+            cache=cache,
         )
 
     async def count_tokens(
@@ -797,6 +802,7 @@ class OpenAICompatibleSession:
         on_event: Callable[[HookEvent], None] | None = None,
         provider_options: OpenAICompatOptions | None = None,
         metadata: RequestMetadata | None = None,
+        cache: CacheConfig | None = None,
     ) -> None:
         self._runtime = runtime
         self._model = model
@@ -832,6 +838,13 @@ class OpenAICompatibleSession:
         # SDK). ``request_id`` → ``extra_headers={"X-Request-ID": ...}``
         # — defensive, not all compat vendors echo it.
         self._metadata: RequestMetadata | None = metadata
+        # Phase 6 — PROMPT_CACHE_CONTROL. ``key`` → ``prompt_cache_key=``;
+        # ``retention="short"`` → ``"in_memory"`` (~5min);
+        # ``retention="long"`` → ``"24h"`` on the OpenAI SDK. The
+        # cross-vendor cache= value takes precedence over the OpenAI-
+        # specific OpenAICompatOptions.prompt_cache_key (consumers who
+        # set both get the portable value through).
+        self._cache: CacheConfig | None = cache
         # Tools are fixed for the session's lifetime — translated once
         # and reused on every chat.completions.create() call. ``None``
         # / ``[]`` both mean "don't send the kwarg" so the wire shape
@@ -934,6 +947,7 @@ class OpenAICompatibleSession:
             if self._tools_wire is not None:
                 create_kwargs["tools"] = self._tools_wire
             self._apply_provider_options(create_kwargs)
+            self._apply_cache_config(create_kwargs)
             self._apply_request_metadata(create_kwargs)
             try:
                 raw = await client.chat.completions.with_raw_response.create(**create_kwargs)
@@ -1103,6 +1117,7 @@ class OpenAICompatibleSession:
                 if self._tools_wire is not None:
                     stream_kwargs["tools"] = self._tools_wire
                 self._apply_provider_options(stream_kwargs)
+                self._apply_cache_config(stream_kwargs)
                 self._apply_request_metadata(stream_kwargs)
                 try:
                     stream = await client.chat.completions.create(**stream_kwargs)
@@ -1284,6 +1299,32 @@ class OpenAICompatibleSession:
         # Runtime owns the AsyncOpenAI client; never tear it down here.
         # Cancel any in-flight work as a courtesy.
         await self.cancel()
+
+    def _apply_cache_config(self, kwargs: dict[str, Any]) -> None:
+        """Merge :class:`CacheConfig` fields into a create() kwargs dict.
+
+        Maps the cross-vendor ``CacheConfig`` onto OpenAI's two
+        prompt-cache channels:
+
+        * ``key`` → ``prompt_cache_key=`` (the explicit cache key).
+        * ``retention="short"`` → ``prompt_cache_retention="in_memory"``
+          (5-minute in-process cache).
+        * ``retention="long"`` → ``prompt_cache_retention="24h"``
+          (persistent cache).
+
+        The cross-vendor ``cache=`` value takes precedence over the
+        OpenAI-specific :attr:`OpenAICompatOptions.prompt_cache_key` —
+        a consumer setting both reasonably expects the portable
+        surface to win. Compat vendors that don't honour these kwargs
+        silently drop them server-side.
+        """
+        cache = self._cache
+        if cache is None:
+            return
+        if cache.key is not None:
+            kwargs["prompt_cache_key"] = cache.key
+        if cache.retention is not None:
+            kwargs["prompt_cache_retention"] = "in_memory" if cache.retention == "short" else "24h"
 
     def _apply_request_metadata(self, kwargs: dict[str, Any]) -> None:
         """Merge :class:`RequestMetadata` fields into a create() kwargs dict.

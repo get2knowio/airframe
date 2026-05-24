@@ -171,6 +171,11 @@ def test_unwired_features_stay_false(adapters: list) -> None:
         # (tiktoken-backed; best-effort approximation for compat
         # vendors). Others raise UnsupportedFeatureError.
         Feature.COUNT_TOKENS,
+        # Phase 6 — PROMPT_CACHE_CONTROL flipped on the OpenAI-compatible
+        # base (key → prompt_cache_key, retention "short"/"long" →
+        # "in_memory"/"24h"). Other adapters accept the cache= kwarg
+        # but drop it silently (soft contract).
+        Feature.PROMPT_CACHE_CONTROL,
     }
     must_be_false = [f for f in Feature if f not in any_adapter_may_support]
     for adapter in adapters:

@@ -41,6 +41,7 @@ from airframe.cost import CostRecord
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from airframe.cache import CacheConfig
     from airframe.events import RuntimeEvent
     from airframe.features import Feature
     from airframe.hooks import HookEvent
@@ -165,6 +166,7 @@ class AgentRuntime(Protocol):
         thinking: ThinkingMode = None,
         timeout: float = 600.0,
         metadata: RequestMetadata | None = None,
+        cache: CacheConfig | None = None,
     ) -> RuntimeResult:
         """Send one prompt, return a canonical typed result.
 
@@ -217,6 +219,13 @@ class AgentRuntime(Protocol):
                 :data:`~airframe.features.Feature.REQUEST_METADATA`;
                 silently dropped by adapters that don't (soft contract —
                 no :class:`UnsupportedFeatureError`).
+            cache: Optional :class:`~airframe.cache.CacheConfig` for
+                explicit prompt-cache key + retention. Forwarded by
+                adapters declaring
+                :data:`~airframe.features.Feature.PROMPT_CACHE_CONTROL`;
+                silently dropped by adapters that don't. Soft contract —
+                the call still succeeds correctly without the cache
+                speed-up.
 
         Returns:
             :class:`RuntimeResult` with text + (optional) structured
@@ -431,6 +440,7 @@ class AgentRuntime(Protocol):
         on_event: Callable[[HookEvent], None] | None = None,
         provider_options: ProviderOptions | None = None,
         metadata: RequestMetadata | None = None,
+        cache: CacheConfig | None = None,
     ) -> AgentSession:
         """Open a multi-turn session against this runtime.
 
@@ -536,6 +546,15 @@ class AgentRuntime(Protocol):
                 :class:`UnsupportedFeatureError` on a non-supporting
                 adapter, because the call's correctness doesn't
                 depend on the tag reaching the vendor.
+            cache: Optional :class:`~airframe.cache.CacheConfig`
+                forwarded on every turn this session runs. Adapters
+                declaring
+                :data:`~airframe.features.Feature.PROMPT_CACHE_CONTROL`
+                forward to the vendor's explicit cache-key channel
+                (OpenAI's ``prompt_cache_key`` /
+                ``prompt_cache_retention``); others silently drop.
+                Soft contract — the call still succeeds correctly
+                without the cache speed-up.
 
         Returns:
             A fresh :class:`AgentSession`.

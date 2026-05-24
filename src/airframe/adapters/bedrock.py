@@ -128,6 +128,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, TypeVar
 
 from pydantic import BaseModel, ValidationError
 
+from airframe.cache import CacheConfig
 from airframe.cost import CostRecord
 from airframe.errors import (
     RuntimeAuthError,
@@ -501,12 +502,13 @@ class BedrockRuntime(AgentRuntime):
         thinking: ThinkingMode = None,
         timeout: float = 600.0,
         metadata: RequestMetadata | None = None,
+        cache: CacheConfig | None = None,
     ) -> RuntimeResult:
         # Documented sugar for ``runtime.session(...).execute(...) + close()``.
         # Single-turn, ephemeral — the runtime client is shared, so the
         # only per-call setup is the BedrockSession itself.
         del persona  # accepted in the protocol but not consumed by Bedrock
-        sess = self.session(system=system, model=model, metadata=metadata)
+        sess = self.session(system=system, model=model, metadata=metadata, cache=cache)
         try:
             return await sess.execute(prompt, schema=schema, thinking=thinking, timeout=timeout)
         finally:
@@ -571,6 +573,7 @@ class BedrockRuntime(AgentRuntime):
         on_event: Callable[[HookEvent], None] | None = None,
         provider_options: ProviderOptions | None = None,
         metadata: RequestMetadata | None = None,
+        cache: CacheConfig | None = None,
     ) -> AgentSession:
         # Iteration B accepts the structural kwargs but only ``system`` /
         # ``model`` are honoured; later iterations wire tools/MCP/hooks/
@@ -580,6 +583,11 @@ class BedrockRuntime(AgentRuntime):
         # has no per-request user_id channel today (only ``inferenceConfig``
         # tags on some Anthropic-family models). Silently drop for v1.
         del metadata
+        # Phase 6 — PROMPT_CACHE_CONTROL soft contract: Bedrock honours
+        # ``cache_control`` markers on content blocks for Anthropic-family
+        # models, but airframe doesn't yet translate the portable
+        # CacheConfig into that shape. Silently drop for v1.
+        del cache
         if resume is not None:
             raise UnsupportedFeatureError(
                 "BedrockSession: SESSION_RESUME is not supported — Converse is "

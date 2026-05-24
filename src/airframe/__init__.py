@@ -40,6 +40,7 @@ airframe-agents[claude]``); see the README for the full extras matrix.
 
 from __future__ import annotations
 
+from airframe.cache import CacheConfig
 from airframe.cost import CostRecord
 from airframe.discovery import list_providers, runtime_for
 from airframe.errors import (
@@ -122,6 +123,7 @@ __all__ = [
     "CAPABILITY_STRUCTURED_OUTPUT",
     "CAPABILITY_TOOLS",
     "CAPABILITY_VISION",
+    "CacheConfig",
     "ClaudeCodeRuntime",
     "ClaudeOptions",
     "CopilotOptions",
