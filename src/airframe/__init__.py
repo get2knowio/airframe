@@ -91,6 +91,7 @@ from airframe.protocol import (
     RuntimeResult,
     UnsupportedBindingError,
 )
+from airframe.rate_limit import RateLimitInfo, RateLimitWindow
 from airframe.thinking import ReasoningEffort, ThinkingMode
 from airframe.tools import FunctionTool, McpServerRef
 
@@ -148,6 +149,8 @@ __all__ = [
     "PromptPart",
     "ProviderModel",
     "ProviderOptions",
+    "RateLimitInfo",
+    "RateLimitWindow",
     "ReasoningDelta",
     "ReasoningEffort",
     "RuntimeAuthError",

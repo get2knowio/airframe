@@ -37,7 +37,10 @@ different shapes:
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
+
+if TYPE_CHECKING:
+    from airframe.rate_limit import RateLimitInfo
 
 
 class AgentRuntimeError(Exception):
@@ -120,7 +123,28 @@ class RuntimeTransientError(AgentRuntimeError):
     The call was attempted; the server (or network) returned a
     recoverable failure. The underlying condition is expected to
     clear on its own.
+
+    Attributes:
+        rate_limit: Typed
+            :class:`~airframe.rate_limit.RateLimitInfo` snapshot when
+            the throttle response carried quota data. ``None`` for
+            non-throttle transient errors (5xx, network blip) and for
+            adapters that don't declare
+            :data:`~airframe.features.Feature.RATE_LIMIT_TELEMETRY`.
+            Consumers writing budget-aware retry policy can branch on
+            ``rate_limit.windows[0].retry_after_seconds`` etc.
     """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        status: int | None = None,
+        body: Any = None,
+        rate_limit: RateLimitInfo | None = None,
+    ) -> None:
+        super().__init__(message, status=status, body=body)
+        self.rate_limit = rate_limit
 
 
 class RuntimeCancelledError(AgentRuntimeError):

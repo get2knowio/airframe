@@ -48,6 +48,7 @@ if TYPE_CHECKING:
     from airframe.models import ModelInfo
     from airframe.options import ProviderOptions
     from airframe.permission import PermissionCallback
+    from airframe.rate_limit import RateLimitInfo
     from airframe.thinking import ThinkingMode
     from airframe.tools import FunctionTool, McpServerRef
 
@@ -100,6 +101,13 @@ class RuntimeResult:
         finish: Provider-reported stop reason
             (``"stop"`` / ``"length"`` / ``"tool_calls"`` /
             ``"end_turn"`` / ``None``).
+        rate_limit: Typed
+            :class:`~airframe.rate_limit.RateLimitInfo` snapshot when
+            the vendor surfaced quota data on this call. ``None`` for
+            adapters that don't declare
+            :data:`~airframe.features.Feature.RATE_LIMIT_TELEMETRY`,
+            or for supporting adapters when the vendor didn't send
+            rate-limit data on this turn. See :mod:`airframe.rate_limit`.
         raw: The transport-specific result object — kept for
             diagnostics. Not part of the protocol contract; consumers
             should treat it as opaque.
@@ -109,6 +117,7 @@ class RuntimeResult:
     structured: Any
     cost: CostRecord
     finish: str | None
+    rate_limit: RateLimitInfo | None = None
     raw: Any = field(default=None, repr=False)
 
 

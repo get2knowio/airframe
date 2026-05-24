@@ -147,6 +147,11 @@ def test_unwired_features_stay_false(adapters: list) -> None:
         # because its vendor caps internally.
         Feature.BUDGET_USD_CAP,
         Feature.BUDGET_TURN_CAP,
+        # Phase 6 — RATE_LIMIT_TELEMETRY flipped on Claude (consumes
+        # ``RateLimitEvent`` on the message stream) and on the
+        # OpenAI-compatible base (parses ``x-ratelimit-*`` headers via
+        # ``with_raw_response.create``). Other adapters still ``False``.
+        Feature.RATE_LIMIT_TELEMETRY,
     }
     must_be_false = [f for f in Feature if f not in any_adapter_may_support]
     for adapter in adapters:

@@ -148,6 +148,20 @@ def mock_openai(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
     client.chat = MagicMock()
     client.chat.completions = MagicMock()
     client.chat.completions.create = AsyncMock(return_value=_make_response())
+
+    # Production uses with_raw_response.create() to read x-ratelimit-*
+    # headers; the delegating shim looks up .create dynamically so per-
+    # test rebinds of ``client.chat.completions.create`` still take
+    # effect through the with_raw_response path.
+    async def _raw_create(**kwargs: Any) -> Any:
+        response = await client.chat.completions.create(**kwargs)
+        raw = MagicMock()
+        raw.parse = MagicMock(return_value=response)
+        raw.headers = {}
+        return raw
+
+    client.chat.completions.with_raw_response = MagicMock()
+    client.chat.completions.with_raw_response.create = AsyncMock(side_effect=_raw_create)
     client.close = AsyncMock()
 
     factory = MagicMock(return_value=client)

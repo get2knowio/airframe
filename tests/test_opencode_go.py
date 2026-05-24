@@ -70,6 +70,16 @@ def mock_client(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
     client.chat = MagicMock()
     client.chat.completions = MagicMock()
     client.chat.completions.create = AsyncMock(return_value=_make_response())
+
+    async def _raw_create(**kwargs: Any) -> Any:
+        response = await client.chat.completions.create(**kwargs)
+        raw = MagicMock()
+        raw.parse = MagicMock(return_value=response)
+        raw.headers = {}
+        return raw
+
+    client.chat.completions.with_raw_response = MagicMock()
+    client.chat.completions.with_raw_response.create = AsyncMock(side_effect=_raw_create)
     client.close = AsyncMock()
 
     factory = MagicMock(return_value=client)

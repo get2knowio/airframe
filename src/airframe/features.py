@@ -45,6 +45,10 @@ The associated APIs:
 * :data:`Feature.LIFECYCLE_HOOKS` — typed event observation. Phase 5.
 * :data:`Feature.BUDGET_USD_CAP` / ``BUDGET_TURN_CAP`` — budget caps
   on :meth:`session.execute`. Phase 5.
+* :data:`Feature.RATE_LIMIT_TELEMETRY` — typed
+  :class:`~airframe.rate_limit.RateLimitInfo` on
+  :class:`~airframe.protocol.RuntimeResult` and
+  :class:`~airframe.errors.RuntimeTransientError`. Phase 6.
 * :data:`Feature.SANDBOX` — sandboxed tool execution. Phase 6.
 * :data:`Feature.SUBAGENTS` — programmatic subagent definitions.
   Phase 6.
@@ -136,6 +140,11 @@ class Feature(StrEnum):
     """``execute(max_turns=...)`` aborts after a turn count."""
 
     # --- Phase 6 — sandbox, subagents ---
+    RATE_LIMIT_TELEMETRY = "rate_limit_telemetry"
+    """Adapters populate :class:`~airframe.rate_limit.RateLimitInfo` on
+    :attr:`RuntimeResult.rate_limit` (success) and
+    :attr:`RuntimeTransientError.rate_limit` (throttle)."""
+
     SANDBOX = "sandbox"
     """``session(sandbox=...)`` constrains tool filesystem / network access."""
 

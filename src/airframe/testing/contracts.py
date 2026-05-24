@@ -767,6 +767,57 @@ def test_session_rejects_wrong_provider_options_namespace(adapter_runtime: Any) 
         adapter_runtime.session(provider_options=foreign())
 
 
+# ---------------------------------------------------------------------------
+# Rate-limit telemetry surface
+# ---------------------------------------------------------------------------
+
+
+def test_runtime_result_has_rate_limit_field(adapter_runtime: Any) -> None:
+    """``RuntimeResult.rate_limit`` exists with ``None`` default.
+
+    The field lives on :class:`~airframe.protocol.RuntimeResult` for
+    every adapter regardless of whether the adapter populates it. The
+    default is ``None`` — adapters that don't declare
+    :data:`~airframe.features.Feature.RATE_LIMIT_TELEMETRY` leave the
+    field at the default. Consumers can branch on ``result.rate_limit
+    is not None`` without first checking ``supports()``.
+    """
+    from airframe.cost import CostRecord
+    from airframe.protocol import RuntimeResult
+
+    cost = CostRecord(
+        provider_id=adapter_runtime.PROVIDER_ID,
+        model_id="dummy",
+        cost_usd=None,
+        input_tokens=0,
+        output_tokens=0,
+        cache_read_tokens=0,
+        cache_write_tokens=0,
+        finish=None,
+    )
+    rr = RuntimeResult(text="", structured=None, cost=cost, finish=None)
+    assert rr.rate_limit is None
+    assert hasattr(rr, "rate_limit")
+    del adapter_runtime  # signature carries the fixture for consistency
+
+
+def test_runtime_transient_error_carries_rate_limit_attr(adapter_runtime: Any) -> None:
+    """``RuntimeTransientError.rate_limit`` is reachable, default ``None``.
+
+    Adapters declaring :data:`Feature.RATE_LIMIT_TELEMETRY` populate
+    the attribute on throttle responses; adapters that don't leave it
+    ``None``. Either way the attribute must exist so consumers
+    writing budget-aware retry can read it uniformly.
+    """
+    from airframe.errors import RuntimeTransientError
+
+    err = RuntimeTransientError("synthetic")
+    assert err.rate_limit is None
+    err_explicit = RuntimeTransientError("synthetic", rate_limit=None)
+    assert err_explicit.rate_limit is None
+    del adapter_runtime
+
+
 # ``TurnComplete`` is exported alongside the contracts so integration-test
 # fixtures (Phase 1 Iteration B+) can build the trailing event without
 # re-importing it from airframe.events. Re-exporting here keeps the
@@ -777,6 +828,8 @@ __all__ = [
     "test_close_on_fresh_runtime",
     "test_emittable_hook_kinds_subset_of_eight_literals",
     "test_plain_text_execute_path_is_wired",
+    "test_runtime_result_has_rate_limit_field",
+    "test_runtime_transient_error_carries_rate_limit_attr",
     "test_session_cancel_when_idle_is_noop",
     "test_session_close_is_idempotent",
     "test_session_close_on_fresh_session_is_safe",

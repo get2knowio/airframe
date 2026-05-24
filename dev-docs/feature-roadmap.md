@@ -762,6 +762,353 @@ SKILL.md content into the system prompt. `supports()` exists so
 consumers can fall back themselves; vendor shimming is the kind of
 "helpful" abstraction the codebase deliberately avoids.
 
+### P3 — Typed rate-limit telemetry
+
+**Why.** Every vendor surfaces structured quota data and airframe
+drops it on the floor. Claude's `RateLimitInfo` exposes typed
+windows (`five_hour`, `seven_day`, `seven_day_opus`,
+`seven_day_sonnet`, `overage`) with `utilization`, `resets_at`, and
+`status` (`allowed` / `allowed_warning` / `rejected`); OpenAI returns
+the standard `x-ratelimit-limit-{requests,tokens}` /
+`x-ratelimit-remaining-{requests,tokens}` /
+`x-ratelimit-reset-{requests,tokens}` / `retry-after` header set;
+Copilot exposes per-error `SessionErrorData` with status_code;
+Bedrock surfaces throttling exceptions with retry-after metadata.
+Today airframe collapses all of this into an opaque
+`RuntimeTransientError`, so consumers can't write budget-aware
+retry, build "you have X requests left this hour" UX, or feed
+quota dashboards without `unwrap()`ing per adapter.
+
+The matrix already flags this at line 70 (`◐ via
+RuntimeTransientError`). The HookEvent surface (Phase 5) has a
+`rate_limit` event kind with `retry_after_seconds` in the payload,
+but it's an *observation* of throttling, not a *measurement* of
+remaining quota — and the typed `RateLimitInfo` Claude already
+provides gets squashed into an untyped dict on the way out.
+
+**Sketch.** Lift the data to a typed object that rides on both
+`RuntimeResult` (when the vendor returns quota data on a successful
+call) and `RuntimeTransientError` (when we actually got throttled):
+
+```python
+@dataclass(frozen=True, slots=True)
+class RateLimitWindow:
+    """One quota window."""
+    name: str                              # vendor's name: "rpm", "tpm",
+                                           # "five_hour", "seven_day", ...
+    remaining: int | None = None           # OpenAI-style
+    limit: int | None = None               # OpenAI-style
+    utilization: float | None = None       # Claude-style (0.0-1.0)
+    reset_at: datetime | None = None
+    retry_after_seconds: float | None = None
+    status: Literal["allowed", "allowed_warning", "rejected"] | None = None
+
+@dataclass(frozen=True, slots=True)
+class RateLimitInfo:
+    windows: tuple[RateLimitWindow, ...] = ()
+    raw: dict[str, Any] = field(default_factory=dict)
+
+# Additive: RuntimeResult.rate_limit: RateLimitInfo | None = None
+# Additive: RuntimeTransientError.rate_limit: RateLimitInfo | None
+```
+
+Per-adapter mapping:
+* Claude → translate `RateLimitInfo` from the SDK's
+  `RateLimitEvent`; one `RateLimitWindow` per active window. Already
+  observed via the `rate_limit` hook — stash the most recent on the
+  session and attach to the next `RuntimeResult`.
+* OpenAI-compat → switch the create() call to
+  `client.chat.completions.with_raw_response.create(...)`, parse the
+  six `x-ratelimit-*` headers + `retry-after`, emit two windows
+  (requests + tokens). On 429 → `RateLimitError`, extract from
+  `exc.response.headers`.
+* Kimi → 429s arrive as exceptions; populate `retry_after_seconds`
+  from `Retry-After` when present, leave `windows=()` otherwise.
+* Bedrock → `ThrottlingException` carries retry-after; surface as a
+  single-window `RateLimitInfo` plus headers when present.
+* Copilot, OpenCode-server → `RateLimitInfo` on the corresponding
+  error event when the SDK exposes it; otherwise omit.
+
+Add `Feature.RATE_LIMIT_TELEMETRY` — adapters returning `True` must
+populate either `RuntimeResult.rate_limit` (when quota data was on
+the wire) or `RuntimeTransientError.rate_limit` (on throttle).
+Adapters returning `False` leave both `None`. Conformance: a unit
+test asserts that adapters declaring support never raise a
+`RuntimeTransientError` with rate-limit text in the message but
+`rate_limit=None`.
+
+### P3 — Reasoning trace on `RuntimeResult`
+
+**Why.** P2 streaming defines `ReasoningDelta`, but the
+non-streaming `RuntimeResult` has no place to land a finalised
+reasoning trace — so consumers calling `execute()` instead of
+`stream()` lose it entirely. Claude (`ReasoningItem` /
+`thinking` blocks), Copilot (`assistant.reasoning_delta` collapsing
+to a final string), Codex (`ReasoningItem` in turn output), and the
+OpenAI Responses API all expose it. The capability flag
+`REASONING_EFFORT` exists; the *output surface* doesn't.
+
+**Sketch.** Add a sibling field to `RuntimeResult.text`:
+
+```python
+@dataclass(frozen=True, slots=True)
+class RuntimeResult:
+    text: str
+    structured: Any
+    cost: CostRecord
+    finish: str | None
+    reasoning: str | None = None       # NEW — final reasoning trace
+    rate_limit: RateLimitInfo | None = None
+    raw: Any = field(default=None, repr=False)
+```
+
+Adapters that declare `Feature.REASONING_EFFORT` and saw a
+reasoning block populate `reasoning`; adapters that didn't (or
+whose model didn't emit one) leave it `None`. Streaming pairs
+naturally — `TurnComplete.result.reasoning` is the concatenation of
+all `ReasoningDelta` payloads.
+
+Add `Feature.REASONING_OUTPUT` (distinct from `REASONING_EFFORT`:
+the latter is "I can ask the model to think harder"; this is "I
+can show you what it thought"). Adapters whose vendor SDK exposes
+the reasoning text declare it; the rest leave the field `None`.
+
+### P3 — Per-request metadata / user-id
+
+**Why.** Every vendor SDK accepts a free-form per-request tag for
+abuse detection, per-tenant usage attribution, and audit trails:
+OpenAI's `user=`, Anthropic's `metadata={"user_id": ...}`, Bedrock's
+`clientRequestToken`, Copilot's `headers={"X-User-Id": ...}` pattern.
+Consumers running multi-tenant agent UIs all reinvent this per
+adapter today (or skip it and weaken their abuse-detection story).
+
+**Sketch.** Optional kwarg on `execute()` / `session()`:
+
+```python
+@dataclass(frozen=True, slots=True)
+class RequestMetadata:
+    user_id: str | None = None         # per-end-user identifier
+    request_id: str | None = None      # caller-side correlation id
+    tags: dict[str, str] | None = None # arbitrary string→string labels
+
+runtime.session(metadata=RequestMetadata(user_id="acct_1234"))
+await session.execute(prompt, metadata=RequestMetadata(request_id="req-abc"))
+```
+
+Per-adapter mapping:
+* OpenAI-compat → `user=` on `chat.completions.create`; tags →
+  best-effort header injection or no-op.
+* Claude → `metadata={"user_id": ...}` on the messages call.
+* Bedrock → `clientRequestToken` from `request_id`; `user_id` as
+  an inference-config metadata tag where supported.
+* Adapters with no metadata channel ignore the kwarg silently
+  (it's observation only, not behaviour-changing — silent ignore
+  is appropriate, unlike capability gates).
+
+Add `Feature.REQUEST_METADATA`. Zero-risk addition: dropping the
+field on a non-supporting adapter changes no observable behaviour.
+
+### P3 — Pre-flight token counting
+
+**Why.** Consumers want "is this prompt going to blow the context
+window / break my budget" *before* paying for a turn. Anthropic
+ships a `count_tokens` endpoint, OpenAI ships `tiktoken`, Bedrock
+provides per-model encoders, the Claude Agent SDK exposes
+`ContextUsageCategory`. Today consumers reach for `tiktoken` and
+hope its tokenisation matches whatever model they're actually
+calling — sometimes it doesn't.
+
+**Sketch.** A new protocol method:
+
+```python
+async def count_tokens(
+    self,
+    prompt: Prompt,
+    *,
+    system: str | None = None,
+    model: ProviderModel | None = None,
+) -> int:
+    """Pre-flight token count for the given prompt against this
+    model. Adapters use the vendor's native tokeniser /
+    count-tokens endpoint where one exists, an offline encoder
+    where one is bundled, or raise UnsupportedFeatureError."""
+```
+
+Per-adapter:
+* Claude → `anthropic.AsyncAnthropic.messages.count_tokens(...)`
+  via the underlying SDK (per CLAUDE.md: prefer the official SDK
+  over hand-rolled HTTP).
+* OpenAI-compat → vendor-bundled `tiktoken` encoding for the
+  model when available; raise `UnsupportedFeatureError` for compat
+  vendors with no encoder.
+* Bedrock → per-family encoder (Anthropic / Llama / Nova) from the
+  Bedrock service helpers.
+* Kimi / Copilot / OpenCode → defer until the vendor SDK ships a
+  counter; declare `False`.
+
+Add `Feature.COUNT_TOKENS`. The return type is deliberately a flat
+`int` (not a structured breakdown of system + prompt + reserved
+output) — adapters that want richer detail can additionally
+surface it on `ContextUsageCategory`-style telemetry.
+
+### P3 — Prompt-cache controls (keys + retention)
+
+**Why.** §1's matrix at lines 55–56 splits prompt caching into
+*read stats* (✓ shipped — surfaced in `CostRecord`) and *controls*
+(✗ — no airframe surface). OpenAI exposes `prompt_cache_key` and
+`prompt_cache_retention: "in_memory" | "24h"`; Anthropic exposes
+`cache_control` markers on the messages-API content blocks
+(`{"type": "ephemeral"}` / `{"type": "persistent"}` with a TTL).
+For long-running agentic workflows the consumer knows the cache key
+better than the vendor's heuristic ("this same system prompt +
+codebase context across every turn of this session" — a stable
+key buys 90%+ cache hit rates instead of the 30-50% the heuristic
+manages).
+
+**Sketch.** Session-level config that adapters thread into their
+native cache channel:
+
+```python
+@dataclass(frozen=True, slots=True)
+class CacheConfig:
+    key: str | None = None                     # stable across calls
+    retention: Literal["short", "long"] | None = None
+    # "short" ≈ in-memory / 5min; "long" ≈ persistent / 1h+
+    # adapter maps to vendor's nearest equivalent
+
+runtime.session(cache=CacheConfig(key="agent-foo:session-42", retention="long"))
+```
+
+Per-adapter:
+* OpenAI-compat → `prompt_cache_key=` + `prompt_cache_retention=`
+  ("short" → `"in_memory"`, "long" → `"24h"`).
+* Claude Agent SDK → not directly exposed; the agent SDK manages
+  caching via session warmth. Stash the key as session metadata
+  for future use; declare `False` until the SDK opens the surface.
+* Bedrock → `Anthropic` family on Bedrock honours
+  `cache_control`; map at the message-construction site.
+* Others → `False`.
+
+Add `Feature.PROMPT_CACHE_CONTROL`. The retention literal is
+deliberately coarse (`short` / `long`) because vendor windows
+vary; consumers wanting precise control should `unwrap()`.
+
+### P3 — Slash commands as portable assets
+
+**Why.** Exact analog to the [Agent Skills](#p3--agent-skills)
+entry above. Claude (`.claude/commands/*.md`), OpenCode
+(`.opencode/command/*.md`), Copilot (`.github/copilot/commands/`),
+and Kimi all expose filesystem-defined, user-invoked commands
+following the same YAML-frontmatter-plus-Markdown convention
+SKILL.md uses. Same "filesystem contract, not API" pattern; same
+"airframe pipes where/which, doesn't abstract authoring" stance.
+
+Slash commands differ from skills in *who triggers them*: skills
+are model-invoked autonomously; slash commands are user-invoked
+explicitly (typed into a UI or selected from a palette). That
+matters for the API surface — slash commands need an
+*invocation* surface, not just a *configuration* surface, so the
+consumer can wire "user typed `/refactor`" through.
+
+**Sketch.**
+
+```python
+class Feature(IntEnum):
+    ...
+    SLASH_COMMANDS = auto()
+
+@dataclass(frozen=True, slots=True)
+class SlashCommandsConfig:
+    enabled: Literal["all"] | list[str] | None = "all"
+    search_paths: list[Path] | None = None
+    include_user_global: bool = True
+
+# Configuration: identical pattern to SkillsConfig.
+runtime.session(slash_commands=SlashCommandsConfig(enabled=["refactor", "explain"]))
+
+# Discovery — for surfacing them in the consumer's UI palette:
+@dataclass(frozen=True, slots=True)
+class SlashCommand:
+    name: str
+    description: str
+    arg_schema: type[BaseModel] | None    # None for arg-less commands
+
+async def list_slash_commands(self) -> list[SlashCommand]: ...
+
+# Invocation — equivalent to execute() with a special prompt shape:
+await session.execute(SlashCommandInvocation(name="refactor",
+                                              args={"target": "foo.py"}))
+```
+
+Same per-adapter mapping pattern as Skills (Claude /
+github-copilot / kimi / opencode wire it; bedrock /
+opencode-zen / opencode-go / openrouter return `False`). Spec the
+config now, defer the runtime invocation surface to a real phase.
+
+### P4 — Compaction control (not just observation)
+
+**Why.** The lifecycle hooks proposal lets consumers *observe*
+compaction (`pre_compact` event); it doesn't let them *configure*
+it. Claude has `PreCompact` hooks + `fold_session_summary` +
+`session_store`; Copilot has `session.compaction_start` /
+`compaction_complete`; OpenAI Responses has a typed
+`context_management` param. Long-running sessions (research
+agents, daemons, anything that lives > ~100 turns) need a knob —
+"compact at 80% of window," "use this summariser prompt,"
+"compact now" — not just a notification.
+
+**Sketch.** Session-level config plus an explicit method:
+
+```python
+@dataclass(frozen=True, slots=True)
+class CompactionConfig:
+    trigger: Literal["auto", "manual"] | None = "auto"
+    threshold_ratio: float | None = None      # 0.0-1.0 of context window
+    summary_prompt: str | None = None         # caller-supplied summariser
+
+runtime.session(compaction=CompactionConfig(threshold_ratio=0.8))
+await session.compact()  # force now
+```
+
+Per-adapter:
+* Claude → forward `threshold_ratio` to the agent SDK's
+  compaction-trigger knob; `summary_prompt` overrides the
+  default summariser; `session.compact()` calls
+  `fold_session_summary`.
+* OpenAI Responses → `context_management={...}`.
+* OpenAI-compat (Chat Completions) → declines: no server-side
+  state, no compaction concept.
+* Others → `False` until the vendor surfaces controls.
+
+Add `Feature.COMPACTION_CONTROL`. Lower priority because the
+*observation* side (`pre_compact` event) already gives most
+consumers what they need; control is for the long-tail of
+multi-hour sessions.
+
+### Briefly considered, not yet a section
+
+These cross-cutting gaps exist but don't warrant a full §3 entry
+yet — either they belong in §5 sequencing, or they're awaiting a
+concrete consumer ask, or they're trivial enough to bolt on
+opportunistically.
+
+* **HTTP client / `base_url` / proxy injection.** Every vendor SDK
+  accepts a custom `httpx.AsyncClient` and `base_url`. Belongs in
+  the `ProviderOptions` scaffolding (§6.5) — add fields as
+  consumers ask, rather than promoting to a §3 protocol concept.
+* **Citations / source attribution.** OpenAI's `file_search`
+  annotations and Anthropic Citations both surface
+  "where did this claim come from." Real consumer value for
+  RAG-style flows, but the shapes diverge enough (per-claim
+  fragments vs. per-document references) that abstracting now is
+  premature. Hold until a concrete consumer ask pins the shape.
+* **Stop sequences.** Universally supported (`stop=` /
+  `stop_sequences=`), trivially addable as a kwarg on `execute()`.
+  Almost never used in agentic flows (the model decides when to
+  stop based on the conversation, not a string match), so low
+  priority. Land opportunistically when something else touches
+  the `execute()` signature.
+
 ### P4 — Working-directory / sandbox
 
 **Why.** Three of four agentic SDKs expose CWD + sandbox toggles.

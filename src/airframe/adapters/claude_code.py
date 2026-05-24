@@ -55,6 +55,7 @@ import asyncio
 import logging
 import os
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, ClassVar, TypeVar
 
 from pydantic import BaseModel
@@ -89,6 +90,7 @@ from airframe.protocol import (
     RuntimeResult,
     UnsupportedBindingError,
 )
+from airframe.rate_limit import RateLimitInfo, RateLimitWindow
 from airframe.sessions import (
     _check_budget_supported,
     _check_hooks_supported,
@@ -326,6 +328,7 @@ class ClaudeCodeRuntime(AgentRuntime):
             Feature.LIFECYCLE_HOOKS,
             Feature.BUDGET_USD_CAP,
             Feature.BUDGET_TURN_CAP,
+            Feature.RATE_LIMIT_TELEMETRY,
         }
     )
 
@@ -857,6 +860,15 @@ class ClaudeCodeSession:
         # session — the budget cap is *session-wide*, not per-call.
         self._cumulative_cost_usd: float = 0.0
         self._turn_count: int = 0
+        # Phase 6 — RATE_LIMIT_TELEMETRY. The Claude SDK emits
+        # :class:`RateLimitEvent` instances on the message stream as
+        # the server's quota state changes. Each event carries one
+        # window's state (``rate_limit_type``); we accumulate the
+        # most-recent state per window in a dict keyed by window name
+        # and snapshot to a :class:`RateLimitInfo` at result-build
+        # time so :attr:`RuntimeResult.rate_limit` reflects the latest
+        # quota across all windows the session has heard from.
+        self._rate_limit_windows: dict[str, RateLimitWindow] = {}
 
     async def execute(
         self,
@@ -998,6 +1010,7 @@ class ClaudeCodeSession:
 
         from claude_agent_sdk import (
             AssistantMessage,
+            RateLimitEvent,
             ResultMessage,
             StreamEvent,
             TextBlock,
@@ -1012,6 +1025,9 @@ class ClaudeCodeSession:
             async for msg in client.receive_response():
                 if self._stream_cancelled:
                     raise RuntimeCancelledError(f"{self._runtime.label}: stream cancelled")
+                if isinstance(msg, RateLimitEvent):
+                    self._absorb_rate_limit_event(msg)
+                    continue
                 if isinstance(msg, StreamEvent):
                     for event in _events_from_stream_event(msg):
                         yield event
@@ -1283,14 +1299,71 @@ class ClaudeCodeSession:
         return client
 
     async def _query_and_drain(self, client: Any, prompt: str) -> Any:
-        from claude_agent_sdk import ResultMessage
+        from claude_agent_sdk import RateLimitEvent, ResultMessage
 
         await client.query(prompt)
         final: Any = None
         async for msg in client.receive_response():
+            if isinstance(msg, RateLimitEvent):
+                self._absorb_rate_limit_event(msg)
+                continue
             if isinstance(msg, ResultMessage):
                 final = msg
         return final
+
+    def _absorb_rate_limit_event(self, event: Any) -> None:
+        """Update ``_rate_limit_windows`` from a Claude ``RateLimitEvent``.
+
+        Each SDK event carries one window's state via
+        ``event.rate_limit_info.rate_limit_type``. We key by that
+        type name so multiple events (different windows) accumulate;
+        re-emission of the same window overwrites the prior entry
+        with the freshest state.
+        """
+        info = getattr(event, "rate_limit_info", None)
+        if info is None:
+            return
+        window_name = getattr(info, "rate_limit_type", None) or "default"
+        resets_at_unix = getattr(info, "resets_at", None)
+        reset_at: datetime | None
+        if resets_at_unix is not None:
+            try:
+                reset_at = datetime.fromtimestamp(int(resets_at_unix), tz=UTC)
+            except (TypeError, ValueError, OverflowError, OSError):
+                reset_at = None
+        else:
+            reset_at = None
+        self._rate_limit_windows[window_name] = RateLimitWindow(
+            name=window_name,
+            utilization=getattr(info, "utilization", None),
+            reset_at=reset_at,
+            status=getattr(info, "status", None),
+        )
+        # Overage signal: surface as a separate "overage" window so
+        # consumers can see both the per-window utilisation and the
+        # overage state without merging fields onto one shape.
+        overage_status = getattr(info, "overage_status", None)
+        if overage_status is not None:
+            overage_resets_at = getattr(info, "overage_resets_at", None)
+            overage_reset: datetime | None
+            if overage_resets_at is not None:
+                try:
+                    overage_reset = datetime.fromtimestamp(int(overage_resets_at), tz=UTC)
+                except (TypeError, ValueError, OverflowError, OSError):
+                    overage_reset = None
+            else:
+                overage_reset = None
+            self._rate_limit_windows["overage"] = RateLimitWindow(
+                name="overage",
+                reset_at=overage_reset,
+                status=overage_status,
+            )
+
+    def _rate_limit_snapshot(self) -> RateLimitInfo | None:
+        """Snapshot the per-window state for attachment to a result."""
+        if not self._rate_limit_windows:
+            return None
+        return RateLimitInfo(windows=tuple(self._rate_limit_windows.values()))
 
     def _build_result(self, result_msg: Any, *, schema: type[BaseModel] | None) -> RuntimeResult:
         if result_msg is None:
@@ -1311,12 +1384,15 @@ class ClaudeCodeSession:
         text = result_msg.result or ""
         cost = self._runtime._cost_from_result(result_msg, model_id=self._model_id)
 
+        rate_limit = self._rate_limit_snapshot()
+
         if schema is None:
             return RuntimeResult(
                 text=text,
                 structured=None,
                 cost=cost,
                 finish=result_msg.stop_reason,
+                rate_limit=rate_limit,
                 raw=result_msg,
             )
 
@@ -1337,6 +1413,7 @@ class ClaudeCodeSession:
             structured=structured,
             cost=cost,
             finish=result_msg.stop_reason,
+            rate_limit=rate_limit,
             raw=result_msg,
         )
 

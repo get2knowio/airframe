@@ -45,6 +45,7 @@ import logging
 import os
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, ClassVar, TypeVar
 
 from pydantic import BaseModel
@@ -72,6 +73,7 @@ from airframe.protocol import (
     RuntimeResult,
     UnsupportedBindingError,
 )
+from airframe.rate_limit import RateLimitInfo, RateLimitWindow
 from airframe.sessions import (
     _MCP_TRANSPORT_TO_FEATURE,
     _check_budget_supported,
@@ -222,6 +224,7 @@ class OpenAICompatibleRuntime(AgentRuntime):
             # in the tool loop) — see the class docstring.
             Feature.BUDGET_USD_CAP,
             Feature.BUDGET_TURN_CAP,
+            Feature.RATE_LIMIT_TELEMETRY,
         }
     )
 
@@ -545,6 +548,7 @@ class OpenAICompatibleRuntime(AgentRuntime):
         *,
         model_id: str,
         schema: type[BaseModel] | None,
+        rate_limit: RateLimitInfo | None = None,
     ) -> RuntimeResult:
         if not response.choices:
             raise RuntimeProtocolError(
@@ -594,6 +598,7 @@ class OpenAICompatibleRuntime(AgentRuntime):
             structured=structured,
             cost=cost,
             finish=finish,
+            rate_limit=rate_limit,
             raw=response,
         )
 
@@ -638,7 +643,11 @@ class OpenAICompatibleRuntime(AgentRuntime):
                 body=getattr(exc, "body", None),
             )
         if isinstance(exc, RateLimitError | APITimeoutError | APIConnectionError):
-            return RuntimeTransientError(f"{self.label}: transient: {exc}")
+            rate_limit: RateLimitInfo | None = None
+            if isinstance(exc, RateLimitError):
+                headers = getattr(getattr(exc, "response", None), "headers", None)
+                rate_limit = _parse_openai_rate_limit_headers(headers)
+            return RuntimeTransientError(f"{self.label}: transient: {exc}", rate_limit=rate_limit)
         if isinstance(exc, APIStatusError):
             status = getattr(exc, "status_code", None)
             if status is not None and 500 <= status < 600:
@@ -827,9 +836,11 @@ class OpenAICompatibleSession:
                 create_kwargs["tools"] = self._tools_wire
             self._apply_provider_options(create_kwargs)
             try:
-                response = await client.chat.completions.create(**create_kwargs)
+                raw = await client.chat.completions.with_raw_response.create(**create_kwargs)
+                response = raw.parse()
             except Exception as exc:
                 raise self._runtime._classify_exception(exc) from exc
+            rate_limit = _parse_openai_rate_limit_headers(getattr(raw, "headers", None))
 
             if not response.choices:
                 raise RuntimeProtocolError(
@@ -839,7 +850,12 @@ class OpenAICompatibleSession:
             message = response.choices[0].message
             tool_calls = getattr(message, "tool_calls", None) or []
             if not tool_calls:
-                result = self._runtime._build_result(response, model_id=model_id, schema=schema)
+                result = self._runtime._build_result(
+                    response,
+                    model_id=model_id,
+                    schema=schema,
+                    rate_limit=rate_limit,
+                )
                 self._messages.append({"role": "assistant", "content": result.text})
                 return result
 
@@ -1220,6 +1236,140 @@ class OpenAICompatibleSession:
             f"to {cls!r}; the AsyncOpenAI client lives on the runtime — "
             f"call runtime.unwrap(AsyncOpenAI) instead."
         )
+
+
+def _parse_openai_rate_limit_headers(headers: Any) -> RateLimitInfo | None:
+    """Translate OpenAI-style ``x-ratelimit-*`` headers into :class:`RateLimitInfo`.
+
+    OpenAI (and most compat vendors that mimic its surface) emit:
+
+    * ``x-ratelimit-limit-requests`` / ``x-ratelimit-limit-tokens`` — window total.
+    * ``x-ratelimit-remaining-requests`` / ``x-ratelimit-remaining-tokens`` — left in window.
+    * ``x-ratelimit-reset-requests`` / ``x-ratelimit-reset-tokens`` — duration string
+      until the window resets (``"1s"`` / ``"6m0s"`` / ``"1h2m3s"`` / ``"42ms"``).
+    * ``retry-after`` — server-suggested wait in seconds (also a duration string
+      on some vendors). Typically only set on 429 responses.
+
+    Returns ``None`` when ``headers`` is falsy or carries no recognisable
+    rate-limit data — adapters surface ``rate_limit=None`` on calls where
+    the vendor stayed quiet, distinct from "the field exists but is empty."
+    """
+    if not headers:
+        return None
+    requests_window = _build_openai_window(headers, kind="requests")
+    tokens_window = _build_openai_window(headers, kind="tokens")
+    retry_after = _parse_retry_after(headers.get("retry-after"))
+    windows: list[RateLimitWindow] = []
+    if requests_window is not None:
+        windows.append(_with_retry_after(requests_window, retry_after))
+    if tokens_window is not None:
+        windows.append(_with_retry_after(tokens_window, retry_after))
+    if not windows:
+        return None
+    return RateLimitInfo(windows=tuple(windows))
+
+
+def _build_openai_window(headers: Any, *, kind: str) -> RateLimitWindow | None:
+    """One ``RateLimitWindow`` from the three ``x-ratelimit-*-{kind}`` headers."""
+    limit_raw = headers.get(f"x-ratelimit-limit-{kind}")
+    remaining_raw = headers.get(f"x-ratelimit-remaining-{kind}")
+    reset_raw = headers.get(f"x-ratelimit-reset-{kind}")
+    if limit_raw is None and remaining_raw is None and reset_raw is None:
+        return None
+    return RateLimitWindow(
+        name=kind,
+        remaining=_parse_int(remaining_raw),
+        limit=_parse_int(limit_raw),
+        reset_at=_reset_at_from_duration(reset_raw),
+    )
+
+
+def _with_retry_after(
+    window: RateLimitWindow, retry_after_seconds: float | None
+) -> RateLimitWindow:
+    """Return a copy of ``window`` with ``retry_after_seconds`` set."""
+    if retry_after_seconds is None:
+        return window
+    return RateLimitWindow(
+        name=window.name,
+        remaining=window.remaining,
+        limit=window.limit,
+        utilization=window.utilization,
+        reset_at=window.reset_at,
+        retry_after_seconds=retry_after_seconds,
+        status=window.status,
+    )
+
+
+def _parse_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _parse_retry_after(value: Any) -> float | None:
+    """OpenAI emits ``retry-after`` as an integer-seconds string."""
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return _duration_string_to_seconds(value)
+
+
+def _reset_at_from_duration(value: Any) -> datetime | None:
+    seconds = _duration_string_to_seconds(value)
+    if seconds is None:
+        return None
+    return datetime.now(tz=UTC) + timedelta(seconds=seconds)
+
+
+def _duration_string_to_seconds(value: Any) -> float | None:
+    """Parse OpenAI's ``"1h2m3s"`` / ``"42ms"`` / ``"6.5s"`` duration strings."""
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    text = str(value).strip()
+    if not text:
+        return None
+    total = 0.0
+    num = ""
+    i = 0
+    while i < len(text):
+        ch = text[i]
+        if ch.isdigit() or ch == ".":
+            num += ch
+            i += 1
+            continue
+        # Unit — one of ms / s / m / h. Order matters: check 'ms' before 's'.
+        if text[i : i + 2] == "ms":
+            unit = "ms"
+            i += 2
+        else:
+            unit = ch
+            i += 1
+        if not num:
+            return None
+        amount = float(num)
+        num = ""
+        if unit == "ms":
+            total += amount / 1000.0
+        elif unit == "s":
+            total += amount
+        elif unit == "m":
+            total += amount * 60.0
+        elif unit == "h":
+            total += amount * 3600.0
+        else:
+            return None
+    if num:
+        # Trailing bare number — treat as seconds (some vendors send "10").
+        total += float(num)
+    return total
 
 
 def _build_response_format(schema: type[BaseModel] | None) -> dict[str, Any] | None:
