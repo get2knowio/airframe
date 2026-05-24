@@ -516,6 +516,26 @@ class CopilotRuntime(AgentRuntime):
             provider_options=copilot_options,
         )
 
+    async def count_tokens(
+        self,
+        prompt: Prompt,
+        *,
+        system: str | None = None,
+        model: ProviderModel | None = None,
+    ) -> int:
+        # Phase 6 — COUNT_TOKENS not yet wired for Copilot. The
+        # github-copilot-sdk doesn't expose a counter endpoint, and
+        # the Copilot Chat tokeniser isn't published. Raise the
+        # documented decline so consumers branch on supports() rather
+        # than silently get a wrong number.
+        del prompt, system, model
+        raise UnsupportedFeatureError(
+            f"{self.label}: count_tokens() is not supported — the "
+            f"github-copilot-sdk doesn't expose a tokeniser endpoint. Check "
+            f"runtime.supports(Feature.COUNT_TOKENS) before calling.",
+            feature=Feature.COUNT_TOKENS,
+        )
+
     async def list_models(self) -> list[ModelInfo]:
         """Return the live model menu from Copilot's CLI.
 

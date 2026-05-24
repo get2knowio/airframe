@@ -332,6 +332,7 @@ class ClaudeCodeRuntime(AgentRuntime):
             Feature.RATE_LIMIT_TELEMETRY,
             Feature.REASONING_OUTPUT,
             Feature.REQUEST_METADATA,
+            Feature.COUNT_TOKENS,
         }
     )
 
@@ -562,6 +563,100 @@ class ClaudeCodeRuntime(AgentRuntime):
             provider_options=claude_options,
             metadata=metadata,
         )
+
+    async def count_tokens(
+        self,
+        prompt: Prompt,
+        *,
+        system: str | None = None,
+        model: ProviderModel | None = None,
+    ) -> int:
+        """Tokeniser-accurate count via ``anthropic.messages.count_tokens``.
+
+        Delegates to the official ``anthropic`` Python SDK rather than
+        rolling an HTTP call ourselves — same pattern :meth:`list_models`
+        uses. Auth resolution mirrors :meth:`list_models`: explicit
+        ``api_key`` arg → ``CLAUDE_CODE_OAUTH_TOKEN`` env →
+        ``ANTHROPIC_API_KEY`` env → ``~/.claude/.credentials.json``.
+
+        v1 supports plain-text and string-only multi-part prompts.
+        Image / file attachments would require base64-encoding into
+        the messages payload; that round-trip is non-trivial and
+        deferred until a consumer asks. Lists carrying image/file
+        parts raise :class:`UnsupportedFeatureError` pointing at the
+        gap.
+        """
+        from anthropic import (
+            APIConnectionError as _AnthropicConnError,
+        )
+        from anthropic import (
+            APIStatusError as _AnthropicAPIError,
+        )
+        from anthropic import AsyncAnthropic
+
+        text, images, files = _split_prompt_parts(
+            prompt,
+            adapter_label=self.label,
+            supports_vision=True,
+            supports_file=True,
+        )
+        if images or files:
+            raise UnsupportedFeatureError(
+                f"{self.label}: count_tokens() does not yet support image / file "
+                f"attachments — only plain-text prompts. The tokeniser endpoint "
+                f"counts attachments accurately on a real turn; airframe needs "
+                f"to translate ImageInput / FileInput into the base64 messages "
+                f"shape before forwarding.",
+                feature=Feature.COUNT_TOKENS,
+            )
+
+        model_id = self._resolve_model(model) if model is not None else self._default_model
+
+        # Same auth-resolution dance as list_models(). Kept inline rather
+        # than factored out because the runtime currently has only these
+        # two consumers and the duplication is readable.
+        kwargs: dict[str, Any] = {}
+        if self._api_key_override:
+            kwargs["api_key"] = self._api_key_override
+        elif oauth := os.environ.get("CLAUDE_CODE_OAUTH_TOKEN"):
+            kwargs["auth_token"] = oauth
+        elif os.environ.get("ANTHROPIC_API_KEY"):
+            pass
+        else:
+            oauth_from_file = _read_claude_credentials_oauth_token()
+            if oauth_from_file:
+                kwargs["auth_token"] = oauth_from_file
+            else:
+                raise RuntimeAuthError(
+                    "ClaudeCodeRuntime.count_tokens(): no credentials found. "
+                    "Set CLAUDE_CODE_OAUTH_TOKEN, ANTHROPIC_API_KEY, or run "
+                    "`claude setup-token`."
+                )
+
+        messages = [{"role": "user", "content": text}]
+        count_kwargs: dict[str, Any] = {"model": model_id, "messages": messages}
+        if system is not None:
+            count_kwargs["system"] = system
+
+        try:
+            async with AsyncAnthropic(**kwargs) as client:
+                result = await client.messages.count_tokens(**count_kwargs)
+        except _AnthropicAPIError as exc:
+            status = exc.status_code
+            if status in (401, 403):
+                raise RuntimeAuthError(f"claude_code: count_tokens auth: {exc}") from exc
+            if status in (429, 502, 503, 504):
+                raise RuntimeTransientError(
+                    f"claude_code: count_tokens transient {status}"
+                ) from exc
+            raise RuntimeProtocolError(
+                f"claude_code: count_tokens returned {status}",
+                body=str(exc)[:500],
+            ) from exc
+        except _AnthropicConnError as exc:
+            raise RuntimeTransientError(f"claude_code: count_tokens network: {exc}") from exc
+
+        return int(result.input_tokens)
 
     async def list_models(self) -> list[ModelInfo]:
         """Return live Claude models from Anthropic's ``/v1/models``.

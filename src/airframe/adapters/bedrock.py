@@ -625,6 +625,27 @@ class BedrockRuntime(AgentRuntime):
             provider_options=bedrock_options,
         )
 
+    async def count_tokens(
+        self,
+        prompt: Prompt,
+        *,
+        system: str | None = None,
+        model: ProviderModel | None = None,
+    ) -> int:
+        # Phase 6 — COUNT_TOKENS not yet wired for Bedrock. The Converse
+        # API doesn't expose a counter endpoint, and tokenisers vary
+        # per model family (Claude / Llama / Nova / Mistral / Cohere /
+        # AI21 each use a different one). Per-family encoders could be
+        # bundled later, but that's a real piece of work.
+        del prompt, system, model
+        raise UnsupportedFeatureError(
+            f"{self.label}: count_tokens() is not supported — Bedrock's "
+            f"Converse API has no counter endpoint and tokenisers differ "
+            f"per model family. Check runtime.supports(Feature.COUNT_TOKENS) "
+            f"first.",
+            feature=Feature.COUNT_TOKENS,
+        )
+
     async def list_models(self) -> list[ModelInfo]:
         """Return text-output models the resolved AWS identity can see.
 

@@ -772,6 +772,44 @@ def test_session_rejects_wrong_provider_options_namespace(adapter_runtime: Any) 
 # ---------------------------------------------------------------------------
 
 
+async def test_count_tokens_agrees_with_supports_flag(adapter_runtime: Any) -> None:
+    """``count_tokens()`` honours :data:`Feature.COUNT_TOKENS` agreement.
+
+    Adapters declaring the feature return a non-negative ``int``;
+    adapters that don't raise :class:`UnsupportedFeatureError`. This
+    is the "supports() agrees with execute()" invariant applied to
+    the counter method.
+
+    The contract tolerates :class:`RuntimeAuthError` from supporting
+    adapters whose counter requires credentials (Claude's
+    :meth:`messages.count_tokens` hits ``api.anthropic.com``); the
+    point of this test is to lock in the *surface*, not to validate
+    that every CI run has credentials.
+    """
+    from airframe.errors import RuntimeAuthError, UnsupportedFeatureError
+    from airframe.features import Feature
+
+    if adapter_runtime.supports(Feature.COUNT_TOKENS):
+        try:
+            count = await adapter_runtime.count_tokens("hello")
+        except RuntimeAuthError:
+            # The surface is present; the counter just needs creds.
+            # That's enough to satisfy the contract — auth-pass is a
+            # behavioural check that belongs in integration tests.
+            return
+        except UnsupportedFeatureError as exc:  # pragma: no cover — bug if seen
+            raise AssertionError(
+                f"{type(adapter_runtime).__name__} declares "
+                f"Feature.COUNT_TOKENS but raised UnsupportedFeatureError "
+                f"on a plain-text count: {exc}"
+            ) from exc
+        assert isinstance(count, int)
+        assert count >= 0
+    else:
+        with pytest.raises(UnsupportedFeatureError):
+            await adapter_runtime.count_tokens("hello")
+
+
 async def test_session_accepts_metadata_kwarg(adapter_runtime: Any) -> None:
     """``session(metadata=RequestMetadata(...))`` is accepted by every adapter.
 
@@ -876,6 +914,7 @@ __all__ = [
     "TurnComplete",
     "test_close_is_idempotent",
     "test_close_on_fresh_runtime",
+    "test_count_tokens_agrees_with_supports_flag",
     "test_emittable_hook_kinds_subset_of_eight_literals",
     "test_plain_text_execute_path_is_wired",
     "test_runtime_result_has_rate_limit_field",

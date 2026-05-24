@@ -543,6 +543,27 @@ class OpenCodeServerRuntime(AgentRuntime):
             on_event=on_event,
         )
 
+    async def count_tokens(
+        self,
+        prompt: Prompt,
+        *,
+        system: str | None = None,
+        model: ProviderModel | None = None,
+    ) -> int:
+        # Phase 6 — COUNT_TOKENS not yet wired for OpenCode's server.
+        # The HTTP agent fronts arbitrary upstream providers; the
+        # right counter depends on which upstream the consumer wired,
+        # and the server's HTTP API doesn't expose a counter endpoint
+        # today. Raise the documented decline.
+        del prompt, system, model
+        raise UnsupportedFeatureError(
+            f"{self.label}: count_tokens() is not supported — the OpenCode "
+            f"agent server fronts arbitrary upstream providers and exposes "
+            f"no counter endpoint of its own. Check "
+            f"runtime.supports(Feature.COUNT_TOKENS) first.",
+            feature=Feature.COUNT_TOKENS,
+        )
+
     async def list_models(self) -> list[ModelInfo]:
         """Return models the OpenCode server has configured upstream.
 

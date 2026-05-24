@@ -235,6 +235,7 @@ class OpenAICompatibleRuntime(AgentRuntime):
             Feature.RATE_LIMIT_TELEMETRY,
             Feature.REASONING_OUTPUT,
             Feature.REQUEST_METADATA,
+            Feature.COUNT_TOKENS,
         }
     )
 
@@ -489,6 +490,74 @@ class OpenAICompatibleRuntime(AgentRuntime):
             provider_options=compat_options,
             metadata=metadata,
         )
+
+    async def count_tokens(
+        self,
+        prompt: Prompt,
+        *,
+        system: str | None = None,
+        model: ProviderModel | None = None,
+    ) -> int:
+        """Count prompt tokens via ``tiktoken``.
+
+        Uses ``tiktoken.encoding_for_model(model_id)`` when the model
+        is one tiktoken recognises (every OpenAI GPT-* family member);
+        falls back to ``o200k_base`` (GPT-4o tokeniser) as a
+        best-effort approximation for compat-vendor models that use
+        OpenAI-compatible tokenisers. **Caveat:** Vendors using
+        non-OpenAI tokenisers (DeepSeek's tokeniser, Llama's, etc.)
+        get an *approximate* count — typically within 5–10% but not
+        exact. Consumers who need tokeniser-accurate counts for
+        non-OpenAI models should ``unwrap()`` and use the vendor's
+        own counter.
+
+        v1 supports plain-text and string-only multi-part prompts.
+        Image / file attachments would require base64 expansion and
+        per-vendor counting heuristics; deferred.
+        """
+        try:
+            import tiktoken
+        except ImportError as exc:
+            raise UnsupportedFeatureError(
+                f"{self.label}: count_tokens() requires the 'tiktoken' package. "
+                f"Install via `pip install airframe-agents[openai-compat]` or "
+                f"`pip install tiktoken`.",
+                feature=Feature.COUNT_TOKENS,
+            ) from exc
+
+        text, images, files = _split_prompt_parts(
+            prompt,
+            adapter_label=self.label,
+            supports_vision=True,
+            supports_file=False,
+        )
+        if images or files:
+            raise UnsupportedFeatureError(
+                f"{self.label}: count_tokens() does not yet support image / "
+                f"file attachments — only plain-text prompts.",
+                feature=Feature.COUNT_TOKENS,
+            )
+
+        model_id = self._resolve_model(model) if model is not None else self._default_model
+        try:
+            encoding = tiktoken.encoding_for_model(model_id)
+        except KeyError:
+            # Compat vendors expose model IDs tiktoken doesn't know
+            # ("gpt-5-nano" via OpenCode Zen, "qwen3" via OpenRouter,
+            # etc.). Fall back to the GPT-4o tokeniser as a reasonable
+            # approximation — every modern OpenAI-compatible vendor
+            # ships a tokeniser at least similar to o200k_base.
+            encoding = tiktoken.get_encoding("o200k_base")
+
+        # Per OpenAI's tokens-cookbook formula: every message adds 3
+        # tokens of overhead plus 1 token for the role. The conversation
+        # gets a trailing 3-token "assistant priming" overhead.
+        total = 0
+        if system:
+            total += 3 + 1 + len(encoding.encode(system))
+        total += 3 + 1 + len(encoding.encode(text))
+        total += 3  # assistant priming
+        return total
 
     async def list_models(self) -> list[ModelInfo]:
         """Return the live model menu from the vendor.

@@ -746,6 +746,24 @@ class KimiRuntime(AgentRuntime):
             provider_options=kimi_options,
         )
 
+    async def count_tokens(
+        self,
+        prompt: Prompt,
+        *,
+        system: str | None = None,
+        model: ProviderModel | None = None,
+    ) -> int:
+        # Phase 6 — COUNT_TOKENS not yet wired for Kimi. The Moonshot
+        # platform doesn't publish its tokeniser, and the
+        # kimi-agent-sdk doesn't expose a counter endpoint.
+        del prompt, system, model
+        raise UnsupportedFeatureError(
+            f"{self.label}: count_tokens() is not supported — Moonshot's "
+            f"tokeniser isn't published and kimi-agent-sdk has no counter "
+            f"endpoint. Check runtime.supports(Feature.COUNT_TOKENS) first.",
+            feature=Feature.COUNT_TOKENS,
+        )
+
     async def list_models(self) -> list[ModelInfo]:
         """Return Kimi models — live when credentialed, fallback otherwise.
 

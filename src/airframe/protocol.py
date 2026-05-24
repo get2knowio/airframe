@@ -270,6 +270,59 @@ class AgentRuntime(Protocol):
         """
         ...
 
+    async def count_tokens(
+        self,
+        prompt: Prompt,
+        *,
+        system: str | None = None,
+        model: ProviderModel | None = None,
+    ) -> int:
+        """Return the model's tokeniser-accurate count for ``prompt``.
+
+        Pre-flight token counting — answer "is this prompt going to
+        blow the context window / break my budget" *before* paying
+        for a turn. Adapters declaring
+        :data:`~airframe.features.Feature.COUNT_TOKENS` use the
+        vendor's native counter (Anthropic's
+        :meth:`messages.count_tokens` endpoint, OpenAI's bundled
+        ``tiktoken`` encoder, Bedrock's per-family helpers). Adapters
+        that don't declare the feature raise
+        :class:`UnsupportedFeatureError`.
+
+        The result is a flat ``int`` covering the prompt's serialised
+        wire shape — system prompt + user message + any attached
+        images/files. It is *not* a budget for the model's reserved
+        output; consumers wanting "how much room is left for the
+        response" subtract the count from the model's context window
+        (available via :attr:`ModelInfo.context_window`).
+
+        Args:
+            prompt: The user message to count, in the same polymorphic
+                shape :meth:`execute` accepts. Images / files are
+                counted as the vendor would charge for them on a real
+                turn.
+            system: Optional system prompt. When non-None, included in
+                the count.
+            model: When non-None, pin the binding for this count.
+                Tokenisers vary per model — passing the wrong model
+                gives a wrong number. ``None`` uses the runtime's
+                default model.
+
+        Returns:
+            Total prompt token count.
+
+        Raises:
+            UnsupportedFeatureError: adapter doesn't declare
+                :data:`~airframe.features.Feature.COUNT_TOKENS`, or
+                the optional counter library (``tiktoken``) isn't
+                installed.
+            RuntimeAuthError, RuntimeTransientError,
+                RuntimeProtocolError: classified failures from the
+                native counter endpoint (Claude path only — local
+                tokenisers don't hit the network).
+        """
+        ...
+
     async def list_models(self) -> list[ModelInfo]:
         """Return the live list of models the consumer can pick from.
 

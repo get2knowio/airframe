@@ -39,6 +39,8 @@ The associated APIs:
   channel (abuse-detection / attribution tag). Soft contract:
   non-supporting adapters silently drop the kwarg rather than
   raising. Phase 6.
+* :data:`Feature.COUNT_TOKENS` — adapter exposes
+  :meth:`AgentRuntime.count_tokens`. Phase 6.
 * :data:`Feature.VISION_INPUT` — image content parts on
   ``prompt=``. Phase 2.
 * :data:`Feature.FILE_INPUT` — document / PDF content parts on
@@ -167,6 +169,12 @@ class Feature(StrEnum):
     Anthropic ``metadata={"user_id": ...}``). Soft contract — adapters
     that return ``False`` silently drop the kwarg rather than
     raising; consumers who care branch on this flag."""
+
+    COUNT_TOKENS = "count_tokens"
+    """Adapter exposes a working :meth:`AgentRuntime.count_tokens`
+    method that returns the model's tokeniser-accurate count for a
+    prompt, *without* paying for a turn. Adapters that return
+    ``False`` raise :class:`UnsupportedFeatureError` when called."""
 
     SANDBOX = "sandbox"
     """``session(sandbox=...)`` constrains tool filesystem / network access."""

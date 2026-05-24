@@ -43,8 +43,14 @@ copilot = ["github-copilot-sdk>=0.3.0"]
 # `openai-compat` covers every OpenAI-compatible HTTP adapter:
 # OpenCodeZenRuntime (per-token), OpenCodeGoRuntime (subscription),
 # and future siblings (Together, Groq, Fireworks, OpenRouter, ...).
-# All share the same `openai` SDK underneath.
-openai-compat = ["openai>=1.50,<3"]
+# All share the same `openai` SDK underneath. ``tiktoken`` powers
+# pre-flight ``count_tokens()`` for OpenAI's GPT-* family; compat
+# vendors using non-OpenAI tokenisers (DeepSeek, Llama, etc.) get
+# an approximate count or a clean UnsupportedFeatureError per model.
+openai-compat = [
+    "openai>=1.50,<3",
+    "tiktoken>=0.7,<1",
+]
 # `bedrock` covers AWS Bedrock's Converse API via aioboto3 — the
 # async wrapper around botocore. Fronts Anthropic / Meta / Mistral /
 # Cohere / Amazon Nova / AI21 behind one AWS-billed endpoint.
@@ -94,6 +100,7 @@ all = [
     "anthropic>=0.40,<1",
     "github-copilot-sdk>=0.3.0",
     "openai>=1.50,<3",
+    "tiktoken>=0.7,<1",
     "aioboto3>=13",
     "opencode-ai>=0.1.0a36,<0.2",
 ]
@@ -119,6 +126,7 @@ test = [
     "anthropic>=0.40,<1",
     "github-copilot-sdk>=0.3.0",
     "openai>=1.50,<3",
+    "tiktoken>=0.7,<1",
     "aioboto3>=13",
     "opencode-ai>=0.1.0a36,<0.2",
 ]

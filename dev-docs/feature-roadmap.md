@@ -764,6 +764,15 @@ consumers can fall back themselves; vendor shimming is the kind of
 
 ### P3 — Typed rate-limit telemetry
 
+**Status:** Shipped on `main` (commit `f995d35`). `Feature.RATE_LIMIT_TELEMETRY`
+declared by `ClaudeCodeRuntime` (consumes `RateLimitEvent` on the SDK
+message stream, accumulates per-window state) and the
+`OpenAICompatibleRuntime` base (`with_raw_response.create` reads the
+`x-ratelimit-*` + `retry-after` headers). `RuntimeResult.rate_limit`
+and `RuntimeTransientError.rate_limit` carry the typed
+`RateLimitInfo`. Streaming-path header capture on OAI-compat is a
+follow-up — `rate_limit=None` on that path today.
+
 **Why.** Every vendor surfaces structured quota data and airframe
 drops it on the floor. Claude's `RateLimitInfo` exposes typed
 windows (`five_hour`, `seven_day`, `seven_day_opus`,
@@ -839,6 +848,17 @@ test asserts that adapters declaring support never raise a
 
 ### P3 — Reasoning trace on `RuntimeResult`
 
+**Status:** Shipped on `main` (commit `4541eec`). `Feature.REASONING_OUTPUT`
+declared by `ClaudeCodeRuntime` (consumes `ThinkingBlock` content
+from `AssistantMessage` on the non-streaming path; accumulates
+streamed `ReasoningDelta` events on streaming) and the
+`OpenAICompatibleRuntime` base (defensively reads
+`message.reasoning_content` / `delta.reasoning_content` for
+DeepSeek-R1 derivatives — vendors that don't surface reasoning leave
+the field `None`). `RuntimeResult.reasoning` carries the snapshot;
+streaming `TurnComplete.result.reasoning` holds the concatenation of
+all `ReasoningDelta` payloads.
+
 **Why.** P2 streaming defines `ReasoningDelta`, but the
 non-streaming `RuntimeResult` has no place to land a finalised
 reasoning trace — so consumers calling `execute()` instead of
@@ -875,6 +895,16 @@ the reasoning text declare it; the rest leave the field `None`.
 
 ### P3 — Per-request metadata / user-id
 
+**Status:** Shipped on `main` (commit `1ce2e76`). `Feature.REQUEST_METADATA`
+declared by `ClaudeCodeRuntime` (`user_id` → `ClaudeAgentOptions.user`)
+and the `OpenAICompatibleRuntime` base (`user_id` → `user=`, `tags` →
+`metadata=` dict on chat.completions, `request_id` → `extra_headers
+{"X-Request-ID": ...}`). The other adapters accept `metadata=` and
+silently drop the tag — an intentional *soft contract* departure from
+the codebase's usual "raise on capability decline" convention, because
+the call's correctness doesn't depend on the tag reaching the vendor.
+Consumers who care branch on `supports(Feature.REQUEST_METADATA)`.
+
 **Why.** Every vendor SDK accepts a free-form per-request tag for
 abuse detection, per-tenant usage attribution, and audit trails:
 OpenAI's `user=`, Anthropic's `metadata={"user_id": ...}`, Bedrock's
@@ -909,6 +939,17 @@ Add `Feature.REQUEST_METADATA`. Zero-risk addition: dropping the
 field on a non-supporting adapter changes no observable behaviour.
 
 ### P3 — Pre-flight token counting
+
+**Status:** Shipped on `main` (this commit). `Feature.COUNT_TOKENS`
+flipped on `ClaudeCodeRuntime` (delegates to
+`anthropic.AsyncAnthropic.messages.count_tokens` — same auth-resolution
+dance as `list_models()`) and the `OpenAICompatibleRuntime` base
+(`tiktoken.encoding_for_model` with a fall-back to `o200k_base` for
+compat vendors whose model IDs aren't in tiktoken's registry —
+approximate but useful). The other four adapters raise
+`UnsupportedFeatureError` per the strict capability-gate convention.
+v1 supports plain-text prompts only; image/file attachments deferred
+until a consumer asks (base64 expansion is non-trivial).
 
 **Why.** Consumers want "is this prompt going to blow the context
 window / break my budget" *before* paying for a turn. Anthropic

@@ -166,6 +166,11 @@ def test_unwired_features_stay_false(adapters: list) -> None:
         # accept the kwarg but drop it silently (soft contract — no
         # UnsupportedFeatureError).
         Feature.REQUEST_METADATA,
+        # Phase 6 — COUNT_TOKENS flipped on Claude (anthropic SDK's
+        # messages.count_tokens) and the OpenAI-compatible base
+        # (tiktoken-backed; best-effort approximation for compat
+        # vendors). Others raise UnsupportedFeatureError.
+        Feature.COUNT_TOKENS,
     }
     must_be_false = [f for f in Feature if f not in any_adapter_may_support]
     for adapter in adapters:
