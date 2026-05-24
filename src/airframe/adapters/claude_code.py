@@ -61,6 +61,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, TypeVar
 from pydantic import BaseModel
 
 from airframe.cache import CacheConfig
+from airframe.compaction import CompactionConfig
 from airframe.cost import CostRecord
 from airframe.errors import (
     AgentRuntimeError,
@@ -460,6 +461,7 @@ class ClaudeCodeRuntime(AgentRuntime):
         metadata: RequestMetadata | None = None,
         cache: CacheConfig | None = None,
         slash_commands: SlashCommandsConfig | None = None,
+        compaction: CompactionConfig | None = None,
     ) -> AgentSession:
         """Open a bespoke :class:`ClaudeCodeSession`.
 
@@ -566,6 +568,11 @@ class ClaudeCodeRuntime(AgentRuntime):
         # adapter. Silently drop until the discovery + invocation
         # surface lands.
         del slash_commands
+        # Phase 6 — COMPACTION_CONTROL scaffolding: Claude exposes
+        # fold_session_summary + PreCompact hook natively, but the
+        # portable CompactionConfig isn't yet translated. Silently
+        # drop until a real iteration wires it.
+        del compaction
         return ClaudeCodeSession(
             self,
             resume=resume,

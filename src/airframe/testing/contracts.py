@@ -810,6 +810,24 @@ async def test_count_tokens_agrees_with_supports_flag(adapter_runtime: Any) -> N
             await adapter_runtime.count_tokens("hello")
 
 
+async def test_session_accepts_compaction_kwarg(adapter_runtime: Any) -> None:
+    """``session(compaction=CompactionConfig(...))`` is accepted everywhere.
+
+    Phase 6 scaffolding contract — sibling of
+    ``test_session_accepts_slash_commands_kwarg``. Every adapter
+    accepts the kwarg structurally; no adapter currently flips
+    :data:`~airframe.features.Feature.COMPACTION_CONTROL`. Locks the
+    namespace shape so consumer code can plan against future
+    adapters that wire the configuration surface.
+    """
+    from airframe.compaction import CompactionConfig
+
+    sess = adapter_runtime.session(
+        compaction=CompactionConfig(trigger="auto", threshold_ratio=0.8)
+    )
+    await sess.close()
+
+
 async def test_session_accepts_slash_commands_kwarg(adapter_runtime: Any) -> None:
     """``session(slash_commands=SlashCommandsConfig(...))`` is accepted.
 
@@ -954,6 +972,7 @@ __all__ = [
     "test_runtime_result_has_reasoning_field",
     "test_runtime_transient_error_carries_rate_limit_attr",
     "test_session_accepts_cache_kwarg",
+    "test_session_accepts_compaction_kwarg",
     "test_session_accepts_metadata_kwarg",
     "test_session_accepts_slash_commands_kwarg",
     "test_session_cancel_when_idle_is_noop",

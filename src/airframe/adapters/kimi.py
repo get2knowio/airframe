@@ -113,6 +113,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, TypeVar
 from pydantic import BaseModel
 
 from airframe.cache import CacheConfig
+from airframe.compaction import CompactionConfig
 from airframe.cost import CostRecord
 from airframe.errors import (
     RuntimeAuthError,
@@ -660,6 +661,7 @@ class KimiRuntime(AgentRuntime):
         metadata: RequestMetadata | None = None,
         cache: CacheConfig | None = None,
         slash_commands: SlashCommandsConfig | None = None,
+        compaction: CompactionConfig | None = None,
     ) -> AgentSession:
         """Open a :class:`KimiSession`.
 
@@ -746,6 +748,8 @@ class KimiRuntime(AgentRuntime):
         # Phase 6 — SLASH_COMMANDS scaffolding: namespace locked,
         # discovery not yet wired. Silently drop.
         del slash_commands
+        # Phase 6 — COMPACTION_CONTROL scaffolding. Silently drop.
+        del compaction
         return KimiSession(
             self,
             resume=resume,

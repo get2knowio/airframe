@@ -1106,6 +1106,15 @@ config now, defer the runtime invocation surface to a real phase.
 
 ### P4 — Compaction control (not just observation)
 
+**Status:** Scaffolding shipped on `main` (this commit). The
+`CompactionConfig` dataclass + `Feature.COMPACTION_CONTROL` enum
+entry + `session(compaction=...)` kwarg are in place; no adapter
+flips the feature flag to `True` yet (the per-vendor translation
+into Claude's `fold_session_summary` / OpenAI Responses'
+`context_management` shape plus a session-level `compact()` method
+on `AgentSession` is deferred until a consumer with long-running
+sessions asks). Namespace shape is locked for forward compat.
+
 **Why.** The lifecycle hooks proposal lets consumers *observe*
 compaction (`pre_compact` event); it doesn't let them *configure*
 it. Claude has `PreCompact` hooks + `fold_session_summary` +

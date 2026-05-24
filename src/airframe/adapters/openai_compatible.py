@@ -51,6 +51,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, TypeVar
 from pydantic import BaseModel
 
 from airframe.cache import CacheConfig
+from airframe.compaction import CompactionConfig
 from airframe.cost import CostRecord
 from airframe.errors import (
     AgentRuntimeError,
@@ -370,6 +371,7 @@ class OpenAICompatibleRuntime(AgentRuntime):
         metadata: RequestMetadata | None = None,
         cache: CacheConfig | None = None,
         slash_commands: SlashCommandsConfig | None = None,
+        compaction: CompactionConfig | None = None,
     ) -> AgentSession:
         """Open a bespoke :class:`OpenAICompatibleSession`.
 
@@ -493,6 +495,11 @@ class OpenAICompatibleRuntime(AgentRuntime):
         # client-side discovery + prompt expansion before forwarding).
         # Silently drop.
         del slash_commands
+        # Phase 6 — COMPACTION_CONTROL scaffolding. Chat Completions has
+        # no server-side compaction (the client owns the messages
+        # buffer entirely). OpenAI Responses API has context_management
+        # but that's a separate adapter family. Silently drop.
+        del compaction
         return OpenAICompatibleSession(
             self,
             system=system,

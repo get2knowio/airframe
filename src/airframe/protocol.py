@@ -42,6 +42,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from airframe.cache import CacheConfig
+    from airframe.compaction import CompactionConfig
     from airframe.events import RuntimeEvent
     from airframe.features import Feature
     from airframe.hooks import HookEvent
@@ -443,6 +444,7 @@ class AgentRuntime(Protocol):
         metadata: RequestMetadata | None = None,
         cache: CacheConfig | None = None,
         slash_commands: SlashCommandsConfig | None = None,
+        compaction: CompactionConfig | None = None,
     ) -> AgentSession:
         """Open a multi-turn session against this runtime.
 
@@ -567,6 +569,15 @@ class AgentRuntime(Protocol):
                 every adapter for now. Locks the namespace shape
                 for forward compat when the discovery + invocation
                 surface lands.
+            compaction: Optional
+                :class:`~airframe.compaction.CompactionConfig`
+                controlling auto-compaction trigger / threshold /
+                summariser prompt. Scaffolding only today — no
+                adapter declares
+                :data:`~airframe.features.Feature.COMPACTION_CONTROL`,
+                so this kwarg is accepted but silently dropped
+                everywhere. Configuration sibling of the
+                ``pre_compact`` hook event (which IS wired today).
 
         Returns:
             A fresh :class:`AgentSession`.
