@@ -98,7 +98,7 @@ from airframe.slash_commands import SlashCommand, SlashCommandsConfig
 from airframe.thinking import ReasoningEffort, ThinkingMode
 from airframe.tools import FunctionTool, McpServerRef
 
-__version__ = "0.8.0"
+__version__ = "0.9.0rc1"
 
 # Adapter imports live at the top level for ergonomic use, but the
 # adapter modules themselves lazy-import their underlying SDK so

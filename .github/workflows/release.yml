@@ -46,7 +46,15 @@ jobs:
         id: prerelease
         run: |
           TAG="${{ steps.tag.outputs.tag }}"
-          if [[ "$TAG" == *"-rc"* ]] || [[ "$TAG" == *"-beta"* ]] || [[ "$TAG" == *"-alpha"* ]] || [[ "$TAG" == *"-dev"* ]]; then
+          # PEP 440 pre-release segments come in two written forms:
+          # canonical (no dash, e.g. v0.9.0rc1 / v1.0.0a2 / v1.0.0b3 /
+          # v1.0.0.dev1) and the dashed convenience form many projects
+          # use on git tags (v0.9.0-rc1). Match both. The trailing
+          # digit + word boundary keeps us from misclassifying random
+          # substrings (`vbeta-monitor` ≠ pre-release).
+          if [[ "$TAG" =~ -(rc|beta|alpha|dev)[0-9]+$ ]] \
+             || [[ "$TAG" =~ [0-9](rc|a|b|c)[0-9]+$ ]] \
+             || [[ "$TAG" =~ \.dev[0-9]+$ ]]; then
             echo "is_prerelease=true" >> "$GITHUB_OUTPUT"
           else
             echo "is_prerelease=false" >> "$GITHUB_OUTPUT"

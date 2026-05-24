@@ -6,9 +6,21 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-Phase 6 — cross-cutting portable surfaces. Six new `Feature` flags
-land alongside their wire surfaces. All additive; the protocol gains
-new optional kwargs but nothing existing breaks.
+---
+
+## [0.9.0rc1] — 2026-05-24
+
+Release candidate for 0.9.0 — Phase 6 cross-cutting portable
+surfaces. Pin explicitly to test:
+
+```bash
+pip install airframe-agents==0.9.0rc1
+uv add airframe-agents==0.9.0rc1
+```
+
+Six new `Feature` flags land alongside their wire surfaces. All
+additive; the protocol gains new optional kwargs but nothing existing
+breaks.
 
 ### Added
 
