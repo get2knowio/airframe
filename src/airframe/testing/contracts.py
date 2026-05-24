@@ -810,6 +810,24 @@ async def test_count_tokens_agrees_with_supports_flag(adapter_runtime: Any) -> N
             await adapter_runtime.count_tokens("hello")
 
 
+async def test_session_accepts_slash_commands_kwarg(adapter_runtime: Any) -> None:
+    """``session(slash_commands=SlashCommandsConfig(...))`` is accepted.
+
+    Phase 6 scaffolding contract: every adapter accepts the kwarg
+    structurally even though no adapter currently flips
+    :data:`~airframe.features.Feature.SLASH_COMMANDS` to ``True``.
+    Locks the namespace shape so consumers can branch on
+    ``supports()`` against future adapters that wire the discovery
+    surface.
+    """
+    from airframe.slash_commands import SlashCommandsConfig
+
+    sess = adapter_runtime.session(
+        slash_commands=SlashCommandsConfig(enabled=["refactor", "explain"])
+    )
+    await sess.close()
+
+
 async def test_session_accepts_cache_kwarg(adapter_runtime: Any) -> None:
     """``session(cache=CacheConfig(...))`` is accepted by every adapter.
 
@@ -937,6 +955,7 @@ __all__ = [
     "test_runtime_transient_error_carries_rate_limit_attr",
     "test_session_accepts_cache_kwarg",
     "test_session_accepts_metadata_kwarg",
+    "test_session_accepts_slash_commands_kwarg",
     "test_session_cancel_when_idle_is_noop",
     "test_session_close_is_idempotent",
     "test_session_close_on_fresh_session_is_safe",

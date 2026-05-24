@@ -94,6 +94,7 @@ from airframe.protocol import (
     UnsupportedBindingError,
 )
 from airframe.rate_limit import RateLimitInfo, RateLimitWindow
+from airframe.slash_commands import SlashCommandsConfig
 from airframe.thinking import ReasoningEffort, ThinkingMode
 from airframe.tools import FunctionTool, McpServerRef
 
@@ -168,6 +169,7 @@ __all__ = [
     "RuntimeServerStartError",
     "RuntimeStructuredOutputError",
     "RuntimeTransientError",
+    "SlashCommandsConfig",
     "TextDelta",
     "ThinkingMode",
     "ToolCallResult",

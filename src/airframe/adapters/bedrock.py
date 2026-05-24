@@ -174,6 +174,7 @@ from airframe.sessions import (
     _fire_hook_event,
     _split_prompt_parts,
 )
+from airframe.slash_commands import SlashCommandsConfig
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
@@ -574,6 +575,7 @@ class BedrockRuntime(AgentRuntime):
         provider_options: ProviderOptions | None = None,
         metadata: RequestMetadata | None = None,
         cache: CacheConfig | None = None,
+        slash_commands: SlashCommandsConfig | None = None,
     ) -> AgentSession:
         # Iteration B accepts the structural kwargs but only ``system`` /
         # ``model`` are honoured; later iterations wire tools/MCP/hooks/
@@ -588,6 +590,9 @@ class BedrockRuntime(AgentRuntime):
         # models, but airframe doesn't yet translate the portable
         # CacheConfig into that shape. Silently drop for v1.
         del cache
+        # Phase 6 — SLASH_COMMANDS scaffolding: namespace locked,
+        # discovery not yet wired. Silently drop.
+        del slash_commands
         if resume is not None:
             raise UnsupportedFeatureError(
                 "BedrockSession: SESSION_RESUME is not supported — Converse is "

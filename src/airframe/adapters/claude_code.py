@@ -106,6 +106,7 @@ from airframe.sessions import (
     _mcp_servers_fingerprint,
     _split_prompt_parts,
 )
+from airframe.slash_commands import SlashCommandsConfig
 from airframe.thinking import ThinkingMode
 from airframe.tools import FunctionTool, McpServerRef
 
@@ -458,6 +459,7 @@ class ClaudeCodeRuntime(AgentRuntime):
         provider_options: ProviderOptions | None = None,
         metadata: RequestMetadata | None = None,
         cache: CacheConfig | None = None,
+        slash_commands: SlashCommandsConfig | None = None,
     ) -> AgentSession:
         """Open a bespoke :class:`ClaudeCodeSession`.
 
@@ -559,6 +561,11 @@ class ClaudeCodeRuntime(AgentRuntime):
         # so the airframe cache= value is silently dropped here. The
         # decline matches the soft contract metadata= follows.
         del cache
+        # Phase 6 — SLASH_COMMANDS scaffolding: the namespace is locked,
+        # but actual filesystem discovery isn't wired yet on any
+        # adapter. Silently drop until the discovery + invocation
+        # surface lands.
+        del slash_commands
         return ClaudeCodeSession(
             self,
             resume=resume,

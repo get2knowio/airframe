@@ -148,6 +148,7 @@ from airframe.sessions import (
     _fire_hook_event,
     _split_prompt_parts,
 )
+from airframe.slash_commands import SlashCommandsConfig
 from airframe.thinking import ThinkingMode
 
 if TYPE_CHECKING:
@@ -658,6 +659,7 @@ class KimiRuntime(AgentRuntime):
         provider_options: ProviderOptions | None = None,
         metadata: RequestMetadata | None = None,
         cache: CacheConfig | None = None,
+        slash_commands: SlashCommandsConfig | None = None,
     ) -> AgentSession:
         """Open a :class:`KimiSession`.
 
@@ -741,6 +743,9 @@ class KimiRuntime(AgentRuntime):
         # Phase 6 — PROMPT_CACHE_CONTROL soft contract: Kimi has no
         # explicit cache-key channel; silently drop.
         del cache
+        # Phase 6 — SLASH_COMMANDS scaffolding: namespace locked,
+        # discovery not yet wired. Silently drop.
+        del slash_commands
         return KimiSession(
             self,
             resume=resume,

@@ -51,6 +51,7 @@ if TYPE_CHECKING:
     from airframe.options import ProviderOptions
     from airframe.permission import PermissionCallback
     from airframe.rate_limit import RateLimitInfo
+    from airframe.slash_commands import SlashCommandsConfig
     from airframe.thinking import ThinkingMode
     from airframe.tools import FunctionTool, McpServerRef
 
@@ -441,6 +442,7 @@ class AgentRuntime(Protocol):
         provider_options: ProviderOptions | None = None,
         metadata: RequestMetadata | None = None,
         cache: CacheConfig | None = None,
+        slash_commands: SlashCommandsConfig | None = None,
     ) -> AgentSession:
         """Open a multi-turn session against this runtime.
 
@@ -555,6 +557,16 @@ class AgentRuntime(Protocol):
                 ``prompt_cache_retention``); others silently drop.
                 Soft contract — the call still succeeds correctly
                 without the cache speed-up.
+            slash_commands: Optional
+                :class:`~airframe.slash_commands.SlashCommandsConfig`
+                enabling user-invokable slash commands discovered
+                from the filesystem. Scaffolding only today — no
+                adapter declares
+                :data:`~airframe.features.Feature.SLASH_COMMANDS`,
+                so this kwarg is accepted but silently dropped on
+                every adapter for now. Locks the namespace shape
+                for forward compat when the discovery + invocation
+                surface lands.
 
         Returns:
             A fresh :class:`AgentSession`.

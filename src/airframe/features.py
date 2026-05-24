@@ -44,6 +44,9 @@ The associated APIs:
 * :data:`Feature.PROMPT_CACHE_CONTROL` — adapter forwards
   :class:`~airframe.cache.CacheConfig` to the vendor's explicit
   cache-key channel. Soft contract. Phase 6.
+* :data:`Feature.SLASH_COMMANDS` — adapter discovers + invokes
+  user-triggered slash commands from the filesystem. Scaffolding
+  only today; namespace locked for forward compat. Phase 6.
 * :data:`Feature.VISION_INPUT` — image content parts on
   ``prompt=``. Phase 2.
 * :data:`Feature.FILE_INPUT` — document / PDF content parts on
@@ -186,6 +189,14 @@ class Feature(StrEnum):
     ``False`` silently drop the kwarg; the call still succeeds, just
     without the speed-up / cost reduction explicit caching would
     have provided. Consumers who care branch on this flag."""
+
+    SLASH_COMMANDS = "slash_commands"
+    """Adapter discovers user-invokable slash commands from the
+    filesystem and lets the consumer enumerate / trigger them through
+    :class:`~airframe.slash_commands.SlashCommandsConfig`. Sibling of
+    Agent Skills — same YAML-frontmatter convention, different
+    trigger semantics (user-invoked vs model-invoked). Scaffolding
+    only today; no adapter currently returns ``True``."""
 
     SANDBOX = "sandbox"
     """``session(sandbox=...)`` constrains tool filesystem / network access."""

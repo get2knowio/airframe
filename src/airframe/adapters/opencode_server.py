@@ -155,6 +155,7 @@ from airframe.sessions import (
     _fire_hook_event,
     _split_prompt_parts,
 )
+from airframe.slash_commands import SlashCommandsConfig
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
@@ -474,6 +475,7 @@ class OpenCodeServerRuntime(AgentRuntime):
         provider_options: ProviderOptions | None = None,
         metadata: RequestMetadata | None = None,
         cache: CacheConfig | None = None,
+        slash_commands: SlashCommandsConfig | None = None,
     ) -> AgentSession:
         """Open a session.
 
@@ -538,6 +540,9 @@ class OpenCodeServerRuntime(AgentRuntime):
         # server HTTP API has no explicit cache-key channel. Silently
         # drop for v1.
         del cache
+        # Phase 6 — SLASH_COMMANDS scaffolding: namespace locked,
+        # discovery not yet wired. Silently drop.
+        del slash_commands
         opencode_options = (
             provider_options if isinstance(provider_options, OpenCodeServerOptions) else None
         )

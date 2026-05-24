@@ -93,6 +93,7 @@ from airframe.sessions import (
     _fire_hook_event,
     _split_prompt_parts,
 )
+from airframe.slash_commands import SlashCommandsConfig
 from airframe.thinking import ThinkingMode
 from airframe.tools import FunctionTool, McpServerRef
 
@@ -368,6 +369,7 @@ class OpenAICompatibleRuntime(AgentRuntime):
         provider_options: ProviderOptions | None = None,
         metadata: RequestMetadata | None = None,
         cache: CacheConfig | None = None,
+        slash_commands: SlashCommandsConfig | None = None,
     ) -> AgentSession:
         """Open a bespoke :class:`OpenAICompatibleSession`.
 
@@ -485,6 +487,12 @@ class OpenAICompatibleRuntime(AgentRuntime):
         compat_options = (
             provider_options if isinstance(provider_options, OpenAICompatOptions) else None
         )
+        # Phase 6 — SLASH_COMMANDS scaffolding: namespace locked,
+        # filesystem discovery not yet wired for OpenAI-compat (the
+        # base wraps a stateless HTTP wire; slash commands would need
+        # client-side discovery + prompt expansion before forwarding).
+        # Silently drop.
+        del slash_commands
         return OpenAICompatibleSession(
             self,
             system=system,
