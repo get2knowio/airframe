@@ -107,7 +107,7 @@ from airframe.sessions import (
     _mcp_servers_fingerprint,
     _split_prompt_parts,
 )
-from airframe.slash_commands import SlashCommandsConfig
+from airframe.slash_commands import SlashCommand, SlashCommandsConfig
 from airframe.thinking import ThinkingMode
 from airframe.tools import FunctionTool, McpServerRef
 
@@ -336,6 +336,7 @@ class ClaudeCodeRuntime(AgentRuntime):
             Feature.REASONING_OUTPUT,
             Feature.REQUEST_METADATA,
             Feature.COUNT_TOKENS,
+            Feature.SLASH_COMMANDS,
         }
     )
 
@@ -563,11 +564,6 @@ class ClaudeCodeRuntime(AgentRuntime):
         # so the airframe cache= value is silently dropped here. The
         # decline matches the soft contract metadata= follows.
         del cache
-        # Phase 6 — SLASH_COMMANDS scaffolding: the namespace is locked,
-        # but actual filesystem discovery isn't wired yet on any
-        # adapter. Silently drop until the discovery + invocation
-        # surface lands.
-        del slash_commands
         # Phase 6 — COMPACTION_CONTROL scaffolding: Claude exposes
         # fold_session_summary + PreCompact hook natively, but the
         # portable CompactionConfig isn't yet translated. Silently
@@ -584,6 +580,7 @@ class ClaudeCodeRuntime(AgentRuntime):
             on_event=on_event,
             provider_options=claude_options,
             metadata=metadata,
+            slash_commands=slash_commands,
         )
 
     async def count_tokens(
@@ -911,6 +908,7 @@ class ClaudeCodeSession:
         on_event: Callable[[HookEvent], None] | None = None,
         provider_options: ClaudeOptions | None = None,
         metadata: RequestMetadata | None = None,
+        slash_commands: SlashCommandsConfig | None = None,
     ) -> None:
         self._runtime = runtime
         self._resume = resume
@@ -1010,6 +1008,13 @@ class ClaudeCodeSession:
         # connect time.
         self._metadata: RequestMetadata | None = metadata
         self._metadata_fingerprint = metadata.user_id if metadata else None
+        # Phase 6 — SLASH_COMMANDS. Stashed for ``list_slash_commands``;
+        # discovery is filesystem-only and adapter-agnostic. The Claude
+        # Agent SDK additionally auto-expands ``/cmd`` invocations
+        # natively when the consumer passes ``/cmd args`` through
+        # ``execute()``, so airframe's role is just to surface the
+        # palette metadata for UI use.
+        self._slash_commands: SlashCommandsConfig | None = slash_commands
 
     async def execute(
         self,
@@ -1227,6 +1232,16 @@ class ClaudeCodeSession:
         self._turn_count += 1
         self._cumulative_cost_usd += result.cost.cost_usd or 0.0
         yield TurnComplete(result=result)
+
+    async def list_slash_commands(self) -> list[SlashCommand]:
+        # Filesystem-only discovery — adapter-agnostic. The Claude
+        # Agent SDK additionally auto-expands ``/cmd`` invocations
+        # natively when the consumer passes them through execute(),
+        # so consumers get both the palette metadata (here) and the
+        # automatic dispatch (via execute("/cmd args")).
+        from airframe.slash_commands import discover
+
+        return discover(self._slash_commands)
 
     async def cancel(self) -> None:
         # No-op when no turn is in flight — per the AgentSession contract.

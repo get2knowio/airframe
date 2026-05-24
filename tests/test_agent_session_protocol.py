@@ -35,7 +35,7 @@ def test_agent_session_protocol_methods() -> None:
         if not name.startswith("_")
         and (inspect.isfunction(value) or inspect.iscoroutinefunction(value))
     }
-    assert members == {"execute", "stream", "cancel", "close", "unwrap"}
+    assert members == {"execute", "stream", "cancel", "close", "unwrap", "list_slash_commands"}
 
 
 def test_agent_session_execute_signature() -> None:

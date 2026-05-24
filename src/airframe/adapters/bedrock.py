@@ -175,7 +175,7 @@ from airframe.sessions import (
     _fire_hook_event,
     _split_prompt_parts,
 )
-from airframe.slash_commands import SlashCommandsConfig
+from airframe.slash_commands import SlashCommand, SlashCommandsConfig
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
@@ -441,6 +441,7 @@ class BedrockRuntime(AgentRuntime):
             Feature.LIFECYCLE_HOOKS,
             Feature.BUDGET_USD_CAP,
             Feature.BUDGET_TURN_CAP,
+            Feature.SLASH_COMMANDS,
         }
     )
 
@@ -592,9 +593,6 @@ class BedrockRuntime(AgentRuntime):
         # models, but airframe doesn't yet translate the portable
         # CacheConfig into that shape. Silently drop for v1.
         del cache
-        # Phase 6 — SLASH_COMMANDS scaffolding: namespace locked,
-        # discovery not yet wired. Silently drop.
-        del slash_commands
         # Phase 6 — COMPACTION_CONTROL scaffolding. Silently drop.
         del compaction
         if resume is not None:
@@ -640,6 +638,7 @@ class BedrockRuntime(AgentRuntime):
             on_permission=on_permission,
             on_event=on_event,
             provider_options=bedrock_options,
+            slash_commands=slash_commands,
         )
 
     async def count_tokens(
@@ -879,6 +878,7 @@ class BedrockSession:
         on_permission: PermissionCallback | None = None,
         on_event: Callable[[HookEvent], None] | None = None,
         provider_options: BedrockOptions | None = None,
+        slash_commands: SlashCommandsConfig | None = None,
     ) -> None:
         self._runtime = runtime
         # ``inference_profile_arn`` (when set on provider_options)
@@ -915,6 +915,8 @@ class BedrockSession:
         # later via the cancel() plumbing.
         self._cumulative_cost_usd: float = 0.0
         self._turn_count: int = 0
+        # Phase 6 — SLASH_COMMANDS. Filesystem-only discovery.
+        self._slash_commands: SlashCommandsConfig | None = slash_commands
         # Per-session bedrock-runtime client, only built when a
         # ``provider_options.region_name`` override forces this session
         # to talk to a different region than the runtime's default.
@@ -1420,6 +1422,11 @@ class BedrockSession:
             raise _classify_bedrock_error(exc) from exc
         finally:
             self._active_stream = None
+
+    async def list_slash_commands(self) -> list[SlashCommand]:
+        from airframe.slash_commands import discover
+
+        return discover(self._slash_commands)
 
     async def cancel(self) -> None:
         # Cooperative cancellation: cancel the in-flight execute task if

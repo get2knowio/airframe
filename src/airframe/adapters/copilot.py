@@ -102,7 +102,7 @@ from airframe.sessions import (
     _mcp_servers_fingerprint,
     _split_prompt_parts,
 )
-from airframe.slash_commands import SlashCommandsConfig
+from airframe.slash_commands import SlashCommand, SlashCommandsConfig
 from airframe.thinking import ThinkingMode
 from airframe.tools import FunctionTool, McpServerRef
 
@@ -259,6 +259,7 @@ class CopilotRuntime(AgentRuntime):
             # no-op surface that misleads consumers. Declining is the
             # honest signal.
             Feature.BUDGET_USD_CAP,
+            Feature.SLASH_COMMANDS,
         }
     )
 
@@ -510,9 +511,6 @@ class CopilotRuntime(AgentRuntime):
         # Phase 6 — PROMPT_CACHE_CONTROL soft contract: Copilot's SDK
         # has no explicit cache-key channel. Silently drop.
         del cache
-        # Phase 6 — SLASH_COMMANDS scaffolding: namespace locked,
-        # discovery not yet wired. Silently drop.
-        del slash_commands
         # Phase 6 — COMPACTION_CONTROL scaffolding. Silently drop.
         del compaction
         copilot_options = (
@@ -529,6 +527,7 @@ class CopilotRuntime(AgentRuntime):
             on_permission=on_permission,
             on_event=on_event,
             provider_options=copilot_options,
+            slash_commands=slash_commands,
         )
 
     async def count_tokens(
@@ -753,6 +752,7 @@ class CopilotAgentSession:
         on_permission: PermissionCallback | None = None,
         on_event: Callable[[HookEvent], None] | None = None,
         provider_options: CopilotOptions | None = None,
+        slash_commands: SlashCommandsConfig | None = None,
     ) -> None:
         self._runtime = runtime
         self._resume = resume
@@ -812,6 +812,11 @@ class CopilotAgentSession:
         # so we don't track a turn counter on this adapter.
         self._cumulative_cost_usd: float = 0.0
         self._turn_count: int = 0
+        # Phase 6 — SLASH_COMMANDS. Filesystem-only discovery
+        # (Copilot's SDK has its own command set but no programmatic
+        # discovery API; we surface the user's .claude/commands /
+        # .opencode/command files for palette UX).
+        self._slash_commands: SlashCommandsConfig | None = slash_commands
 
     async def execute(
         self,
@@ -1005,6 +1010,11 @@ class CopilotAgentSession:
         self._turn_count += 1
         self._cumulative_cost_usd += result.cost.cost_usd or 0.0
         yield TurnComplete(result=result)
+
+    async def list_slash_commands(self) -> list[SlashCommand]:
+        from airframe.slash_commands import discover
+
+        return discover(self._slash_commands)
 
     async def cancel(self) -> None:
         # No-op when no turn is in flight — per the AgentSession contract.

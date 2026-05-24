@@ -94,7 +94,7 @@ from airframe.sessions import (
     _fire_hook_event,
     _split_prompt_parts,
 )
-from airframe.slash_commands import SlashCommandsConfig
+from airframe.slash_commands import SlashCommand, SlashCommandsConfig
 from airframe.thinking import ThinkingMode
 from airframe.tools import FunctionTool, McpServerRef
 
@@ -240,6 +240,7 @@ class OpenAICompatibleRuntime(AgentRuntime):
             Feature.REQUEST_METADATA,
             Feature.COUNT_TOKENS,
             Feature.PROMPT_CACHE_CONTROL,
+            Feature.SLASH_COMMANDS,
         }
     )
 
@@ -489,12 +490,6 @@ class OpenAICompatibleRuntime(AgentRuntime):
         compat_options = (
             provider_options if isinstance(provider_options, OpenAICompatOptions) else None
         )
-        # Phase 6 — SLASH_COMMANDS scaffolding: namespace locked,
-        # filesystem discovery not yet wired for OpenAI-compat (the
-        # base wraps a stateless HTTP wire; slash commands would need
-        # client-side discovery + prompt expansion before forwarding).
-        # Silently drop.
-        del slash_commands
         # Phase 6 — COMPACTION_CONTROL scaffolding. Chat Completions has
         # no server-side compaction (the client owns the messages
         # buffer entirely). OpenAI Responses API has context_management
@@ -509,6 +504,7 @@ class OpenAICompatibleRuntime(AgentRuntime):
             provider_options=compat_options,
             metadata=metadata,
             cache=cache,
+            slash_commands=slash_commands,
         )
 
     async def count_tokens(
@@ -818,6 +814,7 @@ class OpenAICompatibleSession:
         provider_options: OpenAICompatOptions | None = None,
         metadata: RequestMetadata | None = None,
         cache: CacheConfig | None = None,
+        slash_commands: SlashCommandsConfig | None = None,
     ) -> None:
         self._runtime = runtime
         self._model = model
@@ -860,6 +857,10 @@ class OpenAICompatibleSession:
         # specific OpenAICompatOptions.prompt_cache_key (consumers who
         # set both get the portable value through).
         self._cache: CacheConfig | None = cache
+        # Phase 6 — SLASH_COMMANDS. Filesystem-only discovery. No
+        # native channel on Chat Completions; consumers expand the
+        # body themselves before calling execute().
+        self._slash_commands: SlashCommandsConfig | None = slash_commands
         # Tools are fixed for the session's lifetime — translated once
         # and reused on every chat.completions.create() call. ``None``
         # / ``[]`` both mean "don't send the kwarg" so the wire shape
@@ -1269,6 +1270,11 @@ class OpenAICompatibleSession:
             if not committed:
                 del self._messages[pre_len:]
             raise
+
+    async def list_slash_commands(self) -> list[SlashCommand]:
+        from airframe.slash_commands import discover
+
+        return discover(self._slash_commands)
 
     async def cancel(self) -> None:
         # Signal stream() to raise on its next yield boundary.

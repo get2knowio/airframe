@@ -52,7 +52,7 @@ if TYPE_CHECKING:
     from airframe.options import ProviderOptions
     from airframe.permission import PermissionCallback
     from airframe.rate_limit import RateLimitInfo
-    from airframe.slash_commands import SlashCommandsConfig
+    from airframe.slash_commands import SlashCommand, SlashCommandsConfig
     from airframe.thinking import ThinkingMode
     from airframe.tools import FunctionTool, McpServerRef
 
@@ -714,6 +714,51 @@ class AgentSession(Protocol):
         Yields:
             :class:`~airframe.events.RuntimeEvent` instances; see
             :mod:`airframe.events` for the variant set.
+        """
+        ...
+
+    async def list_slash_commands(self) -> list[SlashCommand]:
+        """Return the user-authored slash commands visible to this session.
+
+        Walks the filesystem (per the session's
+        :class:`~airframe.slash_commands.SlashCommandsConfig`) and
+        returns every ``*.md`` command file found in the standard
+        locations:
+
+        * Project-local: ``.claude/commands/*.md``,
+          ``.opencode/command/*.md``, ``.agents/commands/*.md``,
+          walked upward from ``cwd`` to the git worktree root.
+        * User-global: ``~/.claude/commands/*.md`` etc. when
+          :attr:`SlashCommandsConfig.include_user_global` is ``True``.
+        * Extra :attr:`SlashCommandsConfig.search_paths`.
+
+        The return shape — :class:`~airframe.slash_commands.SlashCommand`
+        — exposes ``name``, ``description``, ``body``, ``source_path``,
+        and raw ``frontmatter``. Consumers wanting a command-palette
+        UI use this to enumerate available commands and surface them
+        to their end user.
+
+        Invocation semantics differ per adapter:
+
+        * **Claude Agent SDK** — pass ``"/commandname args"`` through
+          :meth:`execute` and the SDK's native channel does
+          discovery + expansion + dispatch. The SDK reads the same
+          ``.claude/commands/`` directory airframe discovers.
+        * **OpenAI-compatible / Bedrock** — no native slash-command
+          channel; the consumer expands :attr:`SlashCommand.body`
+          themselves (substituting any ``$ARGUMENTS`` / ``$1`` / etc.)
+          and passes the expanded text through :meth:`execute`.
+        * Other adapters — see each adapter's docs.
+
+        Adapters that don't declare
+        :data:`~airframe.features.Feature.SLASH_COMMANDS` return an
+        empty list. (Discovery is filesystem-only and adapter-agnostic
+        but we keep the gate so consumers checking ``supports()`` get
+        consistent shape.)
+
+        Returns:
+            Sorted list of :class:`SlashCommand` objects, or empty
+            list when none discovered / feature declined.
         """
         ...
 

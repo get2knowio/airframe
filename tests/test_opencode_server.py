@@ -73,6 +73,8 @@ def test_iteration_e_supported_features() -> None:
         Feature.LIFECYCLE_HOOKS,
         Feature.BUDGET_USD_CAP,
         Feature.BUDGET_TURN_CAP,
+        # Phase 6: filesystem-only discovery is adapter-agnostic.
+        Feature.SLASH_COMMANDS,
     }
     rt = OpenCodeServerRuntime()
     assert rt.supports(Feature.LIFECYCLE_HOOKS)

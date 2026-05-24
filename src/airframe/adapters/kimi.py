@@ -149,7 +149,7 @@ from airframe.sessions import (
     _fire_hook_event,
     _split_prompt_parts,
 )
-from airframe.slash_commands import SlashCommandsConfig
+from airframe.slash_commands import SlashCommand, SlashCommandsConfig
 from airframe.thinking import ThinkingMode
 
 if TYPE_CHECKING:
@@ -554,6 +554,7 @@ class KimiRuntime(AgentRuntime):
             Feature.LIFECYCLE_HOOKS,
             Feature.BUDGET_USD_CAP,
             Feature.BUDGET_TURN_CAP,
+            Feature.SLASH_COMMANDS,
         }
     )
 
@@ -745,9 +746,6 @@ class KimiRuntime(AgentRuntime):
         # Phase 6 — PROMPT_CACHE_CONTROL soft contract: Kimi has no
         # explicit cache-key channel; silently drop.
         del cache
-        # Phase 6 — SLASH_COMMANDS scaffolding: namespace locked,
-        # discovery not yet wired. Silently drop.
-        del slash_commands
         # Phase 6 — COMPACTION_CONTROL scaffolding. Silently drop.
         del compaction
         return KimiSession(
@@ -759,6 +757,7 @@ class KimiRuntime(AgentRuntime):
             on_permission=on_permission,
             on_event=on_event,
             provider_options=kimi_options,
+            slash_commands=slash_commands,
         )
 
     async def count_tokens(
@@ -856,6 +855,7 @@ class KimiSession(AgentSession):
         on_permission: PermissionCallback | None = None,
         on_event: Callable[[HookEvent], None] | None = None,
         provider_options: KimiOptions | None = None,
+        slash_commands: SlashCommandsConfig | None = None,
     ) -> None:
         self._runtime = runtime
         self._resume_id = resume
@@ -899,6 +899,8 @@ class KimiSession(AgentSession):
         # materialised yet" — first turn populates this and the SDK
         # session together.
         self._sdk_thinking_baked: bool | None = None
+        # Phase 6 — SLASH_COMMANDS. Filesystem-only discovery.
+        self._slash_commands: SlashCommandsConfig | None = slash_commands
 
     # --- SDK lifecycle ------------------------------------------------------
 
@@ -1201,6 +1203,11 @@ class KimiSession(AgentSession):
         yield TurnComplete(
             result=RuntimeResult(text=text, structured=None, cost=cost, finish="stop", raw=None)
         )
+
+    async def list_slash_commands(self) -> list[SlashCommand]:
+        from airframe.slash_commands import discover
+
+        return discover(self._slash_commands)
 
     async def cancel(self) -> None:
         if not self._in_flight:

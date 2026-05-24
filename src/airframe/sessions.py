@@ -66,6 +66,7 @@ if TYPE_CHECKING:
     from airframe.options import ProviderOptions
     from airframe.permission import PermissionCallback
     from airframe.protocol import AgentRuntime, ProviderModel, RuntimeResult
+    from airframe.slash_commands import SlashCommand
     from airframe.thinking import ThinkingMode
     from airframe.tools import FunctionTool, McpServerRef
 
@@ -652,6 +653,11 @@ class _ThinAgentSession:
 
     async def close(self) -> None:
         self._closed = True
+
+    async def list_slash_commands(self) -> list[SlashCommand]:
+        from airframe.slash_commands import discover
+
+        return discover(None)
 
     def unwrap(self, cls: type[Any]) -> Any:
         # The thin wrapper has no vendor-specific state to expose.

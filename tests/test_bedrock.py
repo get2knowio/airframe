@@ -95,7 +95,9 @@ def test_supported_features_iteration_e_set() -> None:
     }
     for feature in iteration_b_through_e:
         assert feature in BedrockRuntime.SUPPORTED_FEATURES
-    assert len(BedrockRuntime.SUPPORTED_FEATURES) == 12
+    # Phase 6 added SLASH_COMMANDS (filesystem-only, adapter-agnostic).
+    assert Feature.SLASH_COMMANDS in BedrockRuntime.SUPPORTED_FEATURES
+    assert len(BedrockRuntime.SUPPORTED_FEATURES) == 13
 
 
 def test_supports_iteration_e_flags_true() -> None:

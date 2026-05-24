@@ -176,6 +176,10 @@ def test_unwired_features_stay_false(adapters: list) -> None:
         # "in_memory"/"24h"). Other adapters accept the cache= kwarg
         # but drop it silently (soft contract).
         Feature.PROMPT_CACHE_CONTROL,
+        # Phase 6 — SLASH_COMMANDS flipped on every adapter — discovery
+        # is filesystem-only and adapter-agnostic (the per-vendor
+        # invocation path differs but the discovery surface is shared).
+        Feature.SLASH_COMMANDS,
     }
     must_be_false = [f for f in Feature if f not in any_adapter_may_support]
     for adapter in adapters:

@@ -1045,14 +1045,20 @@ vary; consumers wanting precise control should `unwrap()`.
 
 ### P3 — Slash commands as portable assets
 
-**Status:** Scaffolding shipped on `main` (this commit). The
-`SlashCommandsConfig` dataclass + `Feature.SLASH_COMMANDS` enum entry
-+ `session(slash_commands=...)` kwarg are all in place; no adapter
-flips the feature flag to `True` yet (filesystem discovery +
-invocation surface deferred until a consumer needs it — same
-pattern :mod:`airframe.features` documents for other empty-namespace
-features). The namespace shape is locked so consumer code can plan
-against it.
+**Status:** Shipped on `main` (this commit). `Feature.SLASH_COMMANDS`
+declared by every adapter — discovery is filesystem-only and
+adapter-agnostic. `airframe.slash_commands.discover()` walks
+`.claude/commands/`, `.opencode/command/`, `.agents/commands/`
+upward to the git worktree root + user-global locations, parses
+YAML frontmatter (minimal hand-rolled parser, no `pyyaml` dep), and
+returns `SlashCommand` objects with `name` / `description` / `body`
+/ `source_path` / `frontmatter`. `AgentSession.list_slash_commands()`
+delegates to `discover()` using the session's stashed
+`SlashCommandsConfig`. **Invocation** is per-adapter: Claude's
+Agent SDK natively expands `/commandname args` when passed through
+`execute()`; for OAI-compat / Bedrock the consumer expands
+`SlashCommand.body` themselves (substituting `$ARGUMENTS` / `$1` /
+`{file}`) before calling `execute()`.
 
 **Why.** Exact analog to the [Agent Skills](#p3--agent-skills)
 entry above. Claude (`.claude/commands/*.md`), OpenCode

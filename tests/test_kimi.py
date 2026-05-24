@@ -192,6 +192,8 @@ def test_supports_iteration_e_feature_matrix() -> None:
         Feature.LIFECYCLE_HOOKS,
         Feature.BUDGET_USD_CAP,
         Feature.BUDGET_TURN_CAP,
+        # Phase 6: filesystem-only discovery is adapter-agnostic.
+        Feature.SLASH_COMMANDS,
     }
     for feature in Feature:
         want = feature in expected_true

@@ -156,7 +156,7 @@ from airframe.sessions import (
     _fire_hook_event,
     _split_prompt_parts,
 )
-from airframe.slash_commands import SlashCommandsConfig
+from airframe.slash_commands import SlashCommand, SlashCommandsConfig
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
@@ -263,6 +263,7 @@ class OpenCodeServerRuntime(AgentRuntime):
             Feature.LIFECYCLE_HOOKS,
             Feature.BUDGET_USD_CAP,
             Feature.BUDGET_TURN_CAP,
+            Feature.SLASH_COMMANDS,
         }
     )
 
@@ -542,9 +543,6 @@ class OpenCodeServerRuntime(AgentRuntime):
         # server HTTP API has no explicit cache-key channel. Silently
         # drop for v1.
         del cache
-        # Phase 6 — SLASH_COMMANDS scaffolding: namespace locked,
-        # discovery not yet wired. Silently drop.
-        del slash_commands
         # Phase 6 — COMPACTION_CONTROL scaffolding. Silently drop.
         del compaction
         opencode_options = (
@@ -555,6 +553,7 @@ class OpenCodeServerRuntime(AgentRuntime):
             resume=resume,
             system=system,
             model=model,
+            slash_commands=slash_commands,
             provider_options=opencode_options,
             on_event=on_event,
         )
@@ -651,6 +650,7 @@ class OpenCodeServerSession:
         model: ProviderModel | None = None,
         provider_options: OpenCodeServerOptions | None = None,
         on_event: Callable[[HookEvent], None] | None = None,
+        slash_commands: SlashCommandsConfig | None = None,
     ) -> None:
         self._runtime = runtime
         self._system = system
@@ -670,6 +670,8 @@ class OpenCodeServerSession:
         # Cached provider/model resolution to avoid hitting
         # client.app.providers() on every turn within the session.
         self._provider_for_model: dict[str, str] = {}
+        # Phase 6 — SLASH_COMMANDS. Filesystem-only discovery.
+        self._slash_commands: SlashCommandsConfig | None = slash_commands
 
     # --- public AgentSession surface -------------------------------------
 
@@ -813,6 +815,11 @@ class OpenCodeServerSession:
                         close()
                 except Exception as exc:  # noqa: BLE001
                     logger.debug("opencode_server.event_stream_close_failed error=%s", exc)
+
+    async def list_slash_commands(self) -> list[SlashCommand]:
+        from airframe.slash_commands import discover
+
+        return discover(self._slash_commands)
 
     async def cancel(self) -> None:
         """Abort the in-flight turn, if any.
