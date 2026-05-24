@@ -165,6 +165,12 @@ Each adapter declares which protocol features it implements via
 | `LIFECYCLE_HOOKS` | ✓ (8 kinds) | ✓ (7 kinds, no `rate_limit`) | ✓ (7 kinds, no `rate_limit`) | ✓ (6 kinds, synthesised) |
 | `BUDGET_USD_CAP` | ✓ | ✓ | ✓ | ✓ |
 | `BUDGET_TURN_CAP` | ✓ | ✗ (vendor caps internally) | ✓ | ✓ |
+| `RATE_LIMIT_TELEMETRY` | ✓ (typed `RateLimitInfo`) | ✗ | ✗ | ✓ (`x-ratelimit-*` headers) |
+| `REASONING_OUTPUT` | ✓ (`ThinkingBlock` content) | ✗ | ✗ | ✓ (`message.reasoning_content`) |
+| `REQUEST_METADATA` | ✓ (`user_id` → `user`) | ✗ (soft drop) | ✗ (soft drop) | ✓ (`user=` / `metadata=` / header) |
+| `COUNT_TOKENS` | ✓ (anthropic SDK) | ✗ | ✗ | ✓ (`tiktoken`) |
+| `PROMPT_CACHE_CONTROL` | ✗ (soft drop) | ✗ (soft drop) | ✗ (soft drop) | ✓ (`prompt_cache_key` / `_retention`) |
+| `SLASH_COMMANDS` | ✓ (SDK auto-expands) | ✓ (discovery only) | ✓ (discovery only) | ✓ (discovery only) |
 | `SANDBOX` / `SUBAGENTS` | ✗ (planned, signal-gated) | ✗ (planned) | ✗ (planned) | ✗ (planned) |
 
 `supports()` is a cheap static lookup — no network, no SDK version

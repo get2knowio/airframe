@@ -124,6 +124,17 @@ Current snapshot (run
 | `LIFECYCLE_HOOKS` | ✓ (6 kinds) | ✓ (8 kinds) | ✓ (7 kinds) | ✓ (7 kinds) | ✓ (6 kinds) | ✓ (6 kinds) |
 | `BUDGET_USD_CAP` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `BUDGET_TURN_CAP` | ✓ | ✓ | ✗ | ✓ | ✓ | ✓ |
+| `RATE_LIMIT_TELEMETRY` | ✗ | ✓ | ✗ | ✗ | ✓ | ✗ |
+| `REASONING_OUTPUT` | ✗ | ✓ | ✗ | ✗ | ✓ | ✗ |
+| `REQUEST_METADATA` | ✗ † | ✓ | ✗ † | ✗ † | ✓ | ✗ † |
+| `COUNT_TOKENS` | ✗ | ✓ | ✗ | ✗ | ✓ | ✗ |
+| `PROMPT_CACHE_CONTROL` | ✗ † | ✗ † | ✗ † | ✗ † | ✓ | ✗ † |
+| `SLASH_COMMANDS` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+
+† **Soft contract** — adapters returning False accept the kwarg
+structurally and silently drop it rather than raising. The call's
+correctness doesn't depend on the tag/cache key reaching the
+vendor; consumers who care branch on `supports()` first.
 
 Capability flags are statically declared per adapter. Check
 `runtime.supports(Feature.X)` before invoking a feature; declined
@@ -254,6 +265,58 @@ variants: `TextDelta`, `ReasoningDelta`, `ToolCallStart`,
 Per-kwarg semantics live in
 [`docs/capabilities.md`](https://github.com/get2knowio/airframe/blob/main/docs/capabilities.md); per-adapter quirks
 in each [`docs/adapters/`](https://github.com/get2knowio/airframe/tree/main/docs/adapters) page.
+
+## Cross-cutting portable surfaces
+
+A handful of cross-vendor knobs sit alongside the streaming +
+tools + permission machinery:
+
+```python
+from airframe import (
+    ClaudeCodeRuntime,
+    RequestMetadata, CacheConfig, SlashCommandsConfig,
+    Feature,
+)
+
+runtime = ClaudeCodeRuntime()
+sess = runtime.session(
+    metadata=RequestMetadata(user_id="acct_42",
+                              tags={"tenant": "acme"}),
+    cache=CacheConfig(key="agent-foo:session-7", retention="long"),
+    slash_commands=SlashCommandsConfig(),
+)
+
+# Pre-flight token count — answer "will this fit?" before paying.
+count = await runtime.count_tokens("very long prompt...")
+if count > 100_000:
+    raise ValueError("over budget")
+
+result = await sess.execute("Summarise this codebase.")
+
+# Quota telemetry on the way back.
+if result.rate_limit is not None:
+    for w in result.rate_limit.windows:
+        print(f"{w.name}: {w.remaining}/{w.limit}")
+
+# Reasoning trace, when the model emitted one.
+if result.reasoning is not None:
+    print("model thought:", result.reasoning[:200], "...")
+
+# Discover user-authored /commands from .claude/commands/ etc.
+for cmd in await sess.list_slash_commands():
+    print(f"/{cmd.name} — {cmd.description}")
+```
+
+Each surface is gated by its own `Feature` flag — check
+`runtime.supports(Feature.X)` if your code's correctness depends
+on the vendor honouring the kwarg. The `metadata=` and `cache=`
+kwargs follow a **soft contract**: non-supporting adapters
+silently drop them (call still succeeds, just without the
+attribution tag or cache speed-up). `count_tokens()`,
+`reasoning`, and `rate_limit` follow the standard hard-contract:
+declined adapters either raise `UnsupportedFeatureError` or
+leave the field `None`. Full per-feature semantics in
+[`docs/capabilities.md`](https://github.com/get2knowio/airframe/blob/main/docs/capabilities.md).
 
 ## Errors
 

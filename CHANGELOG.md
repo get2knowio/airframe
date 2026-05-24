@@ -6,6 +6,115 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+Phase 6 — cross-cutting portable surfaces. Six new `Feature` flags
+land alongside their wire surfaces. All additive; the protocol gains
+new optional kwargs but nothing existing breaks.
+
+### Added
+
+- **`Feature.RATE_LIMIT_TELEMETRY`** + typed `RateLimitInfo` /
+  `RateLimitWindow` on `RuntimeResult.rate_limit` and
+  `RuntimeTransientError.rate_limit`. Claude consumes
+  `RateLimitEvent` instances from the SDK message stream and
+  accumulates per-window state (`five_hour` / `seven_day` /
+  `seven_day_opus` / `seven_day_sonnet` / `overage`). OpenAI-compat
+  parses the six `x-ratelimit-*` headers + `retry-after` via
+  `chat.completions.with_raw_response.create()`; includes a parser
+  for OpenAI's `"6m0s"` / `"42ms"` duration-string format. Streaming
+  path on OAI-compat leaves `rate_limit=None` (header capture is a
+  follow-up).
+- **`Feature.REASONING_OUTPUT`** + `RuntimeResult.reasoning: str | None`
+  carrying the model's finalised extended-thinking trace. Distinct
+  from `REASONING_EFFORT` (the input side). Claude consumes
+  `ThinkingBlock` content from `AssistantMessage` (non-streaming) +
+  accumulates streamed `ReasoningDelta` from `thinking_delta` wire
+  events. OpenAI-compat defensively reads `message.reasoning_content`
+  / `delta.reasoning_content` for DeepSeek-R1 derivatives; vendors
+  that don't surface reasoning text leave the field `None`.
+- **`Feature.REQUEST_METADATA`** + `RequestMetadata` dataclass +
+  `session(metadata=)` / `execute(metadata=)` kwargs. Forwards
+  per-request abuse-detection / attribution tags. Claude →
+  `ClaudeAgentOptions.user`; OpenAI-compat → `user=` + `metadata=`
+  + `extra_headers={"X-Request-ID": ...}`. **Soft contract** —
+  non-supporting adapters silently drop the kwarg rather than
+  raising; call's correctness doesn't depend on the tag reaching
+  the vendor.
+- **`Feature.COUNT_TOKENS`** + `AgentRuntime.count_tokens(prompt, ...)`
+  protocol method. Pre-flight tokeniser-accurate count. Claude
+  delegates to `anthropic.AsyncAnthropic.messages.count_tokens()`;
+  OpenAI-compat uses `tiktoken.encoding_for_model()` with a
+  fall-back to `o200k_base` for compat-vendor models not in
+  tiktoken's registry. `tiktoken` added to the `[openai-compat]`
+  extra.
+- **`Feature.PROMPT_CACHE_CONTROL`** + `CacheConfig` dataclass +
+  `session(cache=)` / `execute(cache=)` kwargs. OpenAI-compat
+  translates to `prompt_cache_key=` + `prompt_cache_retention=`
+  (`"short"` → `"in_memory"`, `"long"` → `"24h"`). The portable
+  `cache=` takes precedence over the OpenAI-specific
+  `OpenAICompatOptions.prompt_cache_key`. **Soft contract** —
+  non-supporting adapters silently drop.
+- **`Feature.SLASH_COMMANDS`** + `SlashCommandsConfig` +
+  `SlashCommand` + `airframe.slash_commands.discover()` +
+  `AgentSession.list_slash_commands()`. Every adapter declares
+  `True` — discovery is filesystem-only and adapter-agnostic.
+  Walks `.claude/commands/`, `.opencode/command/`,
+  `.agents/commands/` upward to the git worktree root + matching
+  user-global paths; parses minimal YAML frontmatter (no `pyyaml`
+  dep). Each `SlashCommand` exposes `name` / `description` / `body`
+  / `source_path` / `frontmatter` for palette-UI use. Invocation
+  semantics differ per adapter: Claude's SDK auto-expands
+  `/commandname args` natively when passed through `execute()`;
+  other adapters require the consumer to expand `cmd.body`
+  themselves before `execute(expanded)`.
+- **New protocol kwargs on `AgentRuntime.session()`** —
+  `metadata=`, `cache=`, `slash_commands=`. **`AgentRuntime.execute()`**
+  also gains `metadata=` + `cache=` per-call.
+- **`tiktoken>=0.7,<1`** added as a transitive dep on the
+  `[openai-compat]` and `[all]` extras (powers `count_tokens()`).
+- **Conformance tests added** for every new surface:
+  `test_runtime_result_has_rate_limit_field` /
+  `test_runtime_result_has_reasoning_field` /
+  `test_runtime_transient_error_carries_rate_limit_attr` /
+  `test_count_tokens_agrees_with_supports_flag` /
+  `test_session_accepts_metadata_kwarg` /
+  `test_session_accepts_cache_kwarg` /
+  `test_session_accepts_slash_commands_kwarg`. Wired into all six
+  per-adapter `test_*_conformance.py` files.
+
+### Considered but rejected
+
+- **Compaction control** (originally tracked as P4 in the roadmap).
+  Vendor SDKs don't expose the controls a real implementation
+  would need — Claude Agent SDK's `ClaudeAgentOptions` has
+  `session_store` / `session_store_flush` / `fork_session` but no
+  `fold_session_summary` knob; Copilot / Kimi emit
+  compaction-start/complete events but no configuration channel;
+  OpenAI Chat Completions has no server-side compaction at all. A
+  brief scaffold (`CompactionConfig` + `Feature.COMPACTION_CONTROL`
+  + `session(compaction=)`) was added and then removed when the
+  honest verdict became clear. The observation side stays — the
+  `pre_compact` `HookEventKind` lets consumers observe compaction
+  on adapters where the SDK surfaces it.
+- **HTTP-client / `base_url` / proxy injection**, **citations /
+  source attribution**, **stop sequences** — listed under
+  "Briefly considered" in
+  [`dev-docs/feature-roadmap.md`](./dev-docs/feature-roadmap.md).
+  Deferred until a concrete consumer ask pins the right shape.
+
+### Documentation
+
+- **[docs/capabilities.md](./docs/capabilities.md)** — six new
+  feature rows in the matrix; six new per-feature semantics
+  sections. Soft-contract pattern explicitly documented.
+- **[docs/reference.md](./docs/reference.md)** — protocol
+  signatures updated for the new kwargs + `count_tokens` method;
+  new sections for `RateLimitInfo` / `RequestMetadata` /
+  `CacheConfig` / `SlashCommand` types; top-level exports list
+  refreshed.
+- **[README.md](./README.md)** — capability matrix table + a new
+  "Cross-cutting portable surfaces" section demonstrating the
+  end-to-end flow.
+
 ---
 
 ## [0.8.0] — 2026-05-20

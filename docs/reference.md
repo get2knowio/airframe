@@ -42,6 +42,8 @@ class AgentRuntime(Protocol):
         model: ProviderModel | None = None,
         thinking: ThinkingMode = None,
         timeout: float = 600.0,
+        metadata: RequestMetadata | None = None,
+        cache: CacheConfig | None = None,
     ) -> RuntimeResult: ...
 
     def session(
@@ -55,12 +57,22 @@ class AgentRuntime(Protocol):
         on_permission: PermissionCallback | None = None,
         on_event: Callable[[HookEvent], None] | None = None,
         provider_options: ProviderOptions | None = None,
+        metadata: RequestMetadata | None = None,
+        cache: CacheConfig | None = None,
+        slash_commands: SlashCommandsConfig | None = None,
     ) -> AgentSession: ...
 
     async def reset(self) -> None: ...
     async def close(self) -> None: ...
     def validate_binding(self, binding: ProviderModel) -> bool: ...
     async def list_models(self) -> list[ModelInfo]: ...
+    async def count_tokens(
+        self,
+        prompt: Prompt,
+        *,
+        system: str | None = None,
+        model: ProviderModel | None = None,
+    ) -> int: ...
     def supports(self, feature: Feature, model: ProviderModel | None = None) -> bool: ...
     def unwrap(self, cls: type[T]) -> T: ...
 ```
@@ -73,9 +85,19 @@ class AgentRuntime(Protocol):
 - **`validate_binding`** — cheap predicate; doesn't make network calls.
 - **`list_models`** — hits the vendor's models endpoint; requires
   credentials. Raises `RuntimeAuthError` / `RuntimeTransientError`.
+- **`count_tokens`** — pre-flight tokeniser-accurate count for a
+  prompt against the runtime's model. Claude hits
+  `messages.count_tokens`; OpenAI-compat uses `tiktoken`. Adapters
+  not declaring `Feature.COUNT_TOKENS` raise
+  `UnsupportedFeatureError`. See [capabilities.md#count_tokens](./capabilities.md#count_tokens).
 - **`supports`** — capability predicate. See [capabilities.md](./capabilities.md).
 - **`unwrap`** — vendor-native escape hatch. Returns the
   underlying SDK object; raises `TypeError` for unsupported casts.
+
+**New session kwargs** (Phase 6): `metadata=`, `cache=`,
+`slash_commands=` — see [`RequestMetadata`](#request-metadata),
+[`CacheConfig`](#cache-config), and
+[`SlashCommandsConfig`](#slash-commands) below.
 
 ## `AgentSession` protocol
 
@@ -107,6 +129,7 @@ class AgentSession(Protocol):
         timeout: float = 600.0,
     ) -> AsyncIterator[RuntimeEvent]: ...
 
+    async def list_slash_commands(self) -> list[SlashCommand]: ...
     async def cancel(self) -> None: ...
     async def close(self) -> None: ...
     def unwrap(self, cls: type[T]) -> T: ...
@@ -119,6 +142,11 @@ class AgentSession(Protocol):
 - **`execute` / `stream`** — multi-turn paths. Both accept the same
   per-turn kwargs (`max_turns=`, `max_budget_usd=` are the budget
   caps).
+- **`list_slash_commands`** — discover user-authored slash commands
+  from the filesystem. Returns `list[SlashCommand]` (name +
+  description + body template + source_path + frontmatter). See
+  [`SlashCommandsConfig`](#slash-commands) below for the search
+  paths + filtering.
 - **`cancel`** — no-op when no turn is in flight; mid-turn raises
   `RuntimeCancelledError` on the awaiting call.
 - **`close`** — idempotent, never raises. Safe in `finally`.
@@ -170,6 +198,10 @@ result.text         # str
 result.structured   # dict | None
 result.cost         # CostRecord
 result.finish       # "stop" | "length" | "tool_calls" | "end_turn" | None
+result.reasoning    # str | None — model's finalised reasoning trace
+                    #   (Feature.REASONING_OUTPUT); see capabilities.md
+result.rate_limit   # RateLimitInfo | None — typed quota snapshot
+                    #   (Feature.RATE_LIMIT_TELEMETRY); see below
 result.raw          # vendor-specific result object (opaque to consumers)
 
 # CostRecord fields:
@@ -378,6 +410,133 @@ except RuntimeBudgetExceededError as exc:
     # kind: "usd" | "turns"
 ```
 
+## Rate-limit telemetry
+
+`src/airframe/rate_limit.py`. Typed quota snapshot surfaced on
+successful calls and on throttle errors.
+
+```python
+from airframe import RateLimitInfo, RateLimitWindow
+
+# RuntimeResult.rate_limit — populated when the vendor sent quota
+# data on a successful call (None otherwise).
+info: RateLimitInfo | None = result.rate_limit
+
+# RuntimeTransientError.rate_limit — populated when a 429 carried
+# quota data (None for 5xx / network blips).
+try:
+    await session.execute(prompt)
+except RuntimeTransientError as exc:
+    if exc.rate_limit is not None:
+        for w in exc.rate_limit.windows:
+            print(f"{w.name}: {w.remaining}/{w.limit}, reset {w.reset_at}")
+
+# RateLimitWindow fields:
+window.name                    # vendor's window id ("requests", "tokens",
+                               # "five_hour", "seven_day", ...)
+window.remaining               # int | None
+window.limit                   # int | None
+window.utilization             # float | None (0.0-1.0; Claude-style)
+window.reset_at                # datetime | None
+window.retry_after_seconds     # float | None
+window.status                  # "allowed" | "allowed_warning" | "rejected" | None
+```
+
+Adapters declaring `Feature.RATE_LIMIT_TELEMETRY`: Claude, OpenAI-compat.
+See [capabilities.md](./capabilities.md#rate_limit_telemetry).
+
+## Request metadata
+
+`src/airframe/metadata.py`. Per-request observation tag forwarded
+to the vendor for abuse detection / per-tenant attribution / audit.
+
+```python
+from airframe import RequestMetadata
+
+md = RequestMetadata(
+    user_id="acct_123",                  # → OpenAI user=, Claude metadata.user_id
+    request_id="req-abc",                # → X-Request-ID header on OAI-compat
+    tags={"tenant": "acme", "env": "prod"},  # → OpenAI metadata= dict
+)
+sess = runtime.session(metadata=md)
+# or per-call:
+result = await runtime.execute(prompt, metadata=md)
+```
+
+**Soft contract** — adapters returning False on
+`Feature.REQUEST_METADATA` silently drop the kwarg rather than
+raising. The call still succeeds; only the attribution tag is
+lost. See [capabilities.md](./capabilities.md#request_metadata).
+
+## Cache config
+
+`src/airframe/cache.py`. Portable prompt-cache key for vendors that
+expose explicit cache control.
+
+```python
+from airframe import CacheConfig
+
+cfg = CacheConfig(
+    key="agent-foo:session-42",          # stable identifier
+    retention="long",                     # "short" (5min) | "long" (24h+)
+)
+sess = runtime.session(cache=cfg)
+```
+
+Per-adapter mapping (OpenAI-compat): `key` → `prompt_cache_key=`;
+`retention="short"` → `prompt_cache_retention="in_memory"`;
+`retention="long"` → `prompt_cache_retention="24h"`. The portable
+`cache=` takes precedence over the OpenAI-specific
+`OpenAICompatOptions.prompt_cache_key` when both are set.
+
+**Soft contract** — non-supporting adapters silently drop the
+kwarg (the call succeeds without the cache speed-up). See
+[capabilities.md](./capabilities.md#prompt_cache_control).
+
+## Slash commands
+
+`src/airframe/slash_commands.py`. Filesystem discovery of
+user-authored slash commands — for rendering a palette UI.
+
+```python
+from airframe import SlashCommand, SlashCommandsConfig
+from airframe.slash_commands import discover
+
+# Session-level config controls which directories to search.
+config = SlashCommandsConfig(
+    enabled="all",                       # "all" | list[str] | None
+    search_paths=[Path("./my-commands")],
+    include_user_global=True,            # ~/.claude/commands/, etc.
+)
+sess = runtime.session(slash_commands=config)
+cmds: list[SlashCommand] = await sess.list_slash_commands()
+for cmd in cmds:
+    print(f"/{cmd.name} — {cmd.description}")
+    print(cmd.body)            # template; substitute args yourself
+
+# Module-level discover() — for use outside a session.
+cmds = discover(config, cwd=Path("/path/to/project"))
+
+# SlashCommand fields:
+cmd.name              # str — file stem or frontmatter "name:" override
+cmd.description       # str | None — frontmatter "description:"
+cmd.body              # str — Markdown body (template; substitute placeholders)
+cmd.source_path       # Path — for "edit this command" UX
+cmd.frontmatter       # dict[str, str] — raw frontmatter values
+```
+
+Discovery walks `.claude/commands/`, `.opencode/command/`,
+`.agents/commands/` upward from `cwd` to the git worktree root,
+plus the matching user-global paths. Later-found (more specific)
+paths win on name collision.
+
+**Invocation differs per adapter.** Claude's SDK auto-expands
+`/commandname args` natively when passed through `execute()` — the
+SDK reads the same files airframe discovers. Other adapters: the
+consumer substitutes placeholders (`$ARGUMENTS`, `$1`, `{file}`,
+etc.) into `cmd.body` and calls `execute(expanded_text)`. See
+[capabilities.md](./capabilities.md#slash_commands).
+
 ## Provider options (vendor namespaces)
 
 `src/airframe/options.py`.
@@ -484,6 +643,10 @@ FunctionTool, McpServerRef
 PermissionCallback, PermissionDecision, PermissionRequest
 HookEvent, HookEventKind
 RuntimeEvent, TextDelta, ReasoningDelta, ToolCallStart, ToolCallResult, TurnComplete
+RateLimitInfo, RateLimitWindow                          # Phase 6
+RequestMetadata                                          # Phase 6
+CacheConfig                                              # Phase 6
+SlashCommand, SlashCommandsConfig                        # Phase 6
 RuntimeAuthError, RuntimeBudgetExceededError, RuntimeCancelledError,
 RuntimeContextOverflowError, RuntimeModelNotFoundError, RuntimeProtocolError,
 RuntimeServerStartError, RuntimeStructuredOutputError, RuntimeTransientError,

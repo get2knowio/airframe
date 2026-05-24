@@ -33,9 +33,17 @@ Renaming would be a major-version break.
 | `LIFECYCLE_HOOKS` | ✓ (6 kinds) | ✓ (8 kinds) | ✓ (7 kinds) | ✓ (7 kinds) | ✓ (6 kinds) | ✓ (6 kinds) |
 | `BUDGET_USD_CAP` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ (best-effort) |
 | `BUDGET_TURN_CAP` | ✓ | ✓ | ✗ | ✓ | ✓ | ✓ |
+| `RATE_LIMIT_TELEMETRY` | ✗ | ✓ | ✗ | ✗ | ✓ | ✗ |
+| `REASONING_OUTPUT` | ✗ | ✓ | ✗ | ✗ | ✓ | ✗ |
+| `REQUEST_METADATA` | ✗ (soft drop) | ✓ | ✗ (soft drop) | ✗ (soft drop) | ✓ | ✗ (soft drop) |
+| `COUNT_TOKENS` | ✗ | ✓ | ✗ | ✗ | ✓ | ✗ |
+| `PROMPT_CACHE_CONTROL` | ✗ (soft drop) | ✗ (soft drop) | ✗ (soft drop) | ✗ (soft drop) | ✓ | ✗ (soft drop) |
+| `SLASH_COMMANDS` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `SANDBOX` / `SUBAGENTS` | ✗ (planned) | ✗ (planned) | ✗ (planned) | ✗ (planned) | ✗ (planned) | ✗ (planned) |
 
 The OpenCode "SDK gap" entries are not adapter declines — OpenCode the *server* supports those features. The opencode-ai 0.1.0a36 Python SDK simply hasn't surfaced the matching endpoints yet (no `client.mcp` / `client.permission` resources). The flags will flip True once the SDK catches up. See `docs/adapters/opencode-server.md` for the full story.
+
+**Soft-drop entries** (`REQUEST_METADATA`, `PROMPT_CACHE_CONTROL`) follow a deliberately different contract from the rest: an adapter declaring `False` *accepts* the kwarg structurally and silently drops it rather than raising `UnsupportedFeatureError`. The call's correctness doesn't depend on the tag / cache key reaching the vendor — at worst the consumer loses abuse-detection attribution or cache speed-up. Consumers who care branch on `supports()` first; consumers who just want best-effort pass the kwarg and forget. See each feature's section below.
 
 Run `uv run python examples/probe_supports.py` for the live matrix
 against your installed adapters.
@@ -249,6 +257,177 @@ a user-facing `max_turns=` on per-execute would be misleading.
 On Claude, the kwarg additionally rides into
 `ClaudeAgentOptions.max_turns` to override the runtime-default
 `DEFAULT_MAX_TURNS=60` for SDK-internal turn limiting.
+
+### `RATE_LIMIT_TELEMETRY`
+
+Wire shape: `result.rate_limit: RateLimitInfo | None` on
+`RuntimeResult` (when the vendor surfaces quota data on a
+successful call) and `RuntimeTransientError.rate_limit` (on a
+throttle response).
+
+`RateLimitInfo` wraps a tuple of `RateLimitWindow` snapshots — each
+carries `name` (vendor's window identifier — `"requests"` /
+`"tokens"` / `"five_hour"` / etc.), `remaining`, `limit`,
+`utilization`, `reset_at`, `retry_after_seconds`, `status`. Fields
+vary per vendor: OpenAI populates `remaining` / `limit`; Claude
+populates `utilization` / `status`. Consumers should treat any
+single field as a hint and check `is not None` before using it.
+
+Per-adapter mechanism:
+- **Claude:** consumes `RateLimitEvent` instances from the SDK
+  message stream, accumulating per-window state across emitted
+  events (`five_hour`, `seven_day`, `seven_day_opus`,
+  `seven_day_sonnet`, `overage`).
+- **OpenAI-compat:** parses the six `x-ratelimit-*` headers
+  (limit/remaining/reset for requests + tokens) + `retry-after` via
+  `chat.completions.with_raw_response.create()`. Includes OpenAI's
+  `"6m0s"` / `"42ms"` duration-string format.
+
+Adapters returning `False` leave `result.rate_limit=None`
+unconditionally. Adapters returning `True` may still leave it
+`None` when the vendor didn't send quota data on that turn —
+consumers should branch on `rate_limit is not None` regardless of
+`supports()`.
+
+### `REASONING_OUTPUT`
+
+Wire shape: `result.reasoning: str | None` on `RuntimeResult` —
+the model's finalised reasoning / extended-thinking trace as plain
+text. Streaming pairs naturally: concatenating every
+`ReasoningDelta.text` for one turn equals `turn_complete.result.reasoning`.
+
+Distinct from `REASONING_EFFORT` (the *input* side: "I can ask the
+model to think harder"); this is the *output* side ("I can show you
+what it thought").
+
+Per-adapter mechanism:
+- **Claude:** consumes `ThinkingBlock` content from
+  `AssistantMessage` (non-streaming) + accumulates streamed
+  `ReasoningDelta` from `thinking_delta` wire events.
+- **OpenAI-compat:** defensively reads `message.reasoning_content`
+  (DeepSeek-R1 derivatives) or `message.reasoning` on the response;
+  per-chunk `delta.reasoning_content` / `delta.reasoning` on the
+  stream. Vendors that don't surface reasoning text (OpenAI Chat
+  Completions on the `o1`/`gpt-5` family — which exposes only the
+  token count) leave the field `None`.
+
+### `REQUEST_METADATA`
+
+Wire shape: `runtime.session(metadata=RequestMetadata(user_id=...,
+request_id=..., tags={...}))` — forwards a per-request observation
+tag to the vendor for abuse detection / per-tenant usage
+attribution / audit trails.
+
+**Soft contract.** Adapters returning `False` *accept* the kwarg
+and silently drop it. The call's correctness doesn't depend on the
+tag reaching the vendor; consumers who care branch on `supports()`
+first.
+
+Per-adapter mapping:
+- **Claude:** `user_id` → `ClaudeAgentOptions.user`. `tags` /
+  `request_id` silently dropped (no agent-SDK channel).
+- **OpenAI-compat:** `user_id` → `user=` kwarg; `tags` →
+  `metadata=` kwarg (typed `Dict[str, str]` on the OpenAI SDK);
+  `request_id` → `extra_headers={"X-Request-ID": ...}`. Pre-existing
+  values on the create kwargs are preserved + extended rather than
+  overwritten.
+- **Copilot / Kimi / Bedrock / OpenCode-server:** silently dropped
+  (no native metadata channel today).
+
+### `COUNT_TOKENS`
+
+Wire shape: `await runtime.count_tokens(prompt, *, system=None, model=None) -> int`.
+Pre-flight token count — answer "is this prompt going to blow the
+context window / break my budget" *before* paying for a turn.
+
+Adapters returning `False` raise `UnsupportedFeatureError` when
+called. v1 supports plain-text and string-only multi-part prompts;
+list-shaped prompts with image / file attachments raise
+`UnsupportedFeatureError` (base64 expansion + per-vendor counting
+heuristics deferred).
+
+Per-adapter mechanism:
+- **Claude:** delegates to
+  `anthropic.AsyncAnthropic.messages.count_tokens(...)` — same
+  auth-resolution chain as `list_models()`. Requires `[claude]`
+  extra. Network call.
+- **OpenAI-compat:** `tiktoken.encoding_for_model(model_id)` with
+  a fall-back to `o200k_base` (GPT-4o tokeniser) when the model
+  isn't in tiktoken's registry. Best-effort approximation for
+  compat-vendor models using non-OpenAI tokenisers (DeepSeek,
+  Llama, etc.) — typically within 5–10% but not exact. Requires
+  `[openai-compat]` extra (pulls `tiktoken`).
+- **Copilot / Kimi / Bedrock / OpenCode-server:** declined —
+  neither the vendor SDK exposes a counter endpoint nor is the
+  per-family tokeniser bundled. Wrap with the consumer's own
+  estimator if needed.
+
+### `PROMPT_CACHE_CONTROL`
+
+Wire shape: `runtime.session(cache=CacheConfig(key=..., retention="short"|"long"))` —
+the consumer hands the vendor a stable cache key so repeated
+prompts hit the cached prefix rather than recompute.
+
+**Soft contract.** Adapters returning `False` accept the kwarg and
+silently drop it. The call still succeeds — just without the
+speed-up / cost-reduction explicit caching would have provided.
+
+Per-adapter mapping:
+- **OpenAI-compat:** `key` → `prompt_cache_key=`;
+  `retention="short"` → `prompt_cache_retention="in_memory"`
+  (5-minute window); `retention="long"` →
+  `prompt_cache_retention="24h"`. The portable `cache=` value
+  takes precedence over the OpenAI-specific
+  `OpenAICompatOptions.prompt_cache_key` (consumers who set both
+  get the cross-vendor surface through).
+- **Claude / Copilot / Kimi / Bedrock / OpenCode-server:**
+  silently dropped — these adapters either manage caching via
+  session warmth (Claude) or expose no explicit cache-key channel.
+
+The `retention` literal is deliberately coarse (`"short"` /
+`"long"`) because vendor windows differ. Consumers wanting precise
+control should reach the vendor's native field via
+`provider_options=`.
+
+### `SLASH_COMMANDS`
+
+Wire shape: `runtime.session(slash_commands=SlashCommandsConfig(...))`
++ `await session.list_slash_commands() -> list[SlashCommand]`.
+Discovery of user-authored slash commands from the filesystem —
+the consumer's UI uses the returned list to render a palette.
+
+Discovery walks `.claude/commands/*.md`, `.opencode/command/*.md`,
+`.agents/commands/*.md` upward from `cwd` to the git worktree root,
+plus the matching user-global directories
+(`~/.claude/commands/`, etc.) when
+`SlashCommandsConfig.include_user_global` is `True`. Plus any extra
+`SlashCommandsConfig.search_paths`. The YAML frontmatter at the
+top of each file is parsed via a minimal hand-rolled parser (no
+`pyyaml` dep); the rest is the body template.
+
+Each `SlashCommand` exposes `name`, `description`, `body`,
+`source_path`, and the raw `frontmatter` dict. Consumers expand
+the body template themselves (substituting `$ARGUMENTS` / `$1` /
+`{file}` per the vendor convention) before passing the expanded
+text to `session.execute()`.
+
+**Every adapter declares `Feature.SLASH_COMMANDS = True`** —
+discovery is filesystem-only and adapter-agnostic. **Invocation
+semantics differ:**
+- **Claude Agent SDK:** auto-expands `/commandname args` when
+  passed verbatim through `execute()` — the SDK reads the same
+  `.claude/commands/` directory airframe discovers. Consumers can
+  use either path (call `execute("/refactor foo.py")` directly, or
+  enumerate via `list_slash_commands()` for a palette and pass the
+  expanded body).
+- **OpenAI-compat / Bedrock / Copilot / Kimi / OpenCode-server:**
+  no native slash-command channel; the consumer expands
+  `SlashCommand.body` and calls `execute(expanded_text)`. The
+  model receives the substituted body as a normal user prompt.
+
+The model itself does not do template-syntax expansion — it sees
+whatever text reaches it after the consumer (or the Claude SDK)
+substitutes placeholders.
 
 ### `SANDBOX` / `SUBAGENTS`
 
