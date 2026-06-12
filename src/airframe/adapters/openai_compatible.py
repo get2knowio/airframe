@@ -74,6 +74,7 @@ from airframe.features import Feature
 from airframe.inputs import Prompt
 from airframe.metadata import RequestMetadata
 from airframe.models import ModelInfo
+from airframe.native_tools import NativeCapability, NativeTool
 from airframe.options import OpenAICompatOptions
 from airframe.protocol import (
     AgentRuntime,
@@ -91,6 +92,7 @@ from airframe.sessions import (
     _check_tools_supported,
     _enforce_budget_pre_turn,
     _fire_hook_event,
+    _resolve_native_tools,
     _split_prompt_parts,
 )
 from airframe.slash_commands import SlashCommand, SlashCommandsConfig
@@ -344,6 +346,15 @@ class OpenAICompatibleRuntime(AgentRuntime):
     def supports(self, feature: Feature, model: ProviderModel | None = None) -> bool:
         return feature in self.SUPPORTED_FEATURES
 
+    def supported_native_tools(
+        self, model: ProviderModel | None = None
+    ) -> frozenset[NativeCapability]:
+        # The Chat Completions wire shape this base wraps has no hosted-tool
+        # slot — OpenAI's web_search / code_interpreter / file_search are
+        # Responses-API tools. A future OpenAIResponsesRuntime is where native
+        # tools would land; this family permanently declines.
+        return frozenset()
+
     def unwrap(self, cls: type[T]) -> T:
         from openai import AsyncOpenAI
 
@@ -365,6 +376,7 @@ class OpenAICompatibleRuntime(AgentRuntime):
         model: ProviderModel | None = None,
         tools: list[FunctionTool] | None = None,
         mcp_servers: list[McpServerRef] | None = None,
+        native_tools: list[NativeTool] | None = None,
         on_permission: PermissionCallback | None = None,
         on_event: Callable[[HookEvent], None] | None = None,
         provider_options: ProviderOptions | None = None,
@@ -440,6 +452,13 @@ class OpenAICompatibleRuntime(AgentRuntime):
             tools,
             adapter_label=self.label,
             feature_supported=self.supports(Feature.TOOLS_FUNCTION),
+        )
+        _resolve_native_tools(
+            native_tools,
+            adapter_label=self.label,
+            provider_id=self.PROVIDER_ID,
+            feature_supported=self.supports(Feature.TOOLS_NATIVE),
+            supported_capabilities=self.supported_native_tools(model),
         )
         if on_permission is not None:
             # Phase 5 Iteration B — Chat Completions has no permission

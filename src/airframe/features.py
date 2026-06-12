@@ -150,6 +150,24 @@ class Feature(StrEnum):
     TOOLS_MCP_IN_PROCESS = "tools_mcp_in_process"
     """Registers in-process MCP servers (zero IPC overhead)."""
 
+    TOOLS_NATIVE = "tools_native"
+    """``session(native_tools=[NativeTool(...)])`` enables vendor-hosted
+    built-in tools — ones the wrapped SDK both describes to the model and
+    executes itself (Claude ``WebSearch`` / ``WebFetch``, OpenAI ``web_search``,
+    Kimi ``$web_search``, Copilot ``fetch_webpage``). Distinct from
+    :data:`TOOLS_FUNCTION` (caller supplies a Python handler) and the
+    :data:`TOOLS_MCP_STDIO` family (external server): native tools carry no
+    handler and no server ref — the consumer references a capability and the
+    vendor owns description + execution.
+
+    Structural gate (hard contract, like :data:`TOOLS_FUNCTION`): an adapter
+    returning ``False`` raises :class:`~airframe.errors.UnsupportedFeatureError`
+    when ``native_tools=`` carries any tool addressed to it. *Which*
+    :class:`~airframe.native_tools.NativeCapability` values a supporting adapter
+    can serve is a finer question answered by
+    :meth:`AgentRuntime.supported_native_tools`; requesting a semantic
+    capability the adapter doesn't serve also raises (no silent fallback)."""
+
     # --- Phase 5 — permission, hooks, budget ---
     PERMISSION_CALLBACK = "permission_callback"
     """``session(on_permission=...)`` gates tool execution."""

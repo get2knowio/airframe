@@ -146,6 +146,7 @@ from airframe.sessions import (
     _check_provider_options,
     _enforce_budget_pre_turn,
     _fire_hook_event,
+    _resolve_native_tools,
     _split_prompt_parts,
 )
 from airframe.slash_commands import SlashCommand, SlashCommandsConfig
@@ -155,6 +156,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
 
     from airframe.hooks import HookEvent
+    from airframe.native_tools import NativeCapability, NativeTool
     from airframe.options import ProviderOptions
     from airframe.permission import PermissionCallback
     from airframe.tools import FunctionTool, McpServerRef
@@ -638,6 +640,13 @@ class KimiRuntime(AgentRuntime):
         del model  # static per-adapter declaration in Iteration A
         return feature in self.SUPPORTED_FEATURES
 
+    def supported_native_tools(
+        self, model: ProviderModel | None = None
+    ) -> frozenset[NativeCapability]:
+        # Kimi exposes a hosted ``$web_search`` builtin-function, but wiring it
+        # (requires thinking disabled) is a follow-up; declined for now.
+        return frozenset()
+
     def unwrap(self, cls: type[T]) -> T:
         if isinstance(self, cls):
             return self  # type: ignore[return-value]
@@ -655,6 +664,7 @@ class KimiRuntime(AgentRuntime):
         model: ProviderModel | None = None,
         tools: list[FunctionTool] | None = None,
         mcp_servers: list[McpServerRef] | None = None,
+        native_tools: list[NativeTool] | None = None,
         on_permission: PermissionCallback | None = None,
         on_event: Callable[[HookEvent], None] | None = None,
         provider_options: ProviderOptions | None = None,
@@ -705,6 +715,13 @@ class KimiRuntime(AgentRuntime):
             mcp_servers,
             adapter_label=self.label,
             supports=self.supports,
+        )
+        _resolve_native_tools(
+            native_tools,
+            adapter_label=self.label,
+            provider_id=self.PROVIDER_ID,
+            feature_supported=self.supports(Feature.TOOLS_NATIVE),
+            supported_capabilities=self.supported_native_tools(model),
         )
         _check_permission_supported(
             on_permission,

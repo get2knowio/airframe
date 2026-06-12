@@ -48,6 +48,7 @@ if TYPE_CHECKING:
     from airframe.inputs import Prompt
     from airframe.metadata import RequestMetadata
     from airframe.models import ModelInfo
+    from airframe.native_tools import NativeCapability, NativeTool
     from airframe.options import ProviderOptions
     from airframe.permission import PermissionCallback
     from airframe.rate_limit import RateLimitInfo
@@ -429,6 +430,41 @@ class AgentRuntime(Protocol):
         """
         ...
 
+    def supported_native_tools(
+        self, model: ProviderModel | None = None
+    ) -> frozenset[NativeCapability]:
+        """Return the vendor-hosted built-in capabilities this runtime serves.
+
+        The per-capability companion to ``supports(Feature.TOOLS_NATIVE)``:
+        :data:`~airframe.features.Feature.TOOLS_NATIVE` answers "does this
+        adapter wire ``native_tools=`` at all"; this method answers "*which*
+        :class:`~airframe.native_tools.NativeCapability` values can it actually
+        enable" (Claude serves ``{WEB_SEARCH, WEB_FETCH}``; an adapter with no
+        hosted tools returns an empty set).
+
+        Same contract as :meth:`supports`: cheap and pure (a static lookup
+        table on the adapter class — no network, no SDK probe), and it agrees
+        with :meth:`session` — passing ``native_tools=[NativeTool(...)]`` whose
+        semantic capability is in this set must not raise on capability grounds.
+
+        Consumers branch on it to degrade gracefully::
+
+            caps = runtime.supported_native_tools(model)
+            native = [t for t in (NativeTool.web_search(), NativeTool.web_fetch())
+                      if t.capability in caps]
+            sess = runtime.session(model=model, native_tools=native or None)
+
+        Args:
+            model: Optional :class:`ProviderModel` for per-model
+                differentiation. ``None`` asks the runtime-wide capability set.
+                Most adapters are runtime-wide today and ignore this argument.
+
+        Returns:
+            A (possibly empty) frozenset of supported
+            :class:`~airframe.native_tools.NativeCapability` members.
+        """
+        ...
+
     def session(
         self,
         *,
@@ -437,6 +473,7 @@ class AgentRuntime(Protocol):
         model: ProviderModel | None = None,
         tools: list[FunctionTool] | None = None,
         mcp_servers: list[McpServerRef] | None = None,
+        native_tools: list[NativeTool] | None = None,
         on_permission: PermissionCallback | None = None,
         on_event: Callable[[HookEvent], None] | None = None,
         provider_options: ProviderOptions | None = None,
@@ -502,6 +539,24 @@ class AgentRuntime(Protocol):
                 a ref of that transport. ``tools=`` and
                 ``mcp_servers=`` coexist — both end up routed through
                 the same vendor MCP slot.
+            native_tools: List of
+                :class:`~airframe.native_tools.NativeTool` enabling
+                vendor-hosted built-in tools (Claude ``WebSearch`` /
+                ``WebFetch``, etc.) the model may invoke for the
+                session's lifetime — no consumer handler, the vendor
+                owns execution. ``None`` (the default) means none.
+                Adapters declaring
+                :data:`~airframe.features.Feature.TOOLS_NATIVE` enable
+                each tool whose semantic
+                :class:`~airframe.native_tools.NativeCapability` is in
+                :meth:`supported_native_tools` (and raw tools addressed
+                to their ``PROVIDER_ID``); a requested capability the
+                adapter can't serve, or any native tool on an adapter
+                that doesn't declare ``TOOLS_NATIVE``, raises
+                :class:`~airframe.errors.UnsupportedFeatureError`. Raw
+                tools addressed to a *different* provider are ignored,
+                so one mixed list can drive several runtimes. Coexists
+                with ``tools=`` / ``mcp_servers=``.
             on_permission: Optional
                 :class:`~airframe.permission.PermissionCallback`
                 that gates tool execution. The adapter awaits the

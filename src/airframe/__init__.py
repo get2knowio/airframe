@@ -76,6 +76,7 @@ from airframe.models import (
     CAPABILITY_VISION,
     ModelInfo,
 )
+from airframe.native_tools import NativeCapability, NativeTool
 from airframe.options import (
     BedrockOptions,
     ClaudeOptions,
@@ -140,6 +141,8 @@ __all__ = [
     "KimiRuntime",
     "McpServerRef",
     "ModelInfo",
+    "NativeCapability",
+    "NativeTool",
     "OpenAICompatOptions",
     "OpenCodeGoRuntime",
     "OpenCodeServerOptions",
