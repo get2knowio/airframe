@@ -6,6 +6,10 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+---
+
+## [0.9.0rc2] — 2026-06-12
+
 ### Added
 
 - **`Feature.TOOLS_NATIVE`** + the `NativeTool` / `NativeCapability`
