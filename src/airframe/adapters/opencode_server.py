@@ -153,6 +153,7 @@ from airframe.sessions import (
     _check_provider_options,
     _enforce_budget_pre_turn,
     _fire_hook_event,
+    _resolve_native_tools,
     _split_prompt_parts,
 )
 from airframe.slash_commands import SlashCommand, SlashCommandsConfig
@@ -165,6 +166,7 @@ if TYPE_CHECKING:
     from airframe.events import RuntimeEvent
     from airframe.hooks import HookEvent
     from airframe.inputs import Prompt
+    from airframe.native_tools import NativeCapability, NativeTool
     from airframe.options import ProviderOptions
     from airframe.permission import PermissionCallback
     from airframe.thinking import ThinkingMode
@@ -430,6 +432,14 @@ class OpenCodeServerRuntime(AgentRuntime):
     def supports(self, feature: Feature, model: ProviderModel | None = None) -> bool:
         return feature in self.SUPPORTED_FEATURES
 
+    def supported_native_tools(
+        self, model: ProviderModel | None = None
+    ) -> frozenset[NativeCapability]:
+        # OpenCode's server runs built-in websearch/webfetch tools, exposed
+        # through OpenCodeServerOptions(available_tools=...). Surfacing them as
+        # portable native_tools is a follow-up; declined for now.
+        return frozenset()
+
     def unwrap(self, cls: type[T]) -> T:
         if isinstance(self, cls):
             return self  # type: ignore[return-value]
@@ -471,6 +481,7 @@ class OpenCodeServerRuntime(AgentRuntime):
         model: ProviderModel | None = None,
         tools: list[FunctionTool] | None = None,
         mcp_servers: list[McpServerRef] | None = None,
+        native_tools: list[NativeTool] | None = None,
         on_permission: PermissionCallback | None = None,
         on_event: Callable[[HookEvent], None] | None = None,
         provider_options: ProviderOptions | None = None,
@@ -498,6 +509,13 @@ class OpenCodeServerRuntime(AgentRuntime):
                 "invoke it server-side. Will flip True once SDK exposes MCP.",
                 feature=Feature.TOOLS_FUNCTION,
             )
+        _resolve_native_tools(
+            native_tools,
+            adapter_label=self.label,
+            provider_id=self.PROVIDER_ID,
+            feature_supported=self.supports(Feature.TOOLS_NATIVE),
+            supported_capabilities=self.supported_native_tools(model),
+        )
         if mcp_servers:
             transport = mcp_servers[0].transport
             feature_map = {

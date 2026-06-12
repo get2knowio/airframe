@@ -18,6 +18,32 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`Feature.TOOLS_NATIVE`** + the `NativeTool` / `NativeCapability`
+  types and `session(native_tools=[...])` kwarg — a provider-agnostic
+  way to enable **vendor-hosted built-in tools** (ones the wrapped SDK
+  both describes to the model and executes itself: Claude's
+  `WebSearch` / `WebFetch`, OpenAI's `web_search`, Kimi's
+  `$web_search`, Copilot's `fetch_webpage`). Distinct from
+  `TOOLS_FUNCTION` (caller supplies a handler) and the `TOOLS_MCP_*`
+  family (external server): native tools carry no handler and no
+  server ref — the consumer references a portable `NativeCapability`
+  (`WEB_SEARCH`, `WEB_FETCH`, `CODE_EXECUTION`, `FILE_SEARCH`,
+  `IMAGE_GENERATION`, `COMPUTER_USE`) or a raw vendor name via
+  `NativeTool.raw(provider_id, name)`, and the vendor owns execution.
+  Two-layer negotiation: the structural `supports(Feature.TOOLS_NATIVE)`
+  gate plus a new `AgentRuntime.supported_native_tools(model)`
+  predicate returning the served `NativeCapability` set. Hard
+  contract (no silent fallback) — a requested capability an adapter
+  can't serve raises `UnsupportedFeatureError`; consumers branch on
+  `supported_native_tools()` to degrade gracefully. Raw tools
+  addressed to another provider are ignored, so one mixed
+  `native_tools=` list can drive several runtimes. **Claude** serves
+  `WEB_SEARCH` + `WEB_FETCH` (mapped into `allowed_tools`); the other
+  adapters declare their decline (each has a hosted equivalent whose
+  wiring is a follow-up; OpenAI's hosted tools are Responses-API only).
+  Scope is hosted/server-side tools only — local-execution built-ins
+  (`Bash` / `Read` / `Write`) are intentionally out of scope.
+
 - **`BedrockRuntime.list_models()` now includes inference profiles.**
   Modern Anthropic models on Bedrock are invokable only via a
   cross-region inference profile (`us.anthropic.*` / `global.anthropic.*`),

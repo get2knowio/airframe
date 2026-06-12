@@ -56,6 +56,7 @@ await runtime.close()
 | `TOOLS_MCP_STDIO` | ✓ | All three transports natively supported |
 | `TOOLS_MCP_HTTP` | ✓ | |
 | `TOOLS_MCP_SSE` | ✓ | Only adapter that supports SSE |
+| `TOOLS_NATIVE` | ✓ | Hosted `WebSearch` / `WebFetch` via `native_tools=` → `allowed_tools` (`supported_native_tools()` → `{WEB_SEARCH, WEB_FETCH}`) |
 | `PERMISSION_CALLBACK` | ✓ | Per-call via `can_use_tool` |
 | `LIFECYCLE_HOOKS` | ✓ | All 8 kinds emittable (native `PreCompact` + `RateLimit` events) |
 | `BUDGET_USD_CAP` | ✓ | Client-side accumulation against `total_cost_usd` |

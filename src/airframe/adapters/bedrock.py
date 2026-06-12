@@ -172,6 +172,7 @@ from airframe.sessions import (
     _check_provider_options,
     _enforce_budget_pre_turn,
     _fire_hook_event,
+    _resolve_native_tools,
     _split_prompt_parts,
 )
 from airframe.slash_commands import SlashCommand, SlashCommandsConfig
@@ -180,6 +181,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
 
     from airframe.hooks import HookEvent
+    from airframe.native_tools import NativeCapability, NativeTool
     from airframe.options import ProviderOptions
     from airframe.permission import PermissionCallback
     from airframe.thinking import ThinkingMode
@@ -546,6 +548,13 @@ class BedrockRuntime(AgentRuntime):
     def supports(self, feature: Feature, model: ProviderModel | None = None) -> bool:
         return feature in self.SUPPORTED_FEATURES
 
+    def supported_native_tools(
+        self, model: ProviderModel | None = None
+    ) -> frozenset[NativeCapability]:
+        # Bedrock Converse has no vendor-hosted tools — only client-side
+        # toolConfig (function tools). Permanent decline.
+        return frozenset()
+
     def unwrap(self, cls: type[T]) -> T:
         if isinstance(self, cls):
             return self  # type: ignore[return-value]
@@ -571,6 +580,7 @@ class BedrockRuntime(AgentRuntime):
         model: ProviderModel | None = None,
         tools: list[FunctionTool] | None = None,
         mcp_servers: list[McpServerRef] | None = None,
+        native_tools: list[NativeTool] | None = None,
         on_permission: PermissionCallback | None = None,
         on_event: Callable[[HookEvent], None] | None = None,
         provider_options: ProviderOptions | None = None,
@@ -617,6 +627,13 @@ class BedrockRuntime(AgentRuntime):
                 "hand-craft the shim.",
                 feature=feature_map.get(transport, Feature.TOOLS_MCP_STDIO),
             )
+        _resolve_native_tools(
+            native_tools,
+            adapter_label=self.label,
+            provider_id=self.PROVIDER_ID,
+            feature_supported=self.supports(Feature.TOOLS_NATIVE),
+            supported_capabilities=self.supported_native_tools(model),
+        )
         _check_provider_options(
             provider_options,
             expected_type=BedrockOptions,

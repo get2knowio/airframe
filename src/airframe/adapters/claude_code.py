@@ -84,6 +84,7 @@ from airframe.features import Feature
 from airframe.inputs import Prompt
 from airframe.metadata import RequestMetadata
 from airframe.models import ModelInfo
+from airframe.native_tools import NativeCapability, NativeTool
 from airframe.options import ClaudeOptions
 from airframe.protocol import (
     AgentRuntime,
@@ -104,6 +105,8 @@ from airframe.sessions import (
     _enforce_budget_pre_turn,
     _fire_hook_event,
     _mcp_servers_fingerprint,
+    _native_tools_fingerprint,
+    _resolve_native_tools,
     _split_prompt_parts,
 )
 from airframe.slash_commands import SlashCommand, SlashCommandsConfig
@@ -327,6 +330,7 @@ class ClaudeCodeRuntime(AgentRuntime):
             Feature.TOOLS_MCP_STDIO,
             Feature.TOOLS_MCP_HTTP,
             Feature.TOOLS_MCP_SSE,
+            Feature.TOOLS_NATIVE,
             Feature.PERMISSION_CALLBACK,
             Feature.LIFECYCLE_HOOKS,
             Feature.BUDGET_USD_CAP,
@@ -336,6 +340,17 @@ class ClaudeCodeRuntime(AgentRuntime):
             Feature.REQUEST_METADATA,
             Feature.COUNT_TOKENS,
             Feature.SLASH_COMMANDS,
+        }
+    )
+
+    #: Vendor-hosted built-in tools this adapter can enable via
+    #: ``native_tools=``. Claude's CLI runs ``WebSearch`` / ``WebFetch``
+    #: on Anthropic's infrastructure; airframe maps the portable
+    #: capabilities onto those tool names in ``allowed_tools``.
+    SUPPORTED_NATIVE_TOOLS: ClassVar[frozenset[NativeCapability]] = frozenset(
+        {
+            NativeCapability.WEB_SEARCH,
+            NativeCapability.WEB_FETCH,
         }
     )
 
@@ -423,6 +438,11 @@ class ClaudeCodeRuntime(AgentRuntime):
     def supports(self, feature: Feature, model: ProviderModel | None = None) -> bool:
         return feature in self.SUPPORTED_FEATURES
 
+    def supported_native_tools(
+        self, model: ProviderModel | None = None
+    ) -> frozenset[NativeCapability]:
+        return self.SUPPORTED_NATIVE_TOOLS
+
     def unwrap(self, cls: type[T]) -> T:
         # Late-import to avoid pulling claude-agent-sdk during module
         # load. Users calling unwrap() have already accepted the SDK
@@ -455,6 +475,7 @@ class ClaudeCodeRuntime(AgentRuntime):
         model: ProviderModel | None = None,
         tools: list[FunctionTool] | None = None,
         mcp_servers: list[McpServerRef] | None = None,
+        native_tools: list[NativeTool] | None = None,
         on_permission: PermissionCallback | None = None,
         on_event: Callable[[HookEvent], None] | None = None,
         provider_options: ProviderOptions | None = None,
@@ -538,6 +559,13 @@ class ClaudeCodeRuntime(AgentRuntime):
             adapter_label=self.label,
             supports=self.supports,
         )
+        resolved_native_tools = _resolve_native_tools(
+            native_tools,
+            adapter_label=self.label,
+            provider_id=self.PROVIDER_ID,
+            feature_supported=self.supports(Feature.TOOLS_NATIVE),
+            supported_capabilities=self.supported_native_tools(model),
+        )
         _check_permission_supported(
             on_permission,
             adapter_label=self.label,
@@ -569,6 +597,7 @@ class ClaudeCodeRuntime(AgentRuntime):
             model_id=model_id,
             tools=tools,
             mcp_servers=mcp_servers,
+            native_tools=resolved_native_tools,
             on_permission=on_permission,
             on_event=on_event,
             provider_options=claude_options,
@@ -897,6 +926,7 @@ class ClaudeCodeSession:
         model_id: str,
         tools: list[FunctionTool] | None = None,
         mcp_servers: list[McpServerRef] | None = None,
+        native_tools: list[NativeTool] | None = None,
         on_permission: PermissionCallback | None = None,
         on_event: Callable[[HookEvent], None] | None = None,
         provider_options: ClaudeOptions | None = None,
@@ -941,6 +971,14 @@ class ClaudeCodeSession:
         # server routed the call.
         self._mcp_servers: list[McpServerRef] = list(mcp_servers or [])
         self._mcp_servers_fingerprint = _mcp_servers_fingerprint(self._mcp_servers)
+        # Native (vendor-hosted) tools — WebSearch / WebFetch etc. The
+        # session()-level _resolve_native_tools already filtered to the
+        # subset this adapter serves and validated capabilities, so here
+        # we only translate names + fingerprint for the cache key. Like
+        # tools/mcp_servers, the set is baked into allowed_tools at connect
+        # time, so a change forces a reconnect via the fingerprint.
+        self._native_tools: list[NativeTool] = list(native_tools or [])
+        self._native_tools_fingerprint = _native_tools_fingerprint(self._native_tools)
         names: set[str] = {ref.name for ref in self._mcp_servers}
         if self._tools:
             names.add(AIRFRAME_MCP_SERVER_NAME)
@@ -1319,13 +1357,14 @@ class ClaudeCodeSession:
         attachments_fragment = f"attachments={has_attachments}"
         tools_fragment = f"tools={self._tools_fingerprint}"
         mcp_fragment = f"mcp={self._mcp_servers_fingerprint}"
+        native_fragment = f"native={self._native_tools_fingerprint}"
         permission_fragment = f"perm={self._permission_fingerprint}"
         max_turns_fragment = f"max_turns={max_turns}"
         provider_options_fragment = f"po={_claude_options_fingerprint(self._provider_options)}"
         metadata_fragment = f"md={self._metadata_fingerprint}"
         cache_key = (
             f"{schema_fragment}|{thinking_fragment}|{attachments_fragment}|"
-            f"{tools_fragment}|{mcp_fragment}|{permission_fragment}|"
+            f"{tools_fragment}|{mcp_fragment}|{native_fragment}|{permission_fragment}|"
             f"{max_turns_fragment}|{provider_options_fragment}|{metadata_fragment}"
         )
         if self._client is not None and self._client_key == cache_key:
@@ -1428,6 +1467,13 @@ class ClaudeCodeSession:
             mcp_servers_config.update(external)
             for ref in self._mcp_servers:
                 allowed_tools.append(f"mcp__{ref.name}__*")
+        # Native (vendor-hosted) tools enter allowed_tools by their plain
+        # Claude CLI name (``WebSearch``/``WebFetch``) — the SDK already
+        # knows + executes them, so unlike FunctionTools there's no MCP
+        # server to register, just the name in the allowlist.
+        for native_name in _translate_native_tools_for_claude(self._native_tools):
+            if native_name not in allowed_tools:
+                allowed_tools.append(native_name)
         if mcp_servers_config:
             options_kwargs["mcp_servers"] = mcp_servers_config
         if allowed_tools:
@@ -1747,6 +1793,48 @@ def _translate_thinking_for_claude(
         f"claude_code: unrecognised thinking mode {thinking!r}",
         feature="reasoning_effort",
     )
+
+
+#: Maps portable :class:`~airframe.native_tools.NativeCapability`
+#: members to the Claude CLI built-in tool names that serve them.
+#: Only hosted (Anthropic-executed) tools belong here — local-
+#: execution built-ins (Bash/Read/Write) are out of scope for the
+#: native-tools abstraction.
+_NATIVE_CAPABILITY_TO_CLAUDE_TOOL: dict[NativeCapability, str] = {
+    NativeCapability.WEB_SEARCH: "WebSearch",
+    NativeCapability.WEB_FETCH: "WebFetch",
+}
+
+
+def _translate_native_tools_for_claude(native_tools: list[NativeTool]) -> list[str]:
+    """Translate resolved :class:`NativeTool` items into Claude tool names.
+
+    Semantic tools map through :data:`_NATIVE_CAPABILITY_TO_CLAUDE_TOOL`; raw
+    tools (already filtered to ``provider_id == "claude"`` by
+    :func:`_resolve_native_tools`) pass their ``name`` through verbatim. The
+    list is pre-validated at ``session()`` time — every semantic capability here
+    is in :attr:`ClaudeCodeRuntime.SUPPORTED_NATIVE_TOOLS` — so a missing map
+    entry is an internal invariant breach, not a user error.
+
+    ``NativeTool.options`` is accepted on the type but not yet wired into the
+    Claude CLI here (it has no per-tool option channel on ``allowed_tools``);
+    options still participate in the session cache fingerprint so a change forces
+    a reconnect once a future option channel lands.
+    """
+    names: list[str] = []
+    for t in native_tools:
+        if t.capability is not None:
+            name = _NATIVE_CAPABILITY_TO_CLAUDE_TOOL.get(t.capability)
+            if name is None:  # pragma: no cover — guarded by _resolve_native_tools
+                raise UnsupportedFeatureError(
+                    f"claude_code: native capability {t.capability.value!r} has no "
+                    f"Claude tool mapping.",
+                    feature=Feature.TOOLS_NATIVE,
+                )
+            names.append(name)
+        elif t.name is not None:
+            names.append(t.name)
+    return names
 
 
 #: Name of the in-process MCP server airframe registers when
