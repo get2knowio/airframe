@@ -93,12 +93,10 @@ If no API key resolves through any layer, the first network call
 raises :class:`RuntimeAuthError` pointing at
 ``https://platform.moonshot.ai/console/api-keys``.
 
-**Python version.** ``kimi-agent-sdk`` requires Python ≥ 3.12 (a
-stricter floor than airframe's ≥ 3.11). Users on 3.11 can install
-``airframe-agents`` and use every other adapter, but
-``pip install airframe-agents[kimi]`` will fail loudly with a clear
-message from pip. Documented in
-:doc:`/adapters/kimi`.
+**Python version.** ``kimi-agent-sdk`` requires Python ≥ 3.12, which
+matches airframe's own ``requires-python`` floor as of the 3.12 bump,
+so the ``[kimi]`` extra installs on every supported interpreter.
+Documented in :doc:`/adapters/kimi`.
 """
 
 from __future__ import annotations
