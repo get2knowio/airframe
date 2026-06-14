@@ -6,6 +6,20 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **`BedrockRuntime.list_models()` now includes inference profiles.**
+  Modern Anthropic models on Bedrock are invokable only via a
+  cross-region inference profile (`us.anthropic.*` / `global.anthropic.*`),
+  not against the bare foundation-model id that `list_foundation_models`
+  returns. `list_models()` now also calls `list_inference_profiles()` and
+  appends a `ModelInfo` for each ACTIVE profile — the `id` is the
+  invokable profile id, enriched with the base model's display name,
+  context window, and capabilities. Best-effort: a missing
+  `bedrock:ListInferenceProfiles` permission degrades to the
+  foundation-model list instead of failing. Consumers selecting a model
+  through the discovery abstraction now get ids they can actually invoke.
+
 ### Changed
 
 - **Minimum Python is now 3.12** (was 3.11). `requires-python`,
