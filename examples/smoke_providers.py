@@ -56,7 +56,11 @@ from airframe import (  # noqa: E402
     list_providers,
     runtime_for,
 )
-from airframe.errors import RuntimeAuthError, RuntimeStructuredOutputError  # noqa: E402
+from airframe.errors import (  # noqa: E402
+    RuntimeAuthError,
+    RuntimeStructuredOutputError,
+    UnsupportedFeatureError,
+)
 from airframe.events import TextDelta, ToolCallStart, TurnComplete  # noqa: E402
 
 # --- Provider registry ------------------------------------------------------
@@ -221,19 +225,36 @@ def build_runtime(pid: str):
 
 
 # --- Exercises --------------------------------------------------------------
+async def _text_roundtrip(runtime, model: ProviderModel | None) -> bool:
+    """Plain-text fallback: did the model answer 42?"""
+    res = await runtime.execute(STRUCTURED_PROMPT, model=model, timeout=120)
+    return "42" in (res.text or "")
+
+
 async def exercise_structured(runtime, model: ProviderModel | None) -> tuple[str, str, str]:
     t0 = time.monotonic()
+    # Provider doesn't declare json-schema structured output at all (e.g. the
+    # opencode HTTP server, pending an SDK gap) — don't attempt a schema call.
+    # Prove reachability with a text round-trip and report N/A.
+    if not runtime.supports(Feature.STRUCTURED_OUTPUT_JSON_SCHEMA):
+        ok = await _text_roundtrip(runtime, model)
+        dt = time.monotonic() - t0
+        return (
+            "structured-output",
+            "N/A" if ok else "FAIL",
+            f"provider declines json_schema; text round-trip "
+            f"{'OK' if ok else 'UNEXPECTED'} {dt:.1f}s",
+        )
     try:
         res = await runtime.execute(STRUCTURED_PROMPT, schema=Answer, model=model, timeout=120)
-    except RuntimeStructuredOutputError as exc:
-        # The provider declares structured output, but THIS model rejects
+    except (RuntimeStructuredOutputError, UnsupportedFeatureError) as exc:
+        # Provider declares structured output, but THIS model rejects
         # response_format — common on gateways (e.g. OpenCode Zen) that front
         # many upstreams, some of which don't honour json_schema. Not a
         # provider failure: fall back to a plain-text round-trip so the smoke
         # still proves the model is reachable + answering, and report WARN.
-        res = await runtime.execute(STRUCTURED_PROMPT, model=model, timeout=120)
+        ok = await _text_roundtrip(runtime, model)
         dt = time.monotonic() - t0
-        ok = "42" in (res.text or "")
         reason = str(exc).split(":", 2)[-1].strip()[:60]
         return (
             "structured-output",
