@@ -6,6 +6,16 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **Minimum Python is now 3.12** (was 3.11). `requires-python`,
+  the classifier list, the ruff/mypy targets, and the CI/release
+  test matrices all move to 3.12/3.13. Aligning the floor with the
+  Kimi adapter's own ≥3.12 requirement lets the `[kimi]` extra drop
+  its `python_version` environment marker — it now installs on every
+  supported interpreter. The Kimi↔Claude `mcp` co-installation
+  conflict is unaffected and tracked separately.
+
 ---
 
 ## [0.9.0rc1] — 2026-05-24

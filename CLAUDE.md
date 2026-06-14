@@ -145,7 +145,7 @@ enum members exist to lock the names, and return `False`.
 
 ## Style
 
-Python 3.11+, type hints on every public function, Google-style
+Python 3.12+, type hints on every public function, Google-style
 docstrings (Args / Returns / Raises). Ruff config in `pyproject.toml`
 sets line length 99 and enables `E W F I N UP B C4 SIM`. Mypy runs
 non-strict but with `strict_equality`, `warn_redundant_casts`,

@@ -14,7 +14,7 @@ make ci
 
 ## Code style
 
-- Python 3.11+; type hints on every public function.
+- Python 3.12+; type hints on every public function.
 - `make format-fix` before pushing.
 - `make ci` is the pre-push gate (lint + format + typecheck + test).
 - Docstrings: Google style (Args / Returns / Raises).

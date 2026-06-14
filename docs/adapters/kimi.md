@@ -12,7 +12,7 @@ agent SDK with sessions, streaming, approvals, and MCP.
 | **Pip extra** | `airframe-agents[kimi]` |
 | **Vendor SDK** | `kimi-agent-sdk` |
 | **Transport** | Subprocess + WireMessage stream |
-| **Python floor** | 3.12 (stricter than airframe's 3.11) |
+| **Python floor** | 3.12 (matches airframe's overall floor) |
 | **Authentication** | See [auth.md](../auth.md#kimiruntime) |
 
 ## Install
@@ -162,10 +162,9 @@ fresh input on the turn that wrote them.
   above — the canonical airframe-wide co-installation hazard. Use
   separate venvs until upstream resolves.
 - **Python 3.12 floor.** `kimi-agent-sdk` requires Python ≥ 3.12.
-  airframe's overall floor is 3.11; on 3.11 the `[kimi]` extra
-  installs as a no-op (the `python_version` marker on the dep
-  skips it) and the adapter's lazy import surfaces a clear error
-  at first use.
+  As of the airframe-wide 3.12 floor bump this matches the package's
+  own `requires-python`, so the `[kimi]` extra installs on every
+  supported interpreter (no `python_version` marker needed).
 - **`thinking` is boolean.** Every effort literal (`"minimal" |
   "low" | "medium" | "high"`) collapses to `thinking=True` —
   granularity is lost on the SDK boundary; the model decides
