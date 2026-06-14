@@ -147,6 +147,7 @@ endpoints yet. They'll flip True when the SDK catches up.
 | `FILE_INPUT` | ✓ | `FileInput(path)` translated to `FilePartInputParam` with inferred MIME. |
 | `TOOLS_FUNCTION` | ✗ | **SDK gap** — no MCP runtime registration. Pre-register MCP servers via `opencode.json` instead. |
 | `TOOLS_MCP_*` | ✗ | **SDK gap** — same. |
+| `TOOLS_NATIVE` | ✓ | `WEB_SEARCH` → `websearch`, `WEB_FETCH` → `webfetch`, force-enabled in the chat `tools=` allow-map (overrides any denylist). Note: enabling a tool implies "everything else off" — to keep other built-ins alongside a native tool, list them in `OpenCodeServerOptions.available_tools`. |
 | `PERMISSION_CALLBACK` | ✗ | **SDK gap** — no permission-reply endpoint. `permission.updated` events fire on the bus but can't be replied to. |
 | `LIFECYCLE_HOOKS` | ✓ (6 of 8 kinds) | `session_start`, `session_end`, `user_prompt_submit`, `pre_tool_use`, `post_tool_use`, `tool_failure`. Not emitted: `pre_compact`, `rate_limit`. |
 | `BUDGET_USD_CAP` | ✓ (best-effort) | Depends on upstream reporting cost. Ollama / llama.cpp don't; the cap is effectively unenforced for those backends. |

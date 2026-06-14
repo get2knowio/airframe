@@ -143,3 +143,46 @@ def test_claude_runtime_serves_web_search_and_fetch() -> None:
     rt = ClaudeCodeRuntime()
     assert rt.supports(Feature.TOOLS_NATIVE)
     assert rt.supported_native_tools() == _SERVED
+
+
+# --- Copilot capability → tool-name translation ----------------------------
+
+
+def test_copilot_translation_maps_web_fetch() -> None:
+    from airframe.adapters.copilot import _translate_native_tools_for_copilot
+
+    names = _translate_native_tools_for_copilot(
+        [NativeTool.web_fetch(), NativeTool.raw("github-copilot", "fetch_webpage")]
+    )
+    # Both map to the same hosted name; the translator deduplicates.
+    assert names == ["fetch_webpage"]
+
+
+def test_copilot_runtime_serves_web_fetch_only() -> None:
+    from airframe.adapters.copilot import CopilotRuntime
+
+    rt = CopilotRuntime()
+    assert rt.supports(Feature.TOOLS_NATIVE)
+    assert rt.supported_native_tools() == frozenset({NativeCapability.WEB_FETCH})
+    # No hosted web-search built-in: requesting it raises.
+    with pytest.raises(UnsupportedFeatureError) as exc:
+        rt.session(native_tools=[NativeTool.web_search()])
+    assert exc.value.feature == Feature.TOOLS_NATIVE
+
+
+# --- OpenCode capability → tool-name translation ---------------------------
+
+
+def test_opencode_translation_maps_both() -> None:
+    from airframe.adapters.opencode_server import _translate_native_tools_for_opencode
+
+    names = _translate_native_tools_for_opencode([NativeTool.web_search(), NativeTool.web_fetch()])
+    assert names == ["websearch", "webfetch"]
+
+
+def test_opencode_runtime_serves_web_search_and_fetch() -> None:
+    from airframe.adapters.opencode_server import OpenCodeServerRuntime
+
+    rt = OpenCodeServerRuntime()
+    assert rt.supports(Feature.TOOLS_NATIVE)
+    assert rt.supported_native_tools() == _SERVED

@@ -133,10 +133,12 @@ def test_unwired_features_stay_false(adapters: list) -> None:
         Feature.TOOLS_MCP_STDIO,
         Feature.TOOLS_MCP_HTTP,
         Feature.TOOLS_MCP_SSE,
-        # TOOLS_NATIVE (vendor-hosted built-in tools) flipped on Claude
-        # (serves WEB_SEARCH + WEB_FETCH → allowed_tools). Other adapters
-        # decline today (each has a hosted equivalent pending wiring;
-        # OpenAI-compat / Bedrock decline on surface grounds).
+        # TOOLS_NATIVE (vendor-hosted built-in tools): Claude serves
+        # WEB_SEARCH + WEB_FETCH (→ allowed_tools), Copilot serves WEB_FETCH
+        # (→ fetch_webpage), OpenCode serves both (→ websearch/webfetch chat
+        # allow-map). Kimi still declines (its $web_search SDK channel is
+        # unverified — tracked separately); OpenAI-compat / Bedrock decline
+        # on surface grounds.
         Feature.TOOLS_NATIVE,
         # Phase 5 Iteration B flipped PERMISSION_CALLBACK on Claude
         # and Copilot; OpenAI-compat declines permanently (Chat

@@ -100,6 +100,7 @@ from airframe.sessions import (
     _enforce_budget_pre_turn,
     _fire_hook_event,
     _mcp_servers_fingerprint,
+    _native_tools_fingerprint,
     _resolve_native_tools,
     _split_prompt_parts,
 )
@@ -261,7 +262,20 @@ class CopilotRuntime(AgentRuntime):
             # honest signal.
             Feature.BUDGET_USD_CAP,
             Feature.SLASH_COMMANDS,
+            # Vendor-hosted built-in tools: Copilot serves ``fetch_webpage``
+            # (mapped from ``WEB_FETCH``) through its ``available_tools``
+            # channel — see ``SUPPORTED_NATIVE_TOOLS`` below.
+            Feature.TOOLS_NATIVE,
         }
+    )
+
+    #: Vendor-hosted built-in tools this adapter serves. Copilot's hosted
+    #: ``fetch_webpage`` maps from the portable ``WEB_FETCH`` capability;
+    #: there is no hosted web-*search* built-in, so ``WEB_SEARCH`` is not
+    #: served. Enabled via ``native_tools=`` → the SDK's ``available_tools``
+    #: allowlist (see ``_translate_native_tools_for_copilot``).
+    SUPPORTED_NATIVE_TOOLS: ClassVar[frozenset[NativeCapability]] = frozenset(
+        {NativeCapability.WEB_FETCH}
     )
 
     #: The :class:`~airframe.hooks.HookEventKind` literals this
@@ -362,10 +376,10 @@ class CopilotRuntime(AgentRuntime):
     def supported_native_tools(
         self, model: ProviderModel | None = None
     ) -> frozenset[NativeCapability]:
-        # Copilot exposes a hosted ``fetch_webpage`` built-in, but wiring it
-        # through the SDK's available_tools channel is a follow-up; declined
-        # for now (empty set ⇒ native_tools= for this adapter raises).
-        return frozenset()
+        # Copilot serves the hosted ``fetch_webpage`` built-in, mapped from
+        # the portable ``WEB_FETCH`` capability and enabled through the SDK's
+        # ``available_tools`` allowlist. There is no hosted web-search tool.
+        return self.SUPPORTED_NATIVE_TOOLS
 
     def unwrap(self, cls: type[T]) -> T:
         from copilot import CopilotClient
@@ -476,7 +490,7 @@ class CopilotRuntime(AgentRuntime):
             adapter_label=self.label,
             feature_supported=self.supports(Feature.TOOLS_FUNCTION),
         )
-        _resolve_native_tools(
+        resolved_native_tools = _resolve_native_tools(
             native_tools,
             adapter_label=self.label,
             provider_id=self.PROVIDER_ID,
@@ -538,6 +552,7 @@ class CopilotRuntime(AgentRuntime):
             model_id=model_id,
             tools=tools,
             mcp_servers=mcp_servers,
+            native_tools=resolved_native_tools,
             on_permission=on_permission,
             on_event=on_event,
             provider_options=copilot_options,
@@ -763,6 +778,7 @@ class CopilotAgentSession:
         model_id: str,
         tools: list[FunctionTool] | None = None,
         mcp_servers: list[McpServerRef] | None = None,
+        native_tools: list[NativeTool] | None = None,
         on_permission: PermissionCallback | None = None,
         on_event: Callable[[HookEvent], None] | None = None,
         provider_options: CopilotOptions | None = None,
@@ -801,6 +817,12 @@ class CopilotAgentSession:
         # so a refs-change forces a session rebuild.
         self._mcp_servers: list[McpServerRef] = list(mcp_servers or [])
         self._mcp_servers_fingerprint = _mcp_servers_fingerprint(self._mcp_servers)
+        # Vendor-hosted native tools (``WEB_FETCH`` → ``fetch_webpage``).
+        # Enabled at create_session() time through the ``available_tools``
+        # allowlist; the fingerprint joins the cache key so a change forces
+        # a session rebuild (same pattern as tools / mcp above).
+        self._native_tools: list[NativeTool] = list(native_tools or [])
+        self._native_tools_fingerprint = _native_tools_fingerprint(self._native_tools)
         # Phase 5 Iteration B: permission callback baked at
         # create_session() time via on_permission_request=. Callback
         # identity joins the cache key so a swap forces a session
@@ -1125,11 +1147,13 @@ class CopilotAgentSession:
         reasoning_effort = _translate_thinking_for_copilot(thinking)
         tools_fragment = f"tools={self._tools_fingerprint}"
         mcp_fragment = f"mcp={self._mcp_servers_fingerprint}"
+        native_fragment = f"native={self._native_tools_fingerprint}"
         permission_fragment = f"perm={self._permission_fingerprint}"
         provider_options_fragment = f"po={_copilot_options_fingerprint(self._provider_options)}"
         cache_key = (
             f"{schema_fragment}|effort={reasoning_effort}|{tools_fragment}|"
-            f"{mcp_fragment}|{permission_fragment}|{provider_options_fragment}"
+            f"{mcp_fragment}|{native_fragment}|{permission_fragment}|"
+            f"{provider_options_fragment}"
         )
         if self._session is not None and self._session_key == cache_key:
             return self._session
@@ -1174,6 +1198,29 @@ class CopilotAgentSession:
                 create_kwargs["skill_directories"] = list(po.skill_directories)
             if po.working_directory is not None:
                 create_kwargs["working_directory"] = po.working_directory
+
+        # Vendor-hosted native tools (``WEB_FETCH`` → ``fetch_webpage``).
+        # ``available_tools`` is an allowlist: ``None`` lets the SDK's
+        # default policy apply (the hosted built-in is already on), while a
+        # non-None tuple *restricts* to exactly those names. So to honour a
+        # native request without disabling everything else: ensure the names
+        # aren't denied, and union them into an allowlist only when one is
+        # already set. When no allowlist exists we leave it unset — forcing
+        # one here would silently drop every other built-in.
+        native_names = _translate_native_tools_for_copilot(self._native_tools)
+        if native_names:
+            if "excluded_tools" in create_kwargs:
+                create_kwargs["excluded_tools"] = [
+                    t for t in create_kwargs["excluded_tools"] if t not in native_names
+                ]
+                if not create_kwargs["excluded_tools"]:
+                    del create_kwargs["excluded_tools"]
+            if "available_tools" in create_kwargs:
+                allow = list(create_kwargs["available_tools"])
+                for name in native_names:
+                    if name not in allow:
+                        allow.append(name)
+                create_kwargs["available_tools"] = allow
 
         # Assemble the tools list: forced ``submit_result`` first (when
         # schema= is set) so the model sees the structured-output gate
@@ -1714,6 +1761,45 @@ def _copilot_tools_fingerprint(tools: list[FunctionTool]) -> str:
     for t in tools:
         parts.append(f"{t.name}|{t.description}|{t.params.model_json_schema()}")
     return "||".join(parts)
+
+
+#: Maps portable native capabilities onto Copilot's hosted built-in tool
+#: names. Copilot serves only ``fetch_webpage`` (web fetch); it has no
+#: hosted web-search built-in, so ``WEB_SEARCH`` is intentionally absent.
+_NATIVE_CAPABILITY_TO_COPILOT_TOOL: dict[NativeCapability, str] = {
+    NativeCapability.WEB_FETCH: "fetch_webpage",
+}
+
+
+def _translate_native_tools_for_copilot(native_tools: list[NativeTool]) -> list[str]:
+    """Translate resolved :class:`NativeTool` entries to Copilot tool names.
+
+    Semantic capabilities map through
+    :data:`_NATIVE_CAPABILITY_TO_COPILOT_TOOL`; raw entries (already
+    filtered to this provider by ``_resolve_native_tools``) pass their
+    ``name`` through verbatim. ``options`` are accepted but not yet wired
+    into the SDK — they still participate in the session fingerprint so a
+    future change forces a rebuild. The list is deduplicated, preserving
+    first-seen order.
+    """
+    names: list[str] = []
+    for tool in native_tools:
+        if tool.capability is not None:
+            name = _NATIVE_CAPABILITY_TO_COPILOT_TOOL.get(tool.capability)
+            if name is None:
+                # Unreachable in practice — _resolve_native_tools already
+                # rejected any capability not in supported_native_tools().
+                raise UnsupportedFeatureError(
+                    f"copilot: native capability {tool.capability!r} has no "
+                    f"Copilot built-in mapping.",
+                    feature=Feature.TOOLS_NATIVE,
+                )
+        else:
+            assert tool.name is not None  # raw tools always carry a name
+            name = tool.name
+        if name not in names:
+            names.append(name)
+    return names
 
 
 def _translate_one_copilot_tool(ft: FunctionTool) -> Any:

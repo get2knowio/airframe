@@ -29,7 +29,7 @@ Renaming would be a major-version break.
 | `TOOLS_MCP_HTTP` | ✗ (permanent) | ✓ | ✓ | ✓ | ✗ | ✗ (SDK gap) |
 | `TOOLS_MCP_SSE` | ✗ (permanent) | ✓ | ✗ | ✓ | ✗ | ✗ (SDK gap) |
 | `TOOLS_MCP_IN_PROCESS` | ✗ | (internal) | (internal) | ✗ (permanent) | ✗ | ✗ (permanent) |
-| `TOOLS_NATIVE` | ✗ | ✓ (`WEB_SEARCH`, `WEB_FETCH`) | ✗ (follow-up: `fetch_webpage`) | ✗ (follow-up: `$web_search`) | ✗ (Responses-API only) | ✗ (follow-up: `websearch`/`webfetch`) |
+| `TOOLS_NATIVE` | ✗ | ✓ (`WEB_SEARCH`, `WEB_FETCH`) | ✓ (`WEB_FETCH` → `fetch_webpage`) | ✗ (follow-up: `$web_search`) | ✗ (Responses-API only) | ✓ (`WEB_SEARCH`, `WEB_FETCH` → `websearch`/`webfetch`) |
 | `PERMISSION_CALLBACK` | ✓ | ✓ | ✓ | ✓ | ✗ | ✗ (SDK gap) |
 | `LIFECYCLE_HOOKS` | ✓ (6 kinds) | ✓ (8 kinds) | ✓ (7 kinds) | ✓ (7 kinds) | ✓ (6 kinds) | ✓ (6 kinds) |
 | `BUDGET_USD_CAP` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ (best-effort) |
@@ -214,8 +214,21 @@ Per-adapter mechanism:
   tools pass their name through verbatim. `NativeTool.options` participates in
   the session cache fingerprint but isn't yet wired to a per-tool option
   channel.
-- **Copilot / Kimi / OpenCode:** declined today (each has a hosted equivalent —
-  `fetch_webpage` / `$web_search` / `websearch` — wiring is a follow-up).
+- **Copilot:** maps `WEB_FETCH`→`fetch_webpage` through the SDK's
+  `available_tools` allowlist. No hosted web-*search* built-in, so `WEB_SEARCH`
+  is declined. Because `available_tools` is an allowlist (once any tool is
+  allowed, unlisted built-ins are implicitly off), a native request unions the
+  name into an existing allowlist and drops it from any denylist — but when no
+  allowlist is set it's left untouched (the built-in is on by default).
+- **OpenCode:** maps `WEB_SEARCH`→`websearch`, `WEB_FETCH`→`webfetch` into the
+  chat `tools=` allow-map (server-side execution). The native request
+  force-enables the name (overriding any denylist). Note OpenCode's allow-map
+  semantics: enabling a tool implies "everything else off", so a consumer who
+  also needs other built-ins alongside a native tool should list them in
+  `OpenCodeServerOptions.available_tools`.
+- **Kimi:** declined today — it exposes a hosted `$web_search`, but its SDK has
+  no verified builtin-function channel (and can't co-install with Claude);
+  wiring is tracked as a follow-up.
 - **OpenAI-compat / Bedrock:** permanently declined on the Chat Completions /
   Converse surfaces; OpenAI's `web_search` etc. are Responses-API tools, the
   home of a future `OpenAIResponsesRuntime`.

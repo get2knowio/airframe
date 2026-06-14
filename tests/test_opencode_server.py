@@ -75,6 +75,8 @@ def test_iteration_e_supported_features() -> None:
         Feature.BUDGET_TURN_CAP,
         # Phase 6: filesystem-only discovery is adapter-agnostic.
         Feature.SLASH_COMMANDS,
+        # Native web tools: the server runs websearch/webfetch built-ins.
+        Feature.TOOLS_NATIVE,
     }
     rt = OpenCodeServerRuntime()
     assert rt.supports(Feature.LIFECYCLE_HOOKS)

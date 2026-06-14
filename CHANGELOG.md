@@ -8,6 +8,30 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.9.0rc3] — 2026-06-14
+
+### Added
+
+- **Native (vendor-hosted) web tools on Copilot + OpenCode.** Following
+  the `Feature.TOOLS_NATIVE` abstraction shipped in rc2 (Claude-only),
+  two more adapters now serve hosted web tools through the same portable
+  `session(native_tools=[...])` surface:
+  - **Copilot** serves `WEB_FETCH` (→ the hosted `fetch_webpage`
+    built-in) via the SDK's `available_tools` allowlist. No hosted
+    web-*search* tool, so `WEB_SEARCH` is declined. A native request
+    unions the name into an existing allowlist and clears it from any
+    denylist; with no allowlist set it's left on by default (so other
+    built-ins aren't disabled).
+  - **OpenCode** serves `WEB_SEARCH` + `WEB_FETCH` (→ `websearch` /
+    `webfetch`) by force-enabling them in the chat `tools=` allow-map,
+    overriding any denylist.
+  Both declare `Feature.TOOLS_NATIVE` and report their served set via
+  `supported_native_tools()`. **Kimi** still declines — its hosted
+  `$web_search` has no verified SDK channel and can't co-install with
+  Claude; tracked as a follow-up.
+
+---
+
 ## [0.9.0rc2] — 2026-06-12
 
 ### Added
