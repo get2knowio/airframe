@@ -425,19 +425,27 @@ def _make_bedrock_client(
     summaries: list[dict[str, Any]] | None = None,
     *,
     raise_on_call: Exception | None = None,
+    profiles: list[dict[str, Any]] | None = None,
+    profiles_raise: Exception | None = None,
 ) -> tuple[MagicMock, MagicMock]:
     """Build a stand-in for ``aioboto3.Session().client("bedrock")``.
 
     Returns ``(session_factory, client)`` — the factory replaces
     ``aioboto3.Session`` so the test can assert how the runtime
     constructs the session, and the client carries the stub
-    ``list_foundation_models`` coroutine.
+    ``list_foundation_models`` + ``list_inference_profiles`` coroutines.
     """
     client = MagicMock()
     if raise_on_call is not None:
         client.list_foundation_models = AsyncMock(side_effect=raise_on_call)
     else:
         client.list_foundation_models = AsyncMock(return_value={"modelSummaries": summaries or []})
+    if profiles_raise is not None:
+        client.list_inference_profiles = AsyncMock(side_effect=profiles_raise)
+    else:
+        client.list_inference_profiles = AsyncMock(
+            return_value={"inferenceProfileSummaries": profiles or []}
+        )
     # `async with session.client(...) as c:` requires the returned object
     # to implement the async context-manager protocol.
     client_cm = MagicMock()
@@ -588,6 +596,125 @@ async def test_list_models_skips_summaries_without_model_id(
     rt = BedrockRuntime()
     models = await rt.list_models()
     assert [m.id for m in models] == ["ok.model-v1:0"]
+
+
+# ---------------------------------------------------------------------------
+# list_models — inference profiles
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_list_models_appends_active_inference_profiles(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ACTIVE profiles are appended with their invokable id; the underlying
+    foundation-model entry's capabilities + base metadata are inherited."""
+    import aioboto3
+
+    factory, _client = _make_bedrock_client(
+        summaries=[
+            {
+                "modelId": "anthropic.claude-3-5-haiku-20241022-v1:0",
+                "modelName": "Claude 3.5 Haiku",
+                "inputModalities": ["TEXT", "IMAGE"],
+                "outputModalities": ["TEXT"],
+                "responseStreamingSupported": True,
+            },
+        ],
+        profiles=[
+            {
+                "inferenceProfileId": "us.anthropic.claude-3-5-haiku-20241022-v1:0",
+                "inferenceProfileName": "US Claude 3.5 Haiku",
+                "status": "ACTIVE",
+            },
+            {
+                "inferenceProfileId": "us.anthropic.claude-sonnet-4-20250514-v1:0",
+                "status": "INACTIVE",  # filtered out
+            },
+        ],
+    )
+    monkeypatch.setattr(aioboto3, "Session", factory)
+    monkeypatch.setenv("AWS_REGION", "us-east-1")
+    rt = BedrockRuntime()
+    models = await rt.list_models()
+    by_id = {m.id: m for m in models}
+
+    # Base foundation id present (non-invokable on-demand) AND the profile.
+    assert "anthropic.claude-3-5-haiku-20241022-v1:0" in by_id
+    profile = by_id.get("us.anthropic.claude-3-5-haiku-20241022-v1:0")
+    assert profile is not None, "ACTIVE inference profile should be appended"
+    assert profile.provider_id == "bedrock"
+    assert profile.display_name == "US Claude 3.5 Haiku"
+    # Inherited base metadata (context window) + base capabilities.
+    assert profile.context_window == 200_000
+    assert CAPABILITY_VISION in profile.capabilities
+    assert CAPABILITY_STREAMING in profile.capabilities
+    # The INACTIVE profile is excluded.
+    assert "us.anthropic.claude-sonnet-4-20250514-v1:0" not in by_id
+    # raw carries the profile summary for diagnostics.
+    assert profile.raw.get("status") == "ACTIVE"
+
+
+@pytest.mark.asyncio
+async def test_list_models_profile_without_known_base_still_surfaces(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A profile whose base model isn't in the curated table still appears,
+    falling back to its id for display and empty enrichment."""
+    import aioboto3
+
+    factory, _client = _make_bedrock_client(
+        summaries=[],
+        profiles=[
+            {
+                "inferenceProfileId": "global.anthropic.claude-fable-5",
+                "status": "ACTIVE",
+            },
+        ],
+    )
+    monkeypatch.setattr(aioboto3, "Session", factory)
+    monkeypatch.setenv("AWS_REGION", "us-east-1")
+    rt = BedrockRuntime()
+    models = await rt.list_models()
+    by_id = {m.id: m for m in models}
+    info = by_id["global.anthropic.claude-fable-5"]
+    assert info.display_name == "global.anthropic.claude-fable-5"
+    assert info.context_window is None
+    assert info.capabilities == frozenset()
+
+
+@pytest.mark.asyncio
+async def test_list_models_best_effort_when_profiles_call_denied(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failing ``list_inference_profiles`` (e.g. AccessDenied) degrades to
+    the foundation-model list rather than failing ``list_models()``."""
+    import aioboto3
+
+    factory, _client = _make_bedrock_client(
+        summaries=[{"modelId": "anthropic.claude-3-opus-20240229-v1:0", "modelName": "Opus"}],
+        profiles_raise=RuntimeError("AccessDeniedException: ListInferenceProfiles"),
+    )
+    monkeypatch.setattr(aioboto3, "Session", factory)
+    monkeypatch.setenv("AWS_REGION", "us-east-1")
+    rt = BedrockRuntime()
+    models = await rt.list_models()
+    assert [m.id for m in models] == ["anthropic.claude-3-opus-20240229-v1:0"]
+
+
+def test_base_model_id_from_profile_strips_geo_prefix() -> None:
+    from airframe.adapters.bedrock import _base_model_id_from_profile
+
+    assert (
+        _base_model_id_from_profile("us.anthropic.claude-haiku-4-5-20251001-v1:0")
+        == "anthropic.claude-haiku-4-5-20251001-v1:0"
+    )
+    assert (
+        _base_model_id_from_profile("global.anthropic.claude-sonnet-4-6")
+        == "anthropic.claude-sonnet-4-6"
+    )
+    # A bare foundation-model id (no geo prefix) is not mis-stripped.
+    assert _base_model_id_from_profile("anthropic.claude-3-opus-20240229-v1:0") is None
 
 
 # ---------------------------------------------------------------------------

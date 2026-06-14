@@ -665,10 +665,27 @@ class BedrockRuntime(AgentRuntime):
         on the resolved AWS region and identity. Embedding-only models
         are filtered out server-side by the modality argument.
 
+        **Inference profiles are included.** Many modern Bedrock models
+        (e.g. the current Anthropic Claude line) are invokable *only* via
+        a cross-region inference profile (``us.anthropic.*`` /
+        ``global.anthropic.*``), not on-demand against the bare
+        foundation-model id. ``list_foundation_models`` returns those
+        bare ids (which can't be passed to Converse), so this method also
+        calls ``list_inference_profiles`` and appends an entry for each
+        ACTIVE profile — its ``id`` is the invokable
+        ``inferenceProfileId``, and it inherits display/capability
+        enrichment from the underlying base model. A consumer picking a
+        model from ``list_models()`` therefore gets ids it can actually
+        invoke. The profile call is best-effort: if the identity lacks
+        ``bedrock:ListInferenceProfiles`` (or the call otherwise fails),
+        the foundation-model list is returned without it rather than
+        failing the whole call.
+
         Note: ``bedrock`` (the control-plane / catalog client) is
         distinct from ``bedrock-runtime`` (the model-invocation client)
-        — only the former exposes ``list_foundation_models``. This call
-        does *not* reuse the runtime-level bedrock-runtime client.
+        — only the former exposes ``list_foundation_models`` /
+        ``list_inference_profiles``. This call does *not* reuse the
+        runtime-level bedrock-runtime client.
 
         Raises:
             RuntimeAuthError: When AWS credentials are missing /
@@ -699,11 +716,15 @@ class BedrockRuntime(AgentRuntime):
             session = aioboto3.Session(**session_kwargs)
             async with session.client("bedrock", region_name=region) as client:
                 payload = await client.list_foundation_models(byOutputModality="TEXT")
+                profile_summaries = await _list_inference_profiles_safe(client)
         except Exception as exc:  # noqa: BLE001 — classify at boundary
             raise _classify_bedrock_error(exc) from exc
 
         summaries = payload.get("modelSummaries", []) if isinstance(payload, dict) else []
         out: list[ModelInfo] = []
+        # base model id -> inferred capabilities, so inference-profile
+        # entries can inherit modality/streaming caps from their base.
+        caps_by_id: dict[str, frozenset[str]] = {}
         for entry in summaries:
             model_id = entry.get("modelId")
             if not isinstance(model_id, str) or not model_id:
@@ -716,6 +737,7 @@ class BedrockRuntime(AgentRuntime):
             capabilities = _infer_capabilities(entry)
             if meta is not None:
                 capabilities = meta.capabilities | capabilities
+            caps_by_id[model_id] = capabilities
             out.append(
                 ModelInfo(
                     id=model_id,
@@ -728,6 +750,11 @@ class BedrockRuntime(AgentRuntime):
                     raw=entry,
                 )
             )
+
+        for summary in profile_summaries:
+            info = _inference_profile_to_model_info(summary, self.PROVIDER_ID, caps_by_id)
+            if info is not None:
+                out.append(info)
         return out
 
     # --- Internals ----------------------------------------------------------
@@ -2088,6 +2115,93 @@ def _infer_capabilities(entry: dict[str, Any]) -> frozenset[str]:
     if isinstance(input_modalities, list) and "IMAGE" in input_modalities:
         caps.add(CAPABILITY_VISION)
     return frozenset(caps)
+
+
+#: Leading geography segment of a cross-region inference-profile id
+#: (``us.anthropic.claude-...``, ``global.anthropic.claude-...``). Used to
+#: recover the underlying base model id for metadata enrichment.
+_INFERENCE_PROFILE_GEO_PREFIXES: frozenset[str] = frozenset(
+    {"us", "eu", "apac", "global", "us-gov", "jp", "au"}
+)
+
+
+def _base_model_id_from_profile(profile_id: str) -> str | None:
+    """Return the base foundation-model id behind an inference-profile id.
+
+    ``us.anthropic.claude-haiku-4-5-20251001-v1:0`` →
+    ``anthropic.claude-haiku-4-5-20251001-v1:0``. Returns ``None`` when the
+    id doesn't carry a recognised geo prefix (so we don't mis-strip a bare
+    foundation-model id).
+    """
+    head, sep, rest = profile_id.partition(".")
+    if sep and head in _INFERENCE_PROFILE_GEO_PREFIXES and rest:
+        return rest
+    return None
+
+
+async def _list_inference_profiles_safe(client: Any) -> list[dict[str, Any]]:
+    """Return ACTIVE inference-profile summaries, or ``[]`` on any failure.
+
+    Best-effort: an identity without ``bedrock:ListInferenceProfiles`` (or
+    a region that doesn't expose the API) should degrade to a plain
+    foundation-model list, not fail ``list_models()`` wholesale. Paginates
+    via ``nextToken``.
+    """
+    summaries: list[dict[str, Any]] = []
+    next_token: str | None = None
+    try:
+        while True:
+            kwargs: dict[str, Any] = {"maxResults": 100}
+            if next_token:
+                kwargs["nextToken"] = next_token
+            payload = await client.list_inference_profiles(**kwargs)
+            if not isinstance(payload, dict):
+                break
+            for summary in payload.get("inferenceProfileSummaries", []):
+                if isinstance(summary, dict) and summary.get("status") == "ACTIVE":
+                    summaries.append(summary)
+            next_token = payload.get("nextToken")
+            if not next_token:
+                break
+    except Exception:  # noqa: BLE001 — best-effort enrichment; never fatal
+        return summaries
+    return summaries
+
+
+def _inference_profile_to_model_info(
+    summary: dict[str, Any],
+    provider_id: str,
+    caps_by_id: dict[str, frozenset[str]],
+) -> ModelInfo | None:
+    """Build a ``ModelInfo`` for one ACTIVE inference-profile summary.
+
+    The ``id`` is the invokable ``inferenceProfileId``. Display name,
+    context window, and pricing are inherited from the underlying base
+    model's curated metadata; capabilities are inherited from the base
+    model's live foundation-model entry (``caps_by_id``) when present.
+    """
+    profile_id = summary.get("inferenceProfileId")
+    if not isinstance(profile_id, str) or not profile_id:
+        return None
+    base_id = _base_model_id_from_profile(profile_id)
+    meta = _BEDROCK_METADATA.get(base_id) if base_id else None
+    pricing = _BEDROCK_PRICING.get(base_id) if base_id else None
+    display_name = summary.get("inferenceProfileName") or (
+        f"{meta.display_name} [inference profile]" if meta is not None else profile_id
+    )
+    capabilities = caps_by_id.get(base_id, frozenset()) if base_id else frozenset()
+    if meta is not None:
+        capabilities = meta.capabilities | capabilities
+    return ModelInfo(
+        id=profile_id,
+        display_name=display_name,
+        provider_id=provider_id,
+        context_window=meta.context_window if meta is not None else None,
+        pricing_input_per_1k_usd=pricing[0] if pricing is not None else None,
+        pricing_output_per_1k_usd=pricing[1] if pricing is not None else None,
+        capabilities=capabilities,
+        raw=summary,
+    )
 
 
 def _classify_bedrock_error(exc: Exception) -> Exception:
