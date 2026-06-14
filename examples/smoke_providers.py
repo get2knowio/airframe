@@ -105,8 +105,7 @@ class Answer(BaseModel):
 
 STRUCTURED_PROMPT = "What is 17 + 25? Reply with the integer answer and a one-line rationale."
 NATIVE_PROMPT = (
-    "Use your web tool to look up the latest stable Python version, "
-    "then answer in one sentence."
+    "Use your web tool to look up the latest stable Python version, then answer in one sentence."
 )
 
 
@@ -153,6 +152,78 @@ def model_for(pid: str) -> ProviderModel | None:
     return ProviderModel(pid, mid) if mid else None
 
 
+async def _bedrock_pick_model(runtime) -> str | None:
+    """Probe Bedrock for a model id that's actually invokable right now.
+
+    Bedrock is the one provider whose adapter default can't be trusted to
+    run: modern Anthropic models are invokable only via a cross-region
+    *inference profile* (``us.anthropic.*`` / ``global.anthropic.*``), not
+    on-demand — and even the older ``ON_DEMAND`` base ids need per-model
+    access granted in the account. ``list_inference_profiles()`` is the
+    reliable "invokable now" signal (it returns only profiles that exist
+    and are ACTIVE), so we pick the cheapest ACTIVE Anthropic profile
+    (haiku, regional before global). Returns ``None`` if none is found —
+    the caller then falls back to the adapter default.
+
+    Note: airframe's ``list_models()`` wraps ``list_foundation_models``,
+    which surfaces base ids + ``inferenceTypesSupported`` but NOT the
+    invokable inference-profile ids — hence the direct control-plane call
+    here. See the per-provider notes printed by this probe.
+    """
+    try:
+        import aioboto3
+    except ImportError:
+        return None
+    region = (
+        runtime._resolve_region()
+        if hasattr(runtime, "_resolve_region")
+        else os.environ.get("AWS_REGION")
+    )
+    if not region:
+        return None
+    try:
+        creds = (
+            runtime._resolve_aws_credentials()
+            if hasattr(runtime, "_resolve_aws_credentials")
+            else {}
+        )
+        session = aioboto3.Session(**creds)
+        async with session.client("bedrock", region_name=region) as client:
+            payload = await client.list_inference_profiles()
+    except Exception:  # noqa: BLE001 — best-effort discovery; fall back to default
+        return None
+    actives = [
+        p.get("inferenceProfileId", "")
+        for p in payload.get("inferenceProfileSummaries", [])
+        if p.get("status") == "ACTIVE" and "anthropic" in p.get("inferenceProfileId", "").lower()
+    ]
+
+    def rank(pid: str) -> tuple[int, int, int]:
+        # Legacy Claude 3 / 3.5 profiles are often access-gated ("marked as
+        # Legacy") even when ACTIVE — push them last. Then prefer haiku
+        # (cheapest), then regional (us.) over global.
+        legacy = 1 if ".claude-3-" in pid or pid.endswith(".claude-3") else 0
+        family = 0 if "haiku" in pid else (1 if "sonnet" in pid else 2)
+        scope = 0 if pid.startswith("us.") else 1
+        return (legacy, family, scope)
+
+    actives.sort(key=rank)
+    return actives[0] if actives else None
+
+
+async def resolve_model(runtime, pid: str) -> ProviderModel | None:
+    """Model to use for ``pid``: explicit env override wins, else a probed
+    invokable model for Bedrock, else ``None`` (the adapter default)."""
+    override = model_for(pid)
+    if override is not None:
+        return override
+    if pid == "bedrock":
+        mid = await _bedrock_pick_model(runtime)
+        if mid:
+            return ProviderModel("bedrock", mid)
+    return None
+
+
 def build_runtime(pid: str):
     cls = runtime_for(pid)
     try:
@@ -168,11 +239,9 @@ def build_runtime(pid: str):
 
 
 # --- Exercises --------------------------------------------------------------
-async def exercise_structured(runtime, pid: str) -> tuple[str, str, str]:
+async def exercise_structured(runtime, model: ProviderModel | None) -> tuple[str, str, str]:
     t0 = time.monotonic()
-    res = await runtime.execute(
-        STRUCTURED_PROMPT, schema=Answer, model=model_for(pid), timeout=120
-    )
+    res = await runtime.execute(STRUCTURED_PROMPT, schema=Answer, model=model, timeout=120)
     dt = time.monotonic() - t0
     ans = (res.structured or {}).get("answer")
     cost = f"${res.cost.cost_usd:.4f}" if res.cost.cost_usd is not None else "cost=n/a"
@@ -184,16 +253,14 @@ async def exercise_structured(runtime, pid: str) -> tuple[str, str, str]:
     )
 
 
-async def exercise_native(runtime, pid: str) -> tuple[str, str, str]:
-    served = runtime.supported_native_tools(model_for(pid))
+async def exercise_native(runtime, model: ProviderModel | None) -> tuple[str, str, str]:
+    served = runtime.supported_native_tools(model)
     if not served:
         return ("native-web-tools", "N/A", "serves no native tools")
     cap = (
-        NativeCapability.WEB_SEARCH
-        if NativeCapability.WEB_SEARCH in served
-        else sorted(served)[0]
+        NativeCapability.WEB_SEARCH if NativeCapability.WEB_SEARCH in served else sorted(served)[0]
     )
-    sess = runtime.session(native_tools=[NativeTool(capability=cap)], model=model_for(pid))
+    sess = runtime.session(native_tools=[NativeTool(capability=cap)], model=model)
     tool_calls, chars = 0, 0
     t0 = time.monotonic()
     try:
@@ -209,7 +276,11 @@ async def exercise_native(runtime, pid: str) -> tuple[str, str, str]:
     dt = time.monotonic() - t0
     status = "PASS" if tool_calls > 0 else "WARN"
     note = "" if tool_calls > 0 else " (answered without calling the web tool)"
-    return (f"native:{cap.value}", status, f"tool_calls={tool_calls} chars={chars} {dt:.1f}s{note}")
+    return (
+        f"native:{cap.value}",
+        status,
+        f"tool_calls={tool_calls} chars={chars} {dt:.1f}s{note}",
+    )
 
 
 async def run_provider(pid: str, *, do_native: bool) -> list[tuple[str, str, str]]:
@@ -219,13 +290,16 @@ async def run_provider(pid: str, *, do_native: bool) -> list[tuple[str, str, str
     except Exception as exc:  # noqa: BLE001
         return [("construct", "FAIL", f"{type(exc).__name__}: {exc}")]
     try:
-        declared = " ".join(
-            f.name.lower() for f in DISPLAY_FEATURES if runtime.supports(f)
-        )
+        declared = " ".join(f.name.lower() for f in DISPLAY_FEATURES if runtime.supports(f))
         rows.append(("declares", "INFO", declared or "(none)"))
 
+        model = await resolve_model(runtime, pid)
+        if model is not None:
+            origin = "env override" if model_for(pid) is not None else "auto-probed"
+            rows.append(("model", "INFO", f"{model.model_id} ({origin})"))
+
         try:
-            rows.append(await exercise_structured(runtime, pid))
+            rows.append(await exercise_structured(runtime, model))
         except RuntimeAuthError as exc:
             rows.append(("structured-output", "SKIP", f"auth rejected: {exc}"))
         except Exception as exc:  # noqa: BLE001
@@ -233,7 +307,7 @@ async def run_provider(pid: str, *, do_native: bool) -> list[tuple[str, str, str
 
         if do_native and runtime.supports(Feature.TOOLS_NATIVE):
             try:
-                rows.append(await exercise_native(runtime, pid))
+                rows.append(await exercise_native(runtime, model))
             except RuntimeAuthError as exc:
                 rows.append(("native-web-tools", "SKIP", f"auth rejected: {exc}"))
             except Exception as exc:  # noqa: BLE001
@@ -295,7 +369,9 @@ async def main() -> int:
         authed, detail = credential_status(pid)
         if pid not in installed:
             extra = EXTRA_FOR.get(pid, pid)
-            print(f"  SKIP  {pid:<16} adapter not installed (pip install airframe-agents[{extra}])")
+            print(
+                f"  SKIP  {pid:<16} adapter not installed (pip install airframe-agents[{extra}])"
+            )
         elif not authed:
             print(f"  SKIP  {pid:<16} no credentials — {detail}")
         else:
