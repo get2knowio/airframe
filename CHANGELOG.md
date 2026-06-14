@@ -71,6 +71,18 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   foundation-model list instead of failing. Consumers selecting a model
   through the discovery abstraction now get ids they can actually invoke.
 
+### Fixed
+
+- **`OpenCodeServerRuntime.execute()` now returns the assistant's body
+  text.** The non-streaming `execute()` previously returned an empty
+  `.text` — the `opencode-ai` 0.1.0a36 `AssistantMessage` from `chat()`
+  carries only metadata (tokens/cost), with body text living on the
+  message parts. `execute()` now fetches those parts via
+  `client.session.messages()` and assembles the latest assistant
+  message's text. Cost/finish metadata is still sourced from the
+  `chat()` message; the parts fetch is best-effort (failure falls back
+  to the prior summary-or-empty behaviour). `stream()` is unchanged.
+
 ### Changed
 
 - **Minimum Python is now 3.12** (was 3.11). `requires-python`,
