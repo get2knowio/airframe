@@ -152,51 +152,33 @@ def model_for(pid: str) -> ProviderModel | None:
     return ProviderModel(pid, mid) if mid else None
 
 
+_BEDROCK_PROFILE_GEOS = ("us.", "eu.", "apac.", "global.")
+
+
 async def _bedrock_pick_model(runtime) -> str | None:
-    """Probe Bedrock for a model id that's actually invokable right now.
+    """Pick an actually-invokable Bedrock model via the discovery abstraction.
 
     Bedrock is the one provider whose adapter default can't be trusted to
     run: modern Anthropic models are invokable only via a cross-region
     *inference profile* (``us.anthropic.*`` / ``global.anthropic.*``), not
-    on-demand — and even the older ``ON_DEMAND`` base ids need per-model
-    access granted in the account. ``list_inference_profiles()`` is the
-    reliable "invokable now" signal (it returns only profiles that exist
-    and are ACTIVE), so we pick the cheapest ACTIVE Anthropic profile
-    (haiku, regional before global). Returns ``None`` if none is found —
-    the caller then falls back to the adapter default.
-
-    Note: airframe's ``list_models()`` wraps ``list_foundation_models``,
-    which surfaces base ids + ``inferenceTypesSupported`` but NOT the
-    invokable inference-profile ids — hence the direct control-plane call
-    here. See the per-provider notes printed by this probe.
+    against the bare foundation-model id. ``BedrockRuntime.list_models()``
+    surfaces those ACTIVE inference profiles as first-class entries, so we
+    select one straight from ``list_models()`` — no provider-specific
+    control-plane call here. Prefer a non-legacy haiku profile, regional
+    (``us.``) over global. Returns ``None`` (use the adapter default) when
+    discovery turns up no profile.
     """
     try:
-        import aioboto3
-    except ImportError:
+        models = await runtime.list_models()
+    except Exception:  # noqa: BLE001 — discovery is best-effort
         return None
-    region = (
-        runtime._resolve_region()
-        if hasattr(runtime, "_resolve_region")
-        else os.environ.get("AWS_REGION")
-    )
-    if not region:
-        return None
-    try:
-        creds = (
-            runtime._resolve_aws_credentials()
-            if hasattr(runtime, "_resolve_aws_credentials")
-            else {}
-        )
-        session = aioboto3.Session(**creds)
-        async with session.client("bedrock", region_name=region) as client:
-            payload = await client.list_inference_profiles()
-    except Exception:  # noqa: BLE001 — best-effort discovery; fall back to default
-        return None
-    actives = [
-        p.get("inferenceProfileId", "")
-        for p in payload.get("inferenceProfileSummaries", [])
-        if p.get("status") == "ACTIVE" and "anthropic" in p.get("inferenceProfileId", "").lower()
+    profiles = [
+        m.id
+        for m in models
+        if m.id.lower().startswith(_BEDROCK_PROFILE_GEOS) and "anthropic" in m.id.lower()
     ]
+    if not profiles:
+        return None
 
     def rank(pid: str) -> tuple[int, int, int]:
         # Legacy Claude 3 / 3.5 profiles are often access-gated ("marked as
@@ -207,8 +189,8 @@ async def _bedrock_pick_model(runtime) -> str | None:
         scope = 0 if pid.startswith("us.") else 1
         return (legacy, family, scope)
 
-    actives.sort(key=rank)
-    return actives[0] if actives else None
+    profiles.sort(key=rank)
+    return profiles[0]
 
 
 async def resolve_model(runtime, pid: str) -> ProviderModel | None:
