@@ -225,10 +225,27 @@ def build_runtime(pid: str):
 
 
 # --- Exercises --------------------------------------------------------------
-async def _text_roundtrip(runtime, model: ProviderModel | None) -> bool:
-    """Plain-text fallback: did the model answer 42?"""
+async def _roundtrip_text(runtime, model: ProviderModel | None) -> str:
+    """Plain-text round-trip; returns the assistant text.
+
+    Prefers the simple non-streaming ``execute()``. Some adapters (the
+    opencode HTTP server today) don't surface body text on ``execute()`` —
+    only as text-deltas on ``stream()`` — so fall back to streaming when
+    ``execute()`` returns empty text.
+    """
     res = await runtime.execute(STRUCTURED_PROMPT, model=model, timeout=120)
-    return "42" in (res.text or "")
+    txt = res.text or ""
+    if txt.strip() or not runtime.supports(Feature.STREAMING):
+        return txt
+    parts: list[str] = []
+    sess = runtime.session(model=model)
+    try:
+        async for ev in sess.stream(STRUCTURED_PROMPT):
+            if isinstance(ev, TextDelta):
+                parts.append(ev.text)
+    finally:
+        await sess.close()
+    return "".join(parts)
 
 
 async def exercise_structured(runtime, model: ProviderModel | None) -> tuple[str, str, str]:
@@ -237,13 +254,15 @@ async def exercise_structured(runtime, model: ProviderModel | None) -> tuple[str
     # opencode HTTP server, pending an SDK gap) — don't attempt a schema call.
     # Prove reachability with a text round-trip and report N/A.
     if not runtime.supports(Feature.STRUCTURED_OUTPUT_JSON_SCHEMA):
-        ok = await _text_roundtrip(runtime, model)
+        txt = await _roundtrip_text(runtime, model)
         dt = time.monotonic() - t0
+        if not txt.strip():
+            return ("structured-output", "FAIL", f"no text output {dt:.1f}s")
+        note = "answered 42" if "42" in txt else f"reachable, {len(txt)} chars (no clear '42')"
         return (
             "structured-output",
-            "N/A" if ok else "FAIL",
-            f"provider declines json_schema; text round-trip "
-            f"{'OK' if ok else 'UNEXPECTED'} {dt:.1f}s",
+            "N/A",
+            f"provider declines json_schema; text round-trip {note} {dt:.1f}s",
         )
     try:
         res = await runtime.execute(STRUCTURED_PROMPT, schema=Answer, model=model, timeout=120)
@@ -253,8 +272,9 @@ async def exercise_structured(runtime, model: ProviderModel | None) -> tuple[str
         # many upstreams, some of which don't honour json_schema. Not a
         # provider failure: fall back to a plain-text round-trip so the smoke
         # still proves the model is reachable + answering, and report WARN.
-        ok = await _text_roundtrip(runtime, model)
+        txt = await _roundtrip_text(runtime, model)
         dt = time.monotonic() - t0
+        ok = "42" in txt
         reason = str(exc).split(":", 2)[-1].strip()[:60]
         return (
             "structured-output",
