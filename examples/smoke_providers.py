@@ -56,7 +56,7 @@ from airframe import (  # noqa: E402
     list_providers,
     runtime_for,
 )
-from airframe.errors import RuntimeAuthError  # noqa: E402
+from airframe.errors import RuntimeAuthError, RuntimeStructuredOutputError  # noqa: E402
 from airframe.events import TextDelta, ToolCallStart, TurnComplete  # noqa: E402
 
 # --- Provider registry ------------------------------------------------------
@@ -223,7 +223,24 @@ def build_runtime(pid: str):
 # --- Exercises --------------------------------------------------------------
 async def exercise_structured(runtime, model: ProviderModel | None) -> tuple[str, str, str]:
     t0 = time.monotonic()
-    res = await runtime.execute(STRUCTURED_PROMPT, schema=Answer, model=model, timeout=120)
+    try:
+        res = await runtime.execute(STRUCTURED_PROMPT, schema=Answer, model=model, timeout=120)
+    except RuntimeStructuredOutputError as exc:
+        # The provider declares structured output, but THIS model rejects
+        # response_format — common on gateways (e.g. OpenCode Zen) that front
+        # many upstreams, some of which don't honour json_schema. Not a
+        # provider failure: fall back to a plain-text round-trip so the smoke
+        # still proves the model is reachable + answering, and report WARN.
+        res = await runtime.execute(STRUCTURED_PROMPT, model=model, timeout=120)
+        dt = time.monotonic() - t0
+        ok = "42" in (res.text or "")
+        reason = str(exc).split(":", 2)[-1].strip()[:60]
+        return (
+            "structured-output",
+            "WARN" if ok else "FAIL",
+            f"model declined response_format ({reason}); "
+            f"text round-trip {'OK' if ok else 'UNEXPECTED'} {dt:.1f}s",
+        )
     dt = time.monotonic() - t0
     ans = (res.structured or {}).get("answer")
     cost = f"${res.cost.cost_usd:.4f}" if res.cost.cost_usd is not None else "cost=n/a"
