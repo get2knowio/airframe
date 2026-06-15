@@ -77,7 +77,7 @@ opencode = ["opencode-ai>=0.1.0a36,<0.2"]
 # `airframe.testing.contracts` conformance suite against their own
 # adapter. The main package does not depend on pytest.
 testing = [
-    "pytest>=8.2.0,<9",
+    "pytest>=8.2.0,<10",
     "pytest-asyncio>=0.24.0,<2",
 ]
 # "Batteries included" — installs every co-installable adapter SDK.
@@ -111,7 +111,7 @@ Changelog = "https://github.com/get2knowio/airframe/blob/main/CHANGELOG.md"
 
 [dependency-groups]
 test = [
-    "pytest>=8.2.0,<9",
+    "pytest>=8.2.0,<10",
     "pytest-asyncio>=0.24.0,<2",
     "pytest-cov>=4.0.0,<8",
     "pytest-timeout>=2.0.0,<3",
