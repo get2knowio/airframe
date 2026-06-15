@@ -285,6 +285,32 @@ def test_execute_aggregates_text_parts_and_returns_runtime_result(
     asyncio.run(sess.close())
 
 
+def test_runtime_execute_delegates_to_session_and_tears_it_down(
+    patch_sdk: dict[str, Any],
+) -> None:
+    """``KimiRuntime.execute()`` is sugar: it opens an ephemeral session,
+    runs the turn through it, and closes it (mirrors every other adapter)."""
+    from airframe.adapters.kimi import KimiRuntime
+
+    fake = _FakeSdkSession(
+        wire_messages=[
+            _wire("TextPart", text="42"),
+            _wire("TokenUsage", input_tokens=3, output_tokens=1),
+        ]
+    )
+    patch_sdk["sdk_session"] = fake
+
+    rt = KimiRuntime(api_key="sk-test")
+    result = asyncio.run(rt.execute("What is 17 + 25?"))
+
+    assert result.text == "42"
+    assert result.structured is None
+    assert result.cost.provider_id == "kimi"
+    # Exactly one ephemeral SDK session was created, and it was torn down.
+    assert len(patch_sdk["create_calls"]) == 1
+    assert fake.closed is True
+
+
 def test_execute_translates_thinkpart_to_reasoning_state(
     patch_sdk: dict[str, Any],
 ) -> None:

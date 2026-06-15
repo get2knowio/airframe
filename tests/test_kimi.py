@@ -21,8 +21,9 @@ This file covers what Iteration A ships:
 * ``unwrap()`` returns ``self`` for own type and raises ``TypeError``
   for everything else.
 * ``close()`` / ``reset()`` are idempotent and never raise.
-* ``execute()`` raises :class:`NotImplementedError` with a message
-  pointing at Iteration B.
+* ``execute()`` is sugar over an ephemeral session (delegates to
+  :meth:`KimiSession.execute`); behavioural coverage lives in
+  ``test_kimi_session.py``.
 * ``list_models()`` returns the curated fallback catalogue.
 """
 

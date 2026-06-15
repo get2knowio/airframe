@@ -604,15 +604,16 @@ class KimiRuntime(AgentRuntime):
         metadata: RequestMetadata | None = None,
         cache: CacheConfig | None = None,
     ) -> RuntimeResult:
-        # Iteration A scaffold: the protocol surface is in place but no
-        # behaviour is wired. Iteration B replaces this body with the
-        # real kimi-agent-sdk Session-driven implementation.
-        del prompt, schema, system, persona, model, thinking, timeout, metadata, cache
-        raise NotImplementedError(
-            "KimiRuntime.execute() is not yet wired — Iteration B of the "
-            "Kimi adapter plan (dev-docs/kimi-adapter-plan.md) lands the "
-            "kimi-agent-sdk Session-backed execute / stream / cancel slice."
-        )
+        # Documented sugar for ``runtime.session(...).execute(...) + close()``.
+        # The substantive work lives on KimiSession (lazily SDK-backed); this
+        # one-shot sugar opens an ephemeral session, runs the turn, and tears
+        # it down — mirroring every other adapter's runtime execute().
+        del persona  # accepted on the protocol but not consumed here
+        sess = self.session(system=system, model=model, metadata=metadata, cache=cache)
+        try:
+            return await sess.execute(prompt, schema=schema, thinking=thinking, timeout=timeout)
+        finally:
+            await sess.close()
 
     async def reset(self) -> None:
         # Sessionless at the runtime level — sessions own their own state.
@@ -641,8 +642,9 @@ class KimiRuntime(AgentRuntime):
             return self  # type: ignore[return-value]
         raise TypeError(
             f"KimiRuntime cannot unwrap to {cls!r}; only KimiRuntime is "
-            f"supported on the runtime today. Iteration B adds session-"
-            f"level unwrap to the underlying kimi_agent_sdk.Session."
+            f"supported at the runtime level. The underlying "
+            f"kimi_agent_sdk.Session is reachable via KimiSession.unwrap() "
+            f"once a session is open."
         )
 
     def session(
