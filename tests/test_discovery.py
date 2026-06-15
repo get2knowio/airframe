@@ -43,18 +43,20 @@ def _stub_find_spec(monkeypatch: pytest.MonkeyPatch, available: set[str]) -> Non
 
 
 def test_list_providers_returns_all_when_installed_only_false() -> None:
-    """``installed_only=False`` surfaces every adapter's PROVIDER_ID."""
+    """``installed_only=False`` surfaces every *registered* adapter's
+    PROVIDER_ID. ``kimi`` is intentionally absent — it's disabled from
+    discovery pending the kimi-agent-sdk mcp-pin alignment (#29)."""
     providers = list_providers(installed_only=False)
     assert set(providers) == {
         "bedrock",
         "claude",
         "github-copilot",
-        "kimi",
         "opencode",
         "opencode-zen",
         "opencode-go",
         "openrouter",
     }
+    assert "kimi" not in providers
 
 
 def test_list_providers_sorted_alphabetically() -> None:
@@ -95,12 +97,15 @@ def test_list_providers_filters_when_only_bedrock_installed(
     assert list_providers() == ["bedrock"]
 
 
-def test_list_providers_filters_when_only_kimi_installed(
+def test_kimi_disabled_from_discovery_even_when_sdk_present(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The ``[kimi]`` extra brings ``kimi-agent-sdk`` — gates only ``kimi``."""
+    """``kimi`` is unregistered (#29): even with ``kimi-agent-sdk`` installed,
+    it never surfaces from discovery. Re-enable by restoring the registration
+    in ``discovery._builtin_runtime_classes``."""
     _stub_find_spec(monkeypatch, available={"kimi_agent_sdk"})
-    assert list_providers() == ["kimi"]
+    assert "kimi" not in list_providers()
+    assert "kimi" not in list_providers(installed_only=False)
 
 
 def test_list_providers_filters_when_only_opencode_installed(
@@ -287,12 +292,11 @@ def test_entry_point_adapter_appears_in_list_providers(
     )
     providers = list_providers(installed_only=False)
     assert "fake-third-party" in providers
-    # Built-ins still surface unchanged.
+    # Built-ins still surface unchanged (kimi excluded — disabled, see #29).
     assert {
         "bedrock",
         "claude",
         "github-copilot",
-        "kimi",
         "opencode",
         "opencode-zen",
         "opencode-go",
