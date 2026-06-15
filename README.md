@@ -8,13 +8,13 @@
 **One protocol, every agent SDK.** Vendor-neutral runtime for
 Python AI agents — write once against a small `AgentRuntime`
 protocol and run on AWS Bedrock, Claude Code, GitHub Copilot,
-Moonshot Kimi, the OpenCode HTTP agent server, OpenCode Go,
-OpenCode Zen, or OpenRouter by changing a single config value.
+the OpenCode HTTP agent server, OpenCode Go, OpenCode Zen, or
+OpenRouter by changing a single config value.
 
 ## Quickstart
 
 ```bash
-pip install airframe-agents[claude]   # or [bedrock] / [copilot] / [kimi] / [openai-compat] / [all]
+pip install airframe-agents[claude]   # or [bedrock] / [copilot] / [openai-compat] / [all]
 ```
 
 ```python
@@ -26,7 +26,7 @@ class Brief(BaseModel):
     risks: list[str]
 
 # Provider ID comes from config — YAML, env, CLI flag, whatever.
-provider_id = "claude"  # or bedrock / github-copilot / kimi / opencode / opencode-go / opencode-zen / openrouter
+provider_id = "claude"  # or bedrock / github-copilot / opencode / opencode-go / opencode-zen / openrouter
 
 cls = runtime_for(provider_id)       # discovery lookup by ID
 runtime = cls()                      # auth resolves from env / credential files
@@ -69,7 +69,6 @@ is `airframe`.
 | [`BedrockRuntime`](https://github.com/get2knowio/airframe/blob/main/docs/adapters/bedrock.md) | `bedrock` | `aioboto3` | boto3 chain (env / `AWS_PROFILE` / IAM role) + `AWS_REGION` |
 | [`ClaudeCodeRuntime`](https://github.com/get2knowio/airframe/blob/main/docs/adapters/claude.md) | `claude` | `claude-agent-sdk` | Claude Max OAuth → `~/.claude/credentials.json` → `ANTHROPIC_API_KEY` |
 | [`CopilotRuntime`](https://github.com/get2knowio/airframe/blob/main/docs/adapters/copilot.md) | `github-copilot` | `github-copilot-sdk` | `GITHUB_TOKEN` → `gh auth` |
-| [`KimiRuntime`](https://github.com/get2knowio/airframe/blob/main/docs/adapters/kimi.md) | `kimi` | `kimi-agent-sdk` | `KIMI_API_KEY` (Python 3.12+ only; mcp-version conflict with `[claude]`) |
 | [`OpenCodeGoRuntime`](https://github.com/get2knowio/airframe/blob/main/docs/adapters/opencode-go.md) | `opencode-go` | OpenAI compatible | `OPENCODE_API_KEY` → opencode `auth.json::opencode-go.key` |
 | [`OpenCodeServerRuntime`](https://github.com/get2knowio/airframe/blob/main/docs/adapters/opencode-server.md) | `opencode` | `opencode-ai` | HTTP Basic (loopback unauthenticated; `OPENCODE_SERVER_PASSWORD` for remote) |
 | [`OpenCodeZenRuntime`](https://github.com/get2knowio/airframe/blob/main/docs/adapters/opencode-zen.md) | `opencode-zen` | OpenAI compatible | `OPENCODE_API_KEY` → opencode `auth.json::opencode.key` |
@@ -108,28 +107,28 @@ contract.
 Current snapshot (run
 `uv run python examples/probe_supports.py` for the live version):
 
-| Feature | Bedrock | Claude | Copilot | Kimi | OpenAI-compat | OpenCode |
-|---|---|---|---|---|---|---|
-| `STRUCTURED_OUTPUT_JSON_SCHEMA` | ✓ | ✓ | ✓ | ◐ | ✓ | ✗ (SDK gap) |
-| `STREAMING` / `CANCEL` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `SESSION_RESUME` | ✗ | ✓ | ✓ | ✓ | ✗ | ✓ |
-| `REASONING_EFFORT` | ✓ (Anthropic) | ✓ | ✓ | ✓ (bool) | ✓ | ✓ (per-upstream) |
-| `REASONING_BUDGET_TOKENS` | ✓ (Anthropic) | ✓ | ✗ | ✗ | ✗ | ✓ (Anthropic upstream) |
-| `VISION_INPUT` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `FILE_INPUT` | ✓ (Anthropic) | ✓ | ✓ | ✗ | ✗ | ✓ |
-| `TOOLS_FUNCTION` | ✓ | ✓ | ✓ | ✗ | ✓ | ✗ (SDK gap) |
-| `TOOLS_MCP_STDIO` / `_HTTP` | ✗ | ✓ | ✓ | ✓ | ✗ | ✗ (SDK gap) |
-| `TOOLS_MCP_SSE` | ✗ | ✓ | ✗ | ✓ | ✗ | ✗ (SDK gap) |
-| `PERMISSION_CALLBACK` | ✓ | ✓ | ✓ | ✓ | ✗ | ✗ (SDK gap) |
-| `LIFECYCLE_HOOKS` | ✓ (6 kinds) | ✓ (8 kinds) | ✓ (7 kinds) | ✓ (7 kinds) | ✓ (6 kinds) | ✓ (6 kinds) |
-| `BUDGET_USD_CAP` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `BUDGET_TURN_CAP` | ✓ | ✓ | ✗ | ✓ | ✓ | ✓ |
-| `RATE_LIMIT_TELEMETRY` | ✗ | ✓ | ✗ | ✗ | ✓ | ✗ |
-| `REASONING_OUTPUT` | ✗ | ✓ | ✗ | ✗ | ✓ | ✗ |
-| `REQUEST_METADATA` | ✗ † | ✓ | ✗ † | ✗ † | ✓ | ✗ † |
-| `COUNT_TOKENS` | ✗ | ✓ | ✗ | ✗ | ✓ | ✗ |
-| `PROMPT_CACHE_CONTROL` | ✗ † | ✗ † | ✗ † | ✗ † | ✓ | ✗ † |
-| `SLASH_COMMANDS` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Feature | Bedrock | Claude | Copilot | OpenAI-compat | OpenCode |
+|---|---|---|---|---|---|
+| `STRUCTURED_OUTPUT_JSON_SCHEMA` | ✓ | ✓ | ✓ | ✓ | ✗ (SDK gap) |
+| `STREAMING` / `CANCEL` | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `SESSION_RESUME` | ✗ | ✓ | ✓ | ✗ | ✓ |
+| `REASONING_EFFORT` | ✓ (Anthropic) | ✓ | ✓ | ✓ | ✓ (per-upstream) |
+| `REASONING_BUDGET_TOKENS` | ✓ (Anthropic) | ✓ | ✗ | ✗ | ✓ (Anthropic upstream) |
+| `VISION_INPUT` | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `FILE_INPUT` | ✓ (Anthropic) | ✓ | ✓ | ✗ | ✓ |
+| `TOOLS_FUNCTION` | ✓ | ✓ | ✓ | ✓ | ✗ (SDK gap) |
+| `TOOLS_MCP_STDIO` / `_HTTP` | ✗ | ✓ | ✓ | ✗ | ✗ (SDK gap) |
+| `TOOLS_MCP_SSE` | ✗ | ✓ | ✗ | ✗ | ✗ (SDK gap) |
+| `PERMISSION_CALLBACK` | ✓ | ✓ | ✓ | ✗ | ✗ (SDK gap) |
+| `LIFECYCLE_HOOKS` | ✓ (6 kinds) | ✓ (8 kinds) | ✓ (7 kinds) | ✓ (6 kinds) | ✓ (6 kinds) |
+| `BUDGET_USD_CAP` | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `BUDGET_TURN_CAP` | ✓ | ✓ | ✗ | ✓ | ✓ |
+| `RATE_LIMIT_TELEMETRY` | ✗ | ✓ | ✗ | ✓ | ✗ |
+| `REASONING_OUTPUT` | ✗ | ✓ | ✗ | ✓ | ✗ |
+| `REQUEST_METADATA` | ✗ † | ✓ | ✗ † | ✓ | ✗ † |
+| `COUNT_TOKENS` | ✗ | ✓ | ✗ | ✓ | ✗ |
+| `PROMPT_CACHE_CONTROL` | ✗ † | ✗ † | ✗ † | ✓ | ✗ † |
+| `SLASH_COMMANDS` | ✓ | ✓ | ✓ | ✓ | ✓ |
 
 † **Soft contract** — adapters returning False accept the kwarg
 structurally and silently drop it rather than raising. The call's
@@ -149,8 +148,7 @@ per-adapter quirks under [`docs/adapters/`](https://github.com/get2knowio/airfra
 Each vendor ships a Python SDK that does something subtly different:
 the Claude Agent SDK exposes a subprocess + JSON-RPC interface;
 GitHub's Copilot SDK exposes a session + tool registration model;
-Moonshot's Kimi Agent SDK spawns the `kimi-cli` subprocess and
-streams typed `WireMessage` events; AWS Bedrock's `aioboto3` client
+AWS Bedrock's `aioboto3` client
 fronts a multi-vendor model catalog behind the Converse envelope
 and IAM auth; sst/opencode's `opencode-ai` SDK fronts a model-
 agnostic HTTP agent server (`opencode serve`) routing through any
@@ -188,20 +186,18 @@ absorbs its vendor's quirks.
 pip install airframe-agents[bedrock]        # BedrockRuntime
 pip install airframe-agents[claude]         # ClaudeCodeRuntime
 pip install airframe-agents[copilot]        # CopilotRuntime
-pip install airframe-agents[kimi]           # KimiRuntime (Python 3.12+, separate venv — see note below)
 pip install airframe-agents[opencode]       # OpenCodeServerRuntime (local opencode serve)
 pip install airframe-agents[openai-compat]  # OpenCodeGoRuntime + OpenCodeZenRuntime + OpenRouterRuntime (+ future siblings)
-pip install airframe-agents[all]            # Everything except [kimi] (mcp-version conflict)
+pip install airframe-agents[all]            # Everything
 pip install airframe-agents[testing]        # Conformance contract suite (pytest)
 ```
 
-**`[kimi]` co-installation note.** `kimi-agent-sdk` 0.0.5 →
-`kimi-cli` 1.12 → `fastmcp` 2.12.5 → `mcp<1.17`, but
-`claude-agent-sdk` 0.2 requires `mcp>=1.23`. The two SDKs cannot
-co-install in one environment until upstream resolves; airframe
-declares the conflict in `[tool.uv.conflicts]` and excludes
-`[kimi]` from `[all]`. Users wanting both extras must split into
-separate venvs.
+**Kimi is temporarily unavailable.** The `kimi` provider (Moonshot's
+Kimi Agent SDK) is disabled from discovery: `kimi-agent-sdk`'s
+`kimi-cli → fastmcp → mcp<1.17` chain can't co-install with
+`claude-agent-sdk`'s `mcp>=1.23`, and upstream hasn't yet widened the
+pin. For Kimi models in the meantime, reach Moonshot's OpenAI-compatible
+endpoint (`api.moonshot.ai/v1`) through the OpenAI-compatible family.
 
 `list_providers()` filters by which extras you installed:
 `airframe-agents[copilot]` makes `list_providers()` return
@@ -387,7 +383,6 @@ Full list with one-line descriptions in
   [Bedrock](https://github.com/get2knowio/airframe/blob/main/docs/adapters/bedrock.md) ·
   [Claude](https://github.com/get2knowio/airframe/blob/main/docs/adapters/claude.md) ·
   [Copilot](https://github.com/get2knowio/airframe/blob/main/docs/adapters/copilot.md) ·
-  [Kimi](https://github.com/get2knowio/airframe/blob/main/docs/adapters/kimi.md) ·
   [OpenCode Go](https://github.com/get2knowio/airframe/blob/main/docs/adapters/opencode-go.md) ·
   [OpenCode Server](https://github.com/get2knowio/airframe/blob/main/docs/adapters/opencode-server.md) ·
   [OpenCode Zen](https://github.com/get2knowio/airframe/blob/main/docs/adapters/opencode-zen.md) ·
