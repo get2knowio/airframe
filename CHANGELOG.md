@@ -6,16 +6,35 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **Migrated the Copilot adapter to `github-copilot-sdk` 1.x**
+  (`>=1.0.1,<2` in the `[copilot]` / `[all]` extras and the test group,
+  replacing the interim `<1` bound). 1.x is a near-total SDK rewrite, but
+  only two adapter call-sites actually changed: (1) `SubprocessConfig` was
+  removed, so construction kwargs (`github_token` / `use_logged_in_user`)
+  now go directly on `CopilotClient`, and a custom CLI path becomes
+  `connection=ChildProcessRuntimeConnection(path=…)`; (2) the permission
+  decision type changed from `PermissionRequestResult(kind=…)` to the 1.x
+  `PermissionDecision*` dataclasses (`PermissionDecisionApproveOnce` /
+  `PermissionDecisionReject` / `PermissionDecisionUserNotAvailable`). The
+  event-capture, cost/usage, `list_models`/`ModelInfo`, `define_tool`, and
+  MCP surfaces carry over unchanged. Live-verified against a real Copilot
+  CLI. (#41)
+
 ### Fixed
 
-- **Pin `github-copilot-sdk>=0.3.0,<1`** in the `[copilot]` and `[all]`
-  extras (and the test group). The pin was previously unbounded, so a fresh
-  `pip install airframe-agents[copilot]` resolved `github-copilot-sdk` 1.x —
-  which **breaks the Copilot adapter** (the 1.x SDK removed `SubprocessConfig`
-  and rewrote the session event model). airframe's own CI stayed green only
-  because it installs from the committed lockfile (0.3.x); downstream
-  installs got the broken 1.x. The `<1` bound keeps the adapter working until
-  the 1.x migration lands (#41).
+- **`CopilotRuntime.list_models()` no longer fails with "Client not
+  connected."** github-copilot-sdk 1.x dropped the implicit
+  `auto_start=True` that 0.3.x applied at construction. `_ensure_client`
+  now calls the idempotent `await client.start()`, so model discovery
+  works against the bare client; the session path self-starts and is
+  unaffected. (#3)
+
+- **Allow `pytest` 9.x** (`>=8.2.0,<10` in the dev / testing extras) to
+  clear the `pytest < 9.0.3` advisory. `pytest-asyncio` 1.4.0 already
+  declares `pytest<10,>=8.4`, so 9.x is compatible; the lock resolves to
+  pytest 9.1.0. Dev / test-only — not shipped to library consumers.
 
 ### Added
 
