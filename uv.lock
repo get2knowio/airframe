@@ -307,7 +307,7 @@ wheels = [
 
 [[package]]
 name = "airframe-agents"
-version = "0.9.0rc3"
+version = "0.9.0rc4"
 source = { editable = "." }
 dependencies = [
     { name = "httpx" },
@@ -393,8 +393,8 @@ requires-dist = [
     { name = "anthropic", marker = "extra == 'claude'", specifier = ">=0.40,<1" },
     { name = "claude-agent-sdk", marker = "extra == 'all'", specifier = ">=0.2.0,<1" },
     { name = "claude-agent-sdk", marker = "extra == 'claude'", specifier = ">=0.2.0,<1" },
-    { name = "github-copilot-sdk", marker = "extra == 'all'", specifier = ">=0.3.0" },
-    { name = "github-copilot-sdk", marker = "extra == 'copilot'", specifier = ">=0.3.0" },
+    { name = "github-copilot-sdk", marker = "extra == 'all'", specifier = ">=0.3.0,<1" },
+    { name = "github-copilot-sdk", marker = "extra == 'copilot'", specifier = ">=0.3.0,<1" },
     { name = "httpx", specifier = ">=0.27,<1" },
     { name = "kimi-agent-sdk", marker = "extra == 'kimi'", specifier = ">=0.0.5,<0.1" },
     { name = "openai", marker = "extra == 'all'", specifier = ">=1.50,<3" },
@@ -414,7 +414,7 @@ dev = [
     { name = "aioboto3", specifier = ">=13" },
     { name = "anthropic", specifier = ">=0.40,<1" },
     { name = "claude-agent-sdk", specifier = ">=0.2.0,<1" },
-    { name = "github-copilot-sdk", specifier = ">=0.3.0" },
+    { name = "github-copilot-sdk", specifier = ">=0.3.0,<1" },
     { name = "mypy", specifier = ">=1.0.0,<3" },
     { name = "openai", specifier = ">=1.50,<3" },
     { name = "opencode-ai", specifier = ">=0.1.0a36,<0.2" },
@@ -433,7 +433,7 @@ test = [
     { name = "aioboto3", specifier = ">=13" },
     { name = "anthropic", specifier = ">=0.40,<1" },
     { name = "claude-agent-sdk", specifier = ">=0.2.0,<1" },
-    { name = "github-copilot-sdk", specifier = ">=0.3.0" },
+    { name = "github-copilot-sdk", specifier = ">=0.3.0,<1" },
     { name = "openai", specifier = ">=1.50,<3" },
     { name = "opencode-ai", specifier = ">=0.1.0a36,<0.2" },
     { name = "pytest", specifier = ">=8.2.0,<9" },
