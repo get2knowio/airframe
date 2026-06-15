@@ -11,8 +11,8 @@ What's left runtime-level — and tested here:
 
 * Binding validation (Copilot bindings pass; Claude bindings rejected
   even with a Copilot provider, per Phase 0 spike finding).
-* ``CopilotClient`` construction + auth chain (subprocess config
-  wiring: explicit token → env → ``use_logged_in_user``).
+* ``CopilotClient`` construction + auth chain (kwargs wiring:
+  explicit token → env → ``use_logged_in_user``).
 * ``runtime.execute()`` smoke — delegates correctly to a session and
   returns the result it produced.
 * Lifecycle: ``reset()`` is a no-op; ``close()`` releases the
@@ -123,15 +123,19 @@ def mock_sdk(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     mock_client = MagicMock()
     mock_client.create_session = AsyncMock(return_value=mock_session)
     mock_client.resume_session = AsyncMock(return_value=mock_session)
+    mock_client.start = AsyncMock()
     mock_client.stop = AsyncMock()
 
-    captured_subprocess_kwargs: dict[str, Any] = {}
+    # github-copilot-sdk 1.x dropped SubprocessConfig — construction kwargs
+    # (github_token / use_logged_in_user / connection) go straight onto
+    # CopilotClient(...). Capture them off the factory call.
+    captured_client_kwargs: dict[str, Any] = {}
 
-    def fake_subprocess_config(**kwargs: Any) -> dict[str, Any]:
-        captured_subprocess_kwargs.update(kwargs)
-        return kwargs
+    def fake_client_factory(**kwargs: Any) -> Any:
+        captured_client_kwargs.update(kwargs)
+        return mock_client
 
-    mock_client_factory = MagicMock(return_value=mock_client)
+    mock_client_factory = MagicMock(side_effect=fake_client_factory)
 
     captured_tools: list[dict[str, Any]] = []
 
@@ -160,7 +164,6 @@ def mock_sdk(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     mock_perm.approve_all = lambda req, inv: MagicMock(kind="approve-once")
 
     monkeypatch.setattr(copilot, "CopilotClient", mock_client_factory)
-    monkeypatch.setattr(copilot, "SubprocessConfig", fake_subprocess_config)
     monkeypatch.setattr(copilot, "define_tool", fake_define_tool)
     monkeypatch.setattr(session_mod, "PermissionHandler", mock_perm)
     monkeypatch.setattr(se_mod, "AssistantUsageData", _FakeUsage)
@@ -172,7 +175,7 @@ def mock_sdk(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         "client": mock_client,
         "session": mock_session,
         "handlers": handlers,
-        "subprocess_kwargs": captured_subprocess_kwargs,
+        "client_kwargs": captured_client_kwargs,
         "captured_tools": captured_tools,
     }
 
@@ -314,12 +317,12 @@ async def test_close_with_no_client_is_noop() -> None:
 
 
 @pytest.mark.asyncio
-async def test_explicit_github_token_threaded_to_subprocess_config(
+async def test_explicit_github_token_threaded_to_client(
     mock_sdk: dict[str, Any],
 ) -> None:
     rt = CopilotRuntime(github_token="ghu_test_token")
     await rt._ensure_client()  # noqa: SLF001 — runtime-level wiring under test
-    kwargs = mock_sdk["subprocess_kwargs"]
+    kwargs = mock_sdk["client_kwargs"]
     assert kwargs.get("github_token") == "ghu_test_token"
     assert "use_logged_in_user" not in kwargs
 
@@ -333,7 +336,7 @@ async def test_no_token_falls_back_to_logged_in_user(
     monkeypatch.delenv("GH_TOKEN", raising=False)
     rt = CopilotRuntime()
     await rt._ensure_client()  # noqa: SLF001
-    kwargs = mock_sdk["subprocess_kwargs"]
+    kwargs = mock_sdk["client_kwargs"]
     assert kwargs.get("use_logged_in_user") is True
     assert "github_token" not in kwargs
 
@@ -346,7 +349,7 @@ async def test_env_token_picked_up(
     monkeypatch.setenv("GITHUB_TOKEN", "ghp_from_env")
     rt = CopilotRuntime()
     await rt._ensure_client()  # noqa: SLF001
-    kwargs = mock_sdk["subprocess_kwargs"]
+    kwargs = mock_sdk["client_kwargs"]
     assert kwargs.get("github_token") == "ghp_from_env"
 
 

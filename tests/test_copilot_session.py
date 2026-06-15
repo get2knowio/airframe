@@ -176,10 +176,8 @@ def mock_sdk(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     mock_client = MagicMock()
     mock_client.create_session = AsyncMock(return_value=mock_session)
     mock_client.resume_session = AsyncMock(return_value=mock_session)
+    mock_client.start = AsyncMock()
     mock_client.stop = AsyncMock()
-
-    def fake_subprocess_config(**kwargs: Any) -> dict[str, Any]:
-        return kwargs
 
     mock_client_factory = MagicMock(return_value=mock_client)
 
@@ -210,7 +208,6 @@ def mock_sdk(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     mock_perm.approve_all = lambda req, inv: MagicMock(kind="approve-once")
 
     monkeypatch.setattr(copilot, "CopilotClient", mock_client_factory)
-    monkeypatch.setattr(copilot, "SubprocessConfig", fake_subprocess_config)
     monkeypatch.setattr(copilot, "define_tool", fake_define_tool)
     monkeypatch.setattr(session_mod, "PermissionHandler", mock_perm)
 
@@ -1547,7 +1544,7 @@ async def test_permission_callback_replaces_approve_all_handler(
     handler = create_call.kwargs["on_permission_request"]
     # The handler isn't the default approve_all anymore — it's
     # airframe's wrapper. Invoke it directly to verify the mapping.
-    from copilot.session import PermissionRequestResult
+    from copilot.generated.rpc import PermissionDecisionApproveOnce
 
     result = await handler(
         _FakeCopilotPermissionRequest(
@@ -1557,8 +1554,7 @@ async def test_permission_callback_replaces_approve_all_handler(
         ),
         {},
     )
-    assert isinstance(result, PermissionRequestResult)
-    assert result.kind == "approve-once"
+    assert isinstance(result, PermissionDecisionApproveOnce)
     assert len(received) == 1
     req = received[0]
     assert req.tool_name == "read_file"
@@ -1569,7 +1565,7 @@ async def test_permission_callback_replaces_approve_all_handler(
 async def test_permission_callback_deny_maps_to_reject(
     mock_sdk: dict[str, Any],
 ) -> None:
-    """``deny`` → ``"reject"`` PermissionRequestResultKind."""
+    """``deny`` → :class:`PermissionDecisionReject`."""
     from airframe import PermissionDecision, PermissionRequest
 
     class _DenyAll:
@@ -1589,15 +1585,17 @@ async def test_permission_callback_deny_maps_to_reject(
     finally:
         await sess.close()
 
+    from copilot.generated.rpc import PermissionDecisionReject
+
     handler = mock_sdk["client"].create_session.await_args_list[0].kwargs["on_permission_request"]
     result = await handler(_FakeCopilotPermissionRequest(tool_name="x"), {})
-    assert result.kind == "reject"
+    assert isinstance(result, PermissionDecisionReject)
 
 
 async def test_permission_callback_defer_maps_to_user_not_available(
     mock_sdk: dict[str, Any],
 ) -> None:
-    """``defer`` → ``"user-not-available"`` — Copilot's default policy takes over."""
+    """``defer`` → :class:`PermissionDecisionUserNotAvailable` — Copilot's default takes over."""
     from airframe import PermissionDecision, PermissionRequest
 
     class _Defer:
@@ -1617,9 +1615,11 @@ async def test_permission_callback_defer_maps_to_user_not_available(
     finally:
         await sess.close()
 
+    from copilot.generated.rpc import PermissionDecisionUserNotAvailable
+
     handler = mock_sdk["client"].create_session.await_args_list[0].kwargs["on_permission_request"]
     result = await handler(_FakeCopilotPermissionRequest(tool_name="x"), {})
-    assert result.kind == "user-not-available"
+    assert isinstance(result, PermissionDecisionUserNotAvailable)
 
 
 async def test_no_permission_callback_keeps_approve_all_default(

@@ -222,10 +222,11 @@ class CopilotRuntime(AgentRuntime):
     #:   ``PermissionHandler.approve_all`` default the adapter uses
     #:   when no callback is supplied). airframe's
     #:   :data:`~airframe.permission.PermissionDecision` maps to
-    #:   Copilot's :class:`PermissionRequestResultKind`:
-    #:   ``"allow"`` → ``"approve-once"``, ``"deny"`` → ``"reject"``,
-    #:   ``"defer"`` → ``"user-not-available"`` (lets Copilot's
-    #:   own default policy take over). Callback identity joins the
+    #:   Copilot's decision dataclasses:
+    #:   ``"allow"`` → :class:`PermissionDecisionApproveOnce`,
+    #:   ``"deny"`` → :class:`PermissionDecisionReject`,
+    #:   ``"defer"`` → :class:`PermissionDecisionUserNotAvailable`
+    #:   (lets Copilot's own default policy take over). Callback identity joins the
     #:   session cache key (Phase 5, Iteration B).
     #: * ``LIFECYCLE_HOOKS`` — wired by registering a
     #:   :meth:`CopilotSession.on` subscriber at session creation
@@ -644,19 +645,27 @@ class CopilotRuntime(AgentRuntime):
         if self._client is not None:
             return self._client
 
-        from copilot import CopilotClient, SubprocessConfig
+        from copilot import ChildProcessRuntimeConnection, CopilotClient
 
-        config_kwargs: dict[str, Any] = {}
-        if self._cli_path is not None:
-            config_kwargs["cli_path"] = self._cli_path
+        client_kwargs: dict[str, Any] = {}
         if self._github_token is not None:
-            config_kwargs["github_token"] = self._github_token
+            client_kwargs["github_token"] = self._github_token
         else:
             # Fall back to the user's gh CLI credentials.
-            config_kwargs["use_logged_in_user"] = True
+            client_kwargs["use_logged_in_user"] = True
+        if self._cli_path is not None:
+            # A custom CLI path is now expressed as a runtime connection
+            # (github-copilot-sdk 1.x removed SubprocessConfig).
+            client_kwargs["connection"] = ChildProcessRuntimeConnection(path=self._cli_path)
 
         try:
-            client = CopilotClient(SubprocessConfig(**config_kwargs))
+            client = CopilotClient(**client_kwargs)
+            # 1.x dropped the implicit ``auto_start=True`` that 0.3.x
+            # applied at construction. ``create_session`` self-starts,
+            # but ``list_models`` runs against the bare client and fails
+            # with "Client not connected" unless we start it here. The
+            # call is idempotent, so the session path is unaffected.
+            await client.start()
         except Exception as exc:
             raise self._classify_exception(exc) from exc
         self._client = client
@@ -1644,30 +1653,36 @@ def _translate_permission_for_copilot(callback: PermissionCallback) -> Any:
 
     Copilot's :data:`_PermissionHandlerFn` takes
     ``(PermissionRequest, dict[str, str])`` and returns a
-    :class:`PermissionRequestResult` (sync or async). We build an
-    airframe :class:`~airframe.permission.PermissionRequest`, await
-    the user's callback, and map the
+    ``PermissionDecision`` (sync or async). We build an airframe
+    :class:`~airframe.permission.PermissionRequest`, await the user's
+    callback, and map the
     :data:`~airframe.permission.PermissionDecision` to Copilot's
-    :data:`PermissionRequestResultKind`:
+    decision dataclasses:
 
-    * ``"allow"`` → ``"approve-once"`` (this specific call only).
-    * ``"deny"`` → ``"reject"``.
-    * ``"defer"`` → ``"user-not-available"``. Copilot interprets
-      this as "no decision available; fall through to the SDK's
-      default handling" — which is exactly the "defer" intent.
+    * ``"allow"`` → :class:`PermissionDecisionApproveOnce` (this
+      specific call only).
+    * ``"deny"`` → :class:`PermissionDecisionReject`.
+    * ``"defer"`` → :class:`PermissionDecisionUserNotAvailable`.
+      Copilot interprets this as "no decision available; fall through
+      to the SDK's default handling" — which is exactly the "defer"
+      intent.
 
-    The mapping is shape-stable; Copilot exposes only four
-    :data:`PermissionRequestResultKind` values today
-    (``approve-once``, ``reject``, ``user-not-available``,
-    ``no-result``); ``no-result`` is reserved for protocol-level
-    errors and isn't reachable through this path.
+    github-copilot-sdk 1.x replaced the single
+    ``PermissionRequestResult(kind=...)`` pydantic model with a union
+    of per-decision dataclasses (all exported from
+    ``copilot.generated.rpc``); the three above are the only ones this
+    path produces.
 
     ``tool_args`` is built from the SDK request's :attr:`tool_args`
     field (falling back to :attr:`args` when the SDK normalised
     them); ``reason`` is the SDK's :attr:`reason` /
     :attr:`tool_description` / :attr:`intention` (first non-empty).
     """
-    from copilot.session import PermissionRequestResult
+    from copilot.generated.rpc import (
+        PermissionDecisionApproveOnce,
+        PermissionDecisionReject,
+        PermissionDecisionUserNotAvailable,
+    )
 
     from airframe.permission import PermissionRequest
 
@@ -1701,17 +1716,17 @@ def _translate_permission_for_copilot(callback: PermissionCallback) -> Any:
         )
         decision = await callback.handle(airframe_request)
         if decision == "allow":
-            return PermissionRequestResult(kind="approve-once")
+            return PermissionDecisionApproveOnce()
         if decision == "deny":
-            return PermissionRequestResult(kind="reject")
+            return PermissionDecisionReject()
         # "defer" — let Copilot's default policy decide.
         logger.debug(
             "copilot: PermissionCallback returned 'defer' for tool=%r; "
-            "mapping to 'user-not-available' (Copilot's default policy "
-            "takes over)",
+            "mapping to PermissionDecisionUserNotAvailable (Copilot's "
+            "default policy takes over)",
             tool_name,
         )
-        return PermissionRequestResult(kind="user-not-available")
+        return PermissionDecisionUserNotAvailable()
 
     return _on_permission_request
 

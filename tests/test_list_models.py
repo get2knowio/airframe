@@ -410,11 +410,9 @@ def _patch_copilot_client(
 
     mock_client = MagicMock()
     mock_client.list_models = AsyncMock(return_value=models)
+    mock_client.start = AsyncMock()
     mock_client.stop = AsyncMock()
     monkeypatch.setattr(copilot, "CopilotClient", MagicMock(return_value=mock_client))
-    monkeypatch.setattr(
-        copilot, "SubprocessConfig", MagicMock(side_effect=lambda **kwargs: kwargs)
-    )
     return mock_client
 
 
@@ -481,11 +479,9 @@ async def test_copilot_list_models_auth_error_classifies(
 
     mock_client = MagicMock()
     mock_client.list_models = AsyncMock(side_effect=Exception("401 unauthorized"))
+    mock_client.start = AsyncMock()
     mock_client.stop = AsyncMock()
     monkeypatch.setattr(copilot, "CopilotClient", MagicMock(return_value=mock_client))
-    monkeypatch.setattr(
-        copilot, "SubprocessConfig", MagicMock(side_effect=lambda **kwargs: kwargs)
-    )
 
     rt = CopilotRuntime(github_token="ghs_test")
     with pytest.raises(RuntimeAuthError):
