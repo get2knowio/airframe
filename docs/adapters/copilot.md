@@ -55,6 +55,7 @@ await runtime.close()
 | `TOOLS_MCP_STDIO` | ✓ | `mcp_servers={"name": {"type":"local","command":...}}` |
 | `TOOLS_MCP_HTTP` | ✓ | `mcp_servers={"name": {"type":"http","url":...}}` |
 | `TOOLS_MCP_SSE` | ✗ | Declined per the plan; use `transport="http"` instead |
+| `TOOLS_NATIVE` | ✓ | `WEB_FETCH` → hosted `fetch_webpage` via the `available_tools` allowlist. No hosted web-search built-in (`WEB_SEARCH` declined). A native request unions the name into an existing allowlist and clears it from any denylist; with no allowlist it's left on by default |
 | `PERMISSION_CALLBACK` | ✓ | `on_permission_request=` per-call |
 | `LIFECYCLE_HOOKS` | ✓ | 7 of 8 kinds emittable (no `rate_limit` — Copilot surfaces rate-limit failures as `SessionErrorData` instead) |
 | `BUDGET_USD_CAP` | ✓ | Client-side accumulation against `AssistantUsageData.cost` |

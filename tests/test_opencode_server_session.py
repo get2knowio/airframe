@@ -1259,3 +1259,44 @@ async def test_unreported_cost_does_not_break_budget_tracking(
     await sess.execute("hi")
     assert sess._turn_count == 1
     assert sess._cumulative_cost_usd == 0.0
+
+
+# --- Native (vendor-hosted) tools: WEB_SEARCH/WEB_FETCH → tools allow-map ---
+
+
+@pytest.mark.asyncio
+async def test_native_tools_force_enabled_in_chat_tools_map(
+    mock_client: MagicMock,
+) -> None:
+    """A native request sets ``websearch``/``webfetch`` True in the chat
+    ``tools=`` allow-map."""
+    from airframe.native_tools import NativeTool
+
+    rt = OpenCodeServerRuntime()
+    sess = rt.session(
+        model=ProviderModel("opencode", "some-private-model"),
+        provider_options=OpenCodeServerOptions(provider_id="openrouter"),
+        native_tools=[NativeTool.web_search(), NativeTool.web_fetch()],
+    )
+    await sess.execute("hi")
+    _, kwargs = mock_client.session.chat.call_args
+    assert kwargs["tools"]["websearch"] is True
+    assert kwargs["tools"]["webfetch"] is True
+
+
+@pytest.mark.asyncio
+async def test_native_tool_overrides_denylist(mock_client: MagicMock) -> None:
+    """An explicit native request wins over an ``excluded_tools`` denylist."""
+    from airframe.native_tools import NativeTool
+
+    rt = OpenCodeServerRuntime()
+    sess = rt.session(
+        model=ProviderModel("opencode", "some-private-model"),
+        provider_options=OpenCodeServerOptions(
+            provider_id="openrouter", excluded_tools=("websearch",)
+        ),
+        native_tools=[NativeTool.web_search()],
+    )
+    await sess.execute("hi")
+    _, kwargs = mock_client.session.chat.call_args
+    assert kwargs["tools"]["websearch"] is True
