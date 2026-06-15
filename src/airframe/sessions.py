@@ -63,6 +63,7 @@ if TYPE_CHECKING:
     from airframe.events import RuntimeEvent
     from airframe.hooks import HookEvent
     from airframe.inputs import Prompt
+    from airframe.native_tools import NativeCapability, NativeTool
     from airframe.options import ProviderOptions
     from airframe.permission import PermissionCallback
     from airframe.protocol import AgentRuntime, ProviderModel, RuntimeResult
@@ -209,6 +210,101 @@ def _check_tools_supported(
         f"passing tools=[FunctionTool(...)].",
         feature=Feature.TOOLS_FUNCTION,
     )
+
+
+def _resolve_native_tools(
+    native_tools: list[NativeTool] | None,
+    *,
+    adapter_label: str,
+    provider_id: str,
+    feature_supported: bool,
+    supported_capabilities: frozenset[NativeCapability],
+) -> list[NativeTool]:
+    """Gate ``session(native_tools=...)`` and return the tools *this* adapter wires.
+
+    Shared by every adapter accepting ``native_tools=``. Splits the list into the
+    subset addressed to this adapter and validates it against the adapter's
+    capability, then returns that subset for the caller to translate into vendor
+    tool names.
+
+    Relevance rules:
+
+    * **Semantic** tools (carrying a :class:`~airframe.native_tools.NativeCapability`)
+      are always relevant — they're portable requests every adapter is asked to
+      honour.
+    * **Raw** tools (``provider_id`` + ``name``) are relevant only when their
+      ``provider_id`` equals this adapter's ``provider_id``; raw tools for other
+      providers are dropped silently so one mixed list can drive several runtimes.
+
+    Once the relevant subset is known:
+
+    * Empty subset → return ``[]`` (nothing to wire; never raises, even on an
+      adapter that doesn't declare ``TOOLS_NATIVE``).
+    * Non-empty subset on an adapter that doesn't declare ``TOOLS_NATIVE`` →
+      raise :class:`UnsupportedFeatureError` (hard contract, like ``tools=``).
+    * A semantic capability not in ``supported_capabilities`` → raise (no silent
+      fallback; the consumer should have checked
+      :meth:`AgentRuntime.supported_native_tools` and degraded).
+    * Raw tools for this provider pass through unchecked — the name is the
+      consumer's responsibility (escape hatch).
+
+    Args:
+        native_tools: The list passed to ``session(native_tools=...)``.
+        adapter_label: Adapter name for error messages.
+        provider_id: This adapter's ``PROVIDER_ID`` — raw tools are matched
+            against it.
+        feature_supported: ``runtime.supports(Feature.TOOLS_NATIVE)``.
+        supported_capabilities: ``runtime.supported_native_tools(model)`` — the
+            semantic capabilities this adapter can actually serve.
+
+    Returns:
+        The subset of ``native_tools`` this adapter should enable, in input order.
+
+    Raises:
+        UnsupportedFeatureError: a relevant native tool the adapter can't serve.
+    """
+    if not native_tools:
+        return []
+    relevant = [
+        t for t in native_tools if t.capability is not None or t.provider_id == provider_id
+    ]
+    if not relevant:
+        return []
+    if not feature_supported:
+        raise UnsupportedFeatureError(
+            f"{adapter_label}: native_tools= is not wired on this adapter. "
+            f"Check runtime.supports(Feature.TOOLS_NATIVE) before passing "
+            f"native_tools=[NativeTool(...)].",
+            feature=Feature.TOOLS_NATIVE,
+        )
+    for t in relevant:
+        if t.capability is not None and t.capability not in supported_capabilities:
+            served = ", ".join(sorted(supported_capabilities)) or "(none)"
+            raise UnsupportedFeatureError(
+                f"{adapter_label}: native tool {t.capability.value!r} is not served "
+                f"by this adapter. Served capabilities: {served}. Check "
+                f"runtime.supported_native_tools() and degrade before passing it.",
+                feature=Feature.TOOLS_NATIVE,
+            )
+    return relevant
+
+
+def _native_tools_fingerprint(native_tools: list[NativeTool] | None) -> str:
+    """Build a deterministic fingerprint of a resolved ``native_tools`` list.
+
+    Joins the session cache key on every adapter that bakes native tools into a
+    vendor session at connect time (Claude's ``allowed_tools``). Participates
+    from each tool's capability / provider_id / name and the sorted items of
+    ``options`` so a changed option forces a reconnect.
+    """
+    if not native_tools:
+        return "__no_native_tools__"
+    parts: list[str] = []
+    for t in native_tools:
+        opts = t.options or {}
+        opt_keys = ",".join(f"{k}={opts[k]!r}" for k in sorted(opts))
+        parts.append(f"{t.capability or ''}|{t.provider_id or ''}|{t.name or ''}|{opt_keys}")
+    return "||".join(parts)
 
 
 _MCP_TRANSPORT_TO_FEATURE: dict[str, Feature] = {

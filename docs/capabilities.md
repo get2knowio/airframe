@@ -29,6 +29,7 @@ Renaming would be a major-version break.
 | `TOOLS_MCP_HTTP` | ✗ (permanent) | ✓ | ✓ | ✓ | ✗ | ✗ (SDK gap) |
 | `TOOLS_MCP_SSE` | ✗ (permanent) | ✓ | ✗ | ✓ | ✗ | ✗ (SDK gap) |
 | `TOOLS_MCP_IN_PROCESS` | ✗ | (internal) | (internal) | ✗ (permanent) | ✗ | ✗ (permanent) |
+| `TOOLS_NATIVE` | ✗ | ✓ (`WEB_SEARCH`, `WEB_FETCH`) | ✗ (follow-up: `fetch_webpage`) | ✗ (follow-up: `$web_search`) | ✗ (Responses-API only) | ✗ (follow-up: `websearch`/`webfetch`) |
 | `PERMISSION_CALLBACK` | ✓ | ✓ | ✓ | ✓ | ✗ | ✗ (SDK gap) |
 | `LIFECYCLE_HOOKS` | ✓ (6 kinds) | ✓ (8 kinds) | ✓ (7 kinds) | ✓ (7 kinds) | ✓ (6 kinds) | ✓ (6 kinds) |
 | `BUDGET_USD_CAP` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ (best-effort) |
@@ -179,6 +180,45 @@ Internal-only — describes the in-process MCP server that
 `tools=[FunctionTool]` compiles to on Claude / Copilot. Never
 exposed as a user-facing transport on `McpServerRef`. Always
 False at the runtime level.
+
+### `TOOLS_NATIVE`
+
+Wire shape: `runtime.session(native_tools=[NativeTool(...)])`. Enables
+**vendor-hosted built-in tools** — ones the wrapped SDK both describes to the
+model and executes itself (no consumer handler, no external server). The
+portable surface is the `NativeCapability` taxonomy (`WEB_SEARCH`, `WEB_FETCH`,
+`CODE_EXECUTION`, `FILE_SEARCH`, `IMAGE_GENERATION`, `COMPUTER_USE`); a raw
+escape hatch (`NativeTool.raw(provider_id, name)`) passes an exact vendor tool
+name to one adapter.
+
+Two-layer negotiation:
+- **Structural gate** — `supports(Feature.TOOLS_NATIVE)` answers "does this
+  adapter wire `native_tools=` at all". Hard contract (like `TOOLS_FUNCTION`):
+  a declining adapter raises `UnsupportedFeatureError(feature=TOOLS_NATIVE)` on
+  any tool addressed to it.
+- **Per-capability** — `runtime.supported_native_tools(model)` returns the
+  `NativeCapability` set the adapter actually serves. Requesting a capability
+  outside that set raises (no silent fallback); consumers branch on it to
+  degrade gracefully.
+
+Raw tools addressed to a *different* provider are ignored (not an error), so one
+mixed `native_tools=` list can drive several runtimes — each picks out its own.
+
+Scope: only **hosted / server-side** tools are abstracted. Local-execution
+built-ins (`Bash` / `Read` / `Write`) run on the SDK host and are about the
+agent's environment, not a portable capability — out of scope.
+
+Per-adapter mechanism:
+- **Claude:** maps `WEB_SEARCH`→`WebSearch`, `WEB_FETCH`→`WebFetch` into
+  `ClaudeAgentOptions.allowed_tools` (Anthropic-hosted execution). Raw `claude`
+  tools pass their name through verbatim. `NativeTool.options` participates in
+  the session cache fingerprint but isn't yet wired to a per-tool option
+  channel.
+- **Copilot / Kimi / OpenCode:** declined today (each has a hosted equivalent —
+  `fetch_webpage` / `$web_search` / `websearch` — wiring is a follow-up).
+- **OpenAI-compat / Bedrock:** permanently declined on the Chat Completions /
+  Converse surfaces; OpenAI's `web_search` etc. are Responses-API tools, the
+  home of a future `OpenAIResponsesRuntime`.
 
 ### `PERMISSION_CALLBACK`
 

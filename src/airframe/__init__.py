@@ -76,6 +76,7 @@ from airframe.models import (
     CAPABILITY_VISION,
     ModelInfo,
 )
+from airframe.native_tools import NativeCapability, NativeTool
 from airframe.options import (
     BedrockOptions,
     ClaudeOptions,
@@ -98,7 +99,7 @@ from airframe.slash_commands import SlashCommand, SlashCommandsConfig
 from airframe.thinking import ReasoningEffort, ThinkingMode
 from airframe.tools import FunctionTool, McpServerRef
 
-__version__ = "0.9.0rc1"
+__version__ = "0.9.0rc2"
 
 # Adapter imports live at the top level for ergonomic use, but the
 # adapter modules themselves lazy-import their underlying SDK so
@@ -140,6 +141,8 @@ __all__ = [
     "KimiRuntime",
     "McpServerRef",
     "ModelInfo",
+    "NativeCapability",
+    "NativeTool",
     "OpenAICompatOptions",
     "OpenCodeGoRuntime",
     "OpenCodeServerOptions",

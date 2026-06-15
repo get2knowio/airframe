@@ -499,6 +499,92 @@ def test_session_tools_kwarg_agrees_with_tools_function_capability(
         )
 
 
+def test_supported_native_tools_agrees_with_tools_native_capability(
+    adapter_runtime: Any,
+) -> None:
+    """``supported_native_tools()`` agrees with :data:`Feature.TOOLS_NATIVE`.
+
+    The per-capability negotiation surface must be consistent with the
+    structural gate: returned values are a subset of the
+    :class:`~airframe.native_tools.NativeCapability` taxonomy, the call is
+    idempotent, and an adapter serving any capability must declare
+    ``TOOLS_NATIVE`` (conversely, declining adapters serve none).
+    """
+    from airframe.native_tools import NativeCapability
+
+    caps = adapter_runtime.supported_native_tools()
+    assert isinstance(caps, frozenset)
+    assert caps <= set(NativeCapability), (
+        f"{type(adapter_runtime).__name__}: supported_native_tools() returned "
+        f"values outside the NativeCapability taxonomy: {caps - set(NativeCapability)}"
+    )
+    # Idempotent / pure — same answer on a repeat call.
+    assert adapter_runtime.supported_native_tools() == caps
+    if caps:
+        assert adapter_runtime.supports(Feature.TOOLS_NATIVE), (
+            f"{type(adapter_runtime).__name__}: serves native capabilities {caps} "
+            f"but does not declare Feature.TOOLS_NATIVE."
+        )
+    else:
+        assert not adapter_runtime.supports(Feature.TOOLS_NATIVE), (
+            f"{type(adapter_runtime).__name__}: declares Feature.TOOLS_NATIVE but "
+            f"serves no NativeCapability — supporting adapters must serve at least one."
+        )
+
+
+def test_session_native_tools_kwarg_agrees_with_tools_native_capability(
+    adapter_runtime: Any,
+) -> None:
+    """``session(native_tools=[NativeTool])`` agrees with :data:`Feature.TOOLS_NATIVE`.
+
+    Adapters serving a capability accept a semantic ``native_tools=`` for it
+    without raising. Adapters declining ``TOOLS_NATIVE`` raise
+    :class:`UnsupportedFeatureError` with ``feature=TOOLS_NATIVE`` on any
+    relevant native tool.
+    """
+    from airframe.errors import UnsupportedFeatureError
+    from airframe.native_tools import NativeTool
+
+    caps = adapter_runtime.supported_native_tools()
+    if caps:
+        cap = sorted(caps)[0]
+        sess = adapter_runtime.session(native_tools=[NativeTool(capability=cap)])
+        try:
+            assert isinstance(sess, AgentSession)
+        finally:
+            import asyncio
+
+            asyncio.run(_safe_close(sess))
+    else:
+        with pytest.raises(UnsupportedFeatureError) as exc:
+            adapter_runtime.session(native_tools=[NativeTool.web_search()])
+        assert exc.value.feature == Feature.TOOLS_NATIVE, (
+            f"{type(adapter_runtime).__name__}: native_tools= decline must carry "
+            f"feature=TOOLS_NATIVE; got {exc.value.feature!r}"
+        )
+
+
+def test_session_native_tools_ignores_foreign_raw_tool(
+    adapter_runtime: Any,
+) -> None:
+    """A raw native tool addressed to another provider is ignored, never raises.
+
+    Lets one mixed ``native_tools=`` list drive several runtimes — each adapter
+    picks out only the raw tools matching its ``PROVIDER_ID`` and the semantic
+    ones, and silently drops raw tools for other providers.
+    """
+    from airframe.native_tools import NativeTool
+
+    foreign = NativeTool.raw(provider_id="__not_a_real_provider__", name="WhateverTool")
+    sess = adapter_runtime.session(native_tools=[foreign])
+    try:
+        assert isinstance(sess, AgentSession)
+    finally:
+        import asyncio
+
+        asyncio.run(_safe_close(sess))
+
+
 # ---------------------------------------------------------------------------
 # Phase 4 contracts — MCP server refs
 # ---------------------------------------------------------------------------

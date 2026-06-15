@@ -80,6 +80,7 @@ from airframe.features import Feature
 from airframe.inputs import Prompt
 from airframe.metadata import RequestMetadata
 from airframe.models import ModelInfo
+from airframe.native_tools import NativeCapability, NativeTool
 from airframe.options import CopilotOptions
 from airframe.protocol import (
     AgentRuntime,
@@ -99,6 +100,7 @@ from airframe.sessions import (
     _enforce_budget_pre_turn,
     _fire_hook_event,
     _mcp_servers_fingerprint,
+    _resolve_native_tools,
     _split_prompt_parts,
 )
 from airframe.slash_commands import SlashCommand, SlashCommandsConfig
@@ -357,6 +359,14 @@ class CopilotRuntime(AgentRuntime):
     def supports(self, feature: Feature, model: ProviderModel | None = None) -> bool:
         return feature in self.SUPPORTED_FEATURES
 
+    def supported_native_tools(
+        self, model: ProviderModel | None = None
+    ) -> frozenset[NativeCapability]:
+        # Copilot exposes a hosted ``fetch_webpage`` built-in, but wiring it
+        # through the SDK's available_tools channel is a follow-up; declined
+        # for now (empty set ⇒ native_tools= for this adapter raises).
+        return frozenset()
+
     def unwrap(self, cls: type[T]) -> T:
         from copilot import CopilotClient
         from copilot.session import CopilotSession
@@ -392,6 +402,7 @@ class CopilotRuntime(AgentRuntime):
         model: ProviderModel | None = None,
         tools: list[FunctionTool] | None = None,
         mcp_servers: list[McpServerRef] | None = None,
+        native_tools: list[NativeTool] | None = None,
         on_permission: PermissionCallback | None = None,
         on_event: Callable[[HookEvent], None] | None = None,
         provider_options: ProviderOptions | None = None,
@@ -464,6 +475,13 @@ class CopilotRuntime(AgentRuntime):
             tools,
             adapter_label=self.label,
             feature_supported=self.supports(Feature.TOOLS_FUNCTION),
+        )
+        _resolve_native_tools(
+            native_tools,
+            adapter_label=self.label,
+            provider_id=self.PROVIDER_ID,
+            feature_supported=self.supports(Feature.TOOLS_NATIVE),
+            supported_capabilities=self.supported_native_tools(model),
         )
         # Phase 4 Iteration C — Copilot supports stdio + http natively;
         # SSE is declined per the plan. Surface a Copilot-specific
