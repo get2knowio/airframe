@@ -140,6 +140,7 @@ from airframe.events import (
 from airframe.features import Feature
 from airframe.metadata import RequestMetadata
 from airframe.models import ModelInfo
+from airframe.native_tools import NativeCapability, NativeTool
 from airframe.options import OpenCodeServerOptions
 from airframe.protocol import (
     AgentRuntime,
@@ -166,7 +167,6 @@ if TYPE_CHECKING:
     from airframe.events import RuntimeEvent
     from airframe.hooks import HookEvent
     from airframe.inputs import Prompt
-    from airframe.native_tools import NativeCapability, NativeTool
     from airframe.options import ProviderOptions
     from airframe.permission import PermissionCallback
     from airframe.thinking import ThinkingMode
@@ -265,7 +265,20 @@ class OpenCodeServerRuntime(AgentRuntime):
             Feature.BUDGET_USD_CAP,
             Feature.BUDGET_TURN_CAP,
             Feature.SLASH_COMMANDS,
+            # Vendor-hosted built-in tools: OpenCode's server runs
+            # ``websearch`` + ``webfetch`` (mapped from ``WEB_SEARCH`` /
+            # ``WEB_FETCH``) — enabled through the chat ``tools=`` allow-map.
+            Feature.TOOLS_NATIVE,
         }
+    )
+
+    #: Vendor-hosted built-in tools this adapter serves. OpenCode's server
+    #: runs ``websearch`` + ``webfetch``, mapped from the portable
+    #: ``WEB_SEARCH`` / ``WEB_FETCH`` capabilities and enabled via
+    #: ``native_tools=`` → the chat ``tools=`` allow-map (see
+    #: ``_translate_native_tools_for_opencode``).
+    SUPPORTED_NATIVE_TOOLS: ClassVar[frozenset[NativeCapability]] = frozenset(
+        {NativeCapability.WEB_SEARCH, NativeCapability.WEB_FETCH}
     )
 
     #: Six of airframe's eight hook kinds. ``pre_compact`` and
@@ -435,10 +448,10 @@ class OpenCodeServerRuntime(AgentRuntime):
     def supported_native_tools(
         self, model: ProviderModel | None = None
     ) -> frozenset[NativeCapability]:
-        # OpenCode's server runs built-in websearch/webfetch tools, exposed
-        # through OpenCodeServerOptions(available_tools=...). Surfacing them as
-        # portable native_tools is a follow-up; declined for now.
-        return frozenset()
+        # OpenCode's server runs built-in ``websearch`` + ``webfetch`` tools,
+        # mapped from the portable WEB_SEARCH / WEB_FETCH capabilities and
+        # enabled through the chat ``tools=`` allow-map.
+        return self.SUPPORTED_NATIVE_TOOLS
 
     def unwrap(self, cls: type[T]) -> T:
         if isinstance(self, cls):
@@ -509,7 +522,7 @@ class OpenCodeServerRuntime(AgentRuntime):
                 "invoke it server-side. Will flip True once SDK exposes MCP.",
                 feature=Feature.TOOLS_FUNCTION,
             )
-        _resolve_native_tools(
+        resolved_native_tools = _resolve_native_tools(
             native_tools,
             adapter_label=self.label,
             provider_id=self.PROVIDER_ID,
@@ -569,6 +582,7 @@ class OpenCodeServerRuntime(AgentRuntime):
             model=model,
             slash_commands=slash_commands,
             provider_options=opencode_options,
+            native_tools=resolved_native_tools,
             on_event=on_event,
         )
 
@@ -663,6 +677,7 @@ class OpenCodeServerSession:
         system: str | None = None,
         model: ProviderModel | None = None,
         provider_options: OpenCodeServerOptions | None = None,
+        native_tools: list[NativeTool] | None = None,
         on_event: Callable[[HookEvent], None] | None = None,
         slash_commands: SlashCommandsConfig | None = None,
     ) -> None:
@@ -670,6 +685,11 @@ class OpenCodeServerSession:
         self._system = system
         self._model = model
         self._provider_options = provider_options
+        # Vendor-hosted native tools (``WEB_SEARCH`` → ``websearch``,
+        # ``WEB_FETCH`` → ``webfetch``). Merged into the per-chat ``tools=``
+        # allow-map at request-assembly time; chat kwargs are rebuilt every
+        # turn so no fingerprint/cache key is needed.
+        self._native_tools: list[NativeTool] = list(native_tools or [])
         self._on_event = on_event
         # ``id`` is populated on first turn (or carried from resume=).
         # ``_owned`` tracks whether we created the server-side session
@@ -1041,6 +1061,16 @@ class OpenCodeServerSession:
         if self._system is not None:
             kwargs["system"] = self._system
         tool_filter = _tools_allow_denylist(self._provider_options)
+        # Vendor-hosted native tools force-enable the named built-in
+        # (``websearch`` / ``webfetch``) by setting it ``True`` in the chat
+        # allow-map, overriding any denylist entry. Note OpenCode's allow-map
+        # semantics: once any tool is allowed (True), unlisted built-ins are
+        # implicitly off — so a consumer who also needs other built-ins
+        # alongside a native tool should list them in
+        # ``OpenCodeServerOptions.available_tools`` (documented in the adapter
+        # doc's TOOLS_NATIVE row).
+        for native_name in _translate_native_tools_for_opencode(self._native_tools):
+            tool_filter[native_name] = True
         if tool_filter:
             kwargs["tools"] = tool_filter
         reasoning_envelope = _reasoning_extra_body(thinking, upstream_provider_id=provider_id)
@@ -1217,6 +1247,44 @@ def _tools_allow_denylist(opts: OpenCodeServerOptions | None) -> dict[str, bool]
         # where any False bit kills the slot).
         filter_map[name] = False
     return filter_map
+
+
+#: Maps portable native capabilities onto OpenCode's hosted built-in tool
+#: names (the same names the chat ``tools=`` allow-map keys on).
+_NATIVE_CAPABILITY_TO_OPENCODE_TOOL: dict[NativeCapability, str] = {
+    NativeCapability.WEB_SEARCH: "websearch",
+    NativeCapability.WEB_FETCH: "webfetch",
+}
+
+
+def _translate_native_tools_for_opencode(native_tools: list[NativeTool]) -> list[str]:
+    """Translate resolved :class:`NativeTool` entries to OpenCode tool names.
+
+    Semantic capabilities map through
+    :data:`_NATIVE_CAPABILITY_TO_OPENCODE_TOOL`; raw entries (already
+    filtered to this provider by ``_resolve_native_tools``) pass their
+    ``name`` through verbatim. ``options`` are accepted but not wired into
+    the chat call today. The list is deduplicated, preserving first-seen
+    order.
+    """
+    names: list[str] = []
+    for tool in native_tools:
+        if tool.capability is not None:
+            name = _NATIVE_CAPABILITY_TO_OPENCODE_TOOL.get(tool.capability)
+            if name is None:
+                # Unreachable — _resolve_native_tools already rejected any
+                # capability outside supported_native_tools().
+                raise UnsupportedFeatureError(
+                    f"opencode: native capability {tool.capability!r} has no "
+                    f"OpenCode built-in mapping.",
+                    feature=Feature.TOOLS_NATIVE,
+                )
+        else:
+            assert tool.name is not None  # raw tools always carry a name
+            name = tool.name
+        if name not in names:
+            names.append(name)
+    return names
 
 
 # --- Reasoning pass-through (Iteration C) ------------------------------------

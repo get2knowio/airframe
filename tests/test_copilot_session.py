@@ -2359,3 +2359,79 @@ async def test_copilot_options_wrong_namespace_raises_unsupported_feature(
         rt.session(provider_options=ClaudeOptions())
     assert "ClaudeOptions" in str(exc_info.value)
     assert "CopilotOptions" in str(exc_info.value)
+
+
+# --- Native (vendor-hosted) tools: WEB_FETCH → fetch_webpage ---------------
+
+
+def _native_fake_send(mock_sdk: dict[str, Any]) -> None:
+    async def fake_send(prompt: str, *, timeout: float, **_: Any) -> None:
+        _fire(mock_sdk["handlers"], _FakeEvent(_FakeUsage()))
+        _fire(mock_sdk["handlers"], _FakeEvent(_FakeAssistantMessage("ok")))
+
+    mock_sdk["session"].send_and_wait = AsyncMock(side_effect=fake_send)
+
+
+async def test_native_web_fetch_with_allowlist_unions_fetch_webpage(
+    mock_sdk: dict[str, Any],
+) -> None:
+    """A native WEB_FETCH request unions ``fetch_webpage`` into an existing
+    allowlist rather than replacing it."""
+    from airframe import NativeTool
+    from airframe.options import CopilotOptions
+
+    _native_fake_send(mock_sdk)
+    rt = CopilotRuntime()
+    sess = rt.session(
+        native_tools=[NativeTool.web_fetch()],
+        provider_options=CopilotOptions(available_tools=("read",)),
+    )
+    try:
+        await sess.execute("hi")
+    finally:
+        await sess.close()
+
+    call = mock_sdk["client"].create_session.await_args_list[0]
+    assert set(call.kwargs["available_tools"]) == {"read", "fetch_webpage"}
+
+
+async def test_native_web_fetch_removes_tool_from_denylist(
+    mock_sdk: dict[str, Any],
+) -> None:
+    """An explicit native request wins over a provider-options denylist."""
+    from airframe import NativeTool
+    from airframe.options import CopilotOptions
+
+    _native_fake_send(mock_sdk)
+    rt = CopilotRuntime()
+    sess = rt.session(
+        native_tools=[NativeTool.web_fetch()],
+        provider_options=CopilotOptions(excluded_tools=("fetch_webpage",)),
+    )
+    try:
+        await sess.execute("hi")
+    finally:
+        await sess.close()
+
+    call = mock_sdk["client"].create_session.await_args_list[0]
+    # fetch_webpage was the only denied tool → the kwarg drops out entirely.
+    assert "excluded_tools" not in call.kwargs
+
+
+async def test_native_web_fetch_no_options_leaves_available_tools_unset(
+    mock_sdk: dict[str, Any],
+) -> None:
+    """With no allowlist, the hosted built-in is on by default — we must not
+    introduce a restrictive allowlist that disables everything else."""
+    from airframe import NativeTool
+
+    _native_fake_send(mock_sdk)
+    rt = CopilotRuntime()
+    sess = rt.session(native_tools=[NativeTool.web_fetch()])
+    try:
+        await sess.execute("hi")
+    finally:
+        await sess.close()
+
+    call = mock_sdk["client"].create_session.await_args_list[0]
+    assert "available_tools" not in call.kwargs
