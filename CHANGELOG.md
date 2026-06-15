@@ -6,6 +6,16 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **`kimi` is temporarily disabled from discovery.** `KimiRuntime` is no
+  longer registered in `list_providers()` / `runtime_for()`, because
+  `kimi-agent-sdk` pins `kimi-cli<1.13 → fastmcp 2.12.5 → mcp<1.17`, which
+  can't co-install with `claude-agent-sdk` (`mcp>=1.23`). The adapter and its
+  `KimiRuntime` export stay importable; discovery will be re-enabled once
+  upstream widens those pins. Consumers wanting Kimi models today can reach
+  them via Moonshot's OpenAI-compatible endpoint (`api.moonshot.ai/v1`).
+
 ### Added
 
 - **`BedrockRuntime.list_models()` now includes inference profiles.**

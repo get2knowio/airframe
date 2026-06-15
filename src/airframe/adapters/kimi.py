@@ -1,5 +1,18 @@
 """``KimiRuntime`` — :class:`AgentRuntime` over Moonshot AI's Kimi Agent SDK.
 
+.. note::
+
+   **Disabled from discovery.** ``KimiRuntime`` is intentionally not
+   registered in :func:`airframe.discovery._builtin_runtime_classes`, so it
+   does not appear in :func:`airframe.list_providers` and can't be reached
+   via :func:`airframe.runtime_for`. ``kimi-agent-sdk`` pins
+   ``kimi-cli<1.13 → fastmcp 2.12.5 → mcp<1.17``, which can't co-install with
+   ``claude-agent-sdk`` (``mcp>=1.23``) — see issue #29. The class stays
+   importable; re-enable discovery once upstream widens those pins. Trackers:
+   #29 (mcp conflict), #36 (live gaps), PR #35 (execute-stub fix). Consumers
+   wanting Kimi models today can use Moonshot's OpenAI-compatible endpoint
+   instead.
+
 Wraps the official ``kimi-agent-sdk`` Python package (first-party from
 the ``MoonshotAI`` org on GitHub; Apache-2.0) which itself is a thin
 Python surface around the ``kimi-cli`` subprocess. Architecturally
