@@ -65,22 +65,22 @@ its lifetime.
                 │  • id: str | None  (resume)   │
                 └───────────────────────────────┘
                                 │
-  ┌──────┬───────┬───────┬───────┬──────────────┬──────────────┐
-  ▼      ▼       ▼       ▼       ▼              ▼              ▼
-┌──────┐┌──────┐┌──────┐┌──────┐┌────────────┐┌────────────┐┌──────────────┐
-│Bedrk ││Claude││Cpilot││ Kimi ││ OpenCode   ││ OpenAI     ││  (third-     │
-│+Sess ││Code+ ││+Sess ││+Sess ││ Server+    ││ Compat+    ││  party       │
-│      ││Sess  ││      ││      ││ Sess       ││ Sess       ││  entry pts)  │
-└──────┘└──────┘└──────┘└──────┘└────────────┘└────────────┘└──────────────┘
-   │       │      │       │         │              │
-   ▼       ▼      ▼       ▼         ▼              ▼
-aioboto3 claude- github- kimi-   opencode-ai     openai
-bedrock- agent-  copilot-agent-  HTTP +          chat.completions
-runtime  sdk     sdk     sdk     SSE bus         over https
-(Converse(subproc)(subproc(subproc(opencode      ↳ subclasses:
- API)            +tool    +JSONL  serve, local    OpenCodeGo,
-                 reg)            or remote)      OpenCodeZen,
-                                                 OpenRouter
+  ┌──────┬───────┬───────┬──────────────┬──────────────┐
+  ▼      ▼       ▼       ▼              ▼              ▼
+┌──────┐┌──────┐┌──────┐┌────────────┐┌────────────┐┌──────────────┐
+│Bedrk ││Claude││Cpilot││ OpenCode   ││ OpenAI     ││  (third-     │
+│+Sess ││Code+ ││+Sess ││ Server+    ││ Compat+    ││  party       │
+│      ││Sess  ││      ││ Sess       ││ Sess       ││  entry pts)  │
+└──────┘└──────┘└──────┘└────────────┘└────────────┘└──────────────┘
+   │       │      │         │              │
+   ▼       ▼      ▼         ▼              ▼
+aioboto3 claude- github- opencode-ai     openai
+bedrock- agent-  copilot-HTTP +          chat.completions
+runtime  sdk     sdk     SSE bus         over https
+(Converse(subproc)(subproc(opencode      ↳ subclasses:
+ API)            +tool   serve, local    OpenCodeGo,
+                 reg)    or remote)      OpenCodeZen,
+                                         OpenRouter
 ```
 
 `runtime.execute(prompt, ...)` is now documented sugar for
@@ -100,7 +100,7 @@ The runtime/session split draws a clean line:
 
 | Lives on the runtime | Lives on the session |
 |---|---|
-| Long-lived vendor handles (`CopilotClient`, `AsyncOpenAI`, `aioboto3` client, `AsyncOpencode`) | Per-conversation vendor handles (`ClaudeSDKClient`, `CopilotSession`, `kimi_agent_sdk.Session`, `messages=[]` buffer; OpenCode Server's `id: str | None` carries the server-side session reference) |
+| Long-lived vendor handles (`CopilotClient`, `AsyncOpenAI`, `aioboto3` client, `AsyncOpencode`) | Per-conversation vendor handles (`ClaudeSDKClient`, `CopilotSession`, `messages=[]` buffer; OpenCode Server's `id: str | None` carries the server-side session reference) |
 | Auth resolution (`api_key`, `github_token`) | The system prompt baked into the vendor session |
 | Default model | Per-turn schema (when the vendor bakes it at session-creation, the session may reconnect on schema change) |
 | Capability declarations (`supports(Feature.X)`) | `id: str | None` — the live vendor session_id for resume |
@@ -145,31 +145,31 @@ a single `TextDelta` carrying the full response immediately before
 Each adapter declares which protocol features it implements via
 `runtime.supports(Feature.X)`. Current capability matrix:
 
-| Feature | Claude Code | Copilot | Kimi | OpenAI-compat |
-|---|---|---|---|---|
-| `STRUCTURED_OUTPUT_JSON_SCHEMA` | ✓ | ✓ | ◐ scaffolded | ✓ |
-| `STRUCTURED_OUTPUT_STRICT` | ✗ | ✗ | ✗ | ✗ |
-| `STREAMING` | ✓ | ✓ | ✓ | ✓ |
-| `CANCEL` | ✓ | ✓ | ✓ | ✓ |
-| `SESSION_RESUME` | ✓ | ✓ | ✓ | ✗ (no server-side session) |
-| `REASONING_EFFORT` | ✓ | ✓ | ✓ (boolean) | ✓ |
-| `REASONING_BUDGET_TOKENS` | ✓ | ✗ | ✗ | ✗ |
-| `VISION_INPUT` | ✓ | ✓ | ✓ | ✓ |
-| `FILE_INPUT` | ✓ | ✓ | ✗ (no SDK channel) | ✗ (chat-completions has no file slot) |
-| `TOOLS_FUNCTION` | ✓ | ✓ | ✗ (permanent — use MCP) | ✓ |
-| `TOOLS_MCP_STDIO` | ✓ | ✓ | ✓ | ✗ (Responses-only) |
-| `TOOLS_MCP_HTTP` | ✓ | ✓ | ✓ | ✗ |
-| `TOOLS_MCP_SSE` | ✓ | ✗ (declined, switch to http) | ✓ | ✗ |
-| `TOOLS_MCP_IN_PROCESS` | ✗ (internal `tools=` plumbing) | ✗ | ✗ (permanent) | ✗ |
-| `PERMISSION_CALLBACK` | ✓ | ✓ | ✓ | ✗ (permanent) |
-| `LIFECYCLE_HOOKS` | ✓ (8 kinds) | ✓ (7 kinds, no `rate_limit`) | ✓ (7 kinds, no `rate_limit`) | ✓ (6 kinds, synthesised) |
-| `BUDGET_USD_CAP` | ✓ | ✓ | ✓ | ✓ |
-| `BUDGET_TURN_CAP` | ✓ | ✗ (vendor caps internally) | ✓ | ✓ |
-| `RATE_LIMIT_TELEMETRY` | ✓ (typed `RateLimitInfo`) | ✗ | ✗ | ✓ (`x-ratelimit-*` headers) |
-| `REASONING_OUTPUT` | ✓ (`ThinkingBlock` content) | ✗ | ✗ | ✓ (`message.reasoning_content`) |
-| `REQUEST_METADATA` | ✓ (`user_id` → `user`) | ✗ (soft drop) | ✗ (soft drop) | ✓ (`user=` / `metadata=` / header) |
-| `COUNT_TOKENS` | ✓ (anthropic SDK) | ✗ | ✗ | ✓ (`tiktoken`) |
-| `PROMPT_CACHE_CONTROL` | ✗ (soft drop) | ✗ (soft drop) | ✗ (soft drop) | ✓ (`prompt_cache_key` / `_retention`) |
+| Feature | Claude Code | Copilot | OpenAI-compat |
+|---|---|---|---|
+| `STRUCTURED_OUTPUT_JSON_SCHEMA` | ✓ | ✓ | ✓ |
+| `STRUCTURED_OUTPUT_STRICT` | ✗ | ✗ | ✗ |
+| `STREAMING` | ✓ | ✓ | ✓ |
+| `CANCEL` | ✓ | ✓ | ✓ |
+| `SESSION_RESUME` | ✓ | ✓ | ✗ (no server-side session) |
+| `REASONING_EFFORT` | ✓ | ✓ | ✓ |
+| `REASONING_BUDGET_TOKENS` | ✓ | ✗ | ✗ |
+| `VISION_INPUT` | ✓ | ✓ | ✓ |
+| `FILE_INPUT` | ✓ | ✓ | ✗ (chat-completions has no file slot) |
+| `TOOLS_FUNCTION` | ✓ | ✓ | ✓ |
+| `TOOLS_MCP_STDIO` | ✓ | ✓ | ✗ (Responses-only) |
+| `TOOLS_MCP_HTTP` | ✓ | ✓ | ✗ |
+| `TOOLS_MCP_SSE` | ✓ | ✗ (declined, switch to http) | ✗ |
+| `TOOLS_MCP_IN_PROCESS` | ✗ (internal `tools=` plumbing) | ✗ | ✗ |
+| `PERMISSION_CALLBACK` | ✓ | ✓ | ✗ (permanent) |
+| `LIFECYCLE_HOOKS` | ✓ (8 kinds) | ✓ (7 kinds, no `rate_limit`) | ✓ (6 kinds, synthesised) |
+| `BUDGET_USD_CAP` | ✓ | ✓ | ✓ |
+| `BUDGET_TURN_CAP` | ✓ | ✗ (vendor caps internally) | ✓ |
+| `RATE_LIMIT_TELEMETRY` | ✓ (typed `RateLimitInfo`) | ✗ | ✓ (`x-ratelimit-*` headers) |
+| `REASONING_OUTPUT` | ✓ (`ThinkingBlock` content) | ✗ | ✓ (`message.reasoning_content`) |
+| `REQUEST_METADATA` | ✓ (`user_id` → `user`) | ✗ (soft drop) | ✓ (`user=` / `metadata=` / header) |
+| `COUNT_TOKENS` | ✓ (anthropic SDK) | ✗ | ✓ (`tiktoken`) |
+| `PROMPT_CACHE_CONTROL` | ✗ (soft drop) | ✗ (soft drop) | ✓ (`prompt_cache_key` / `_retention`) |
 | `SLASH_COMMANDS` | ✓ (SDK auto-expands) | ✓ (discovery only) | ✓ (discovery only) | ✓ (discovery only) |
 | `SANDBOX` / `SUBAGENTS` | ✗ (planned, signal-gated) | ✗ (planned) | ✗ (planned) | ✗ (planned) |
 
@@ -189,8 +189,7 @@ probes under `examples/probe_*.py` are the manual counterpart).
 ClassVar[frozenset[str]]` containing the subset of the eight
 [`HookEventKind`](../src/airframe/hooks.py) literals it can
 honestly emit. Claude has all 8 (native `PreCompact` + `RateLimit`
-events); Copilot drops `rate_limit`; Kimi drops `rate_limit`
-(Moonshot raises 429s as exceptions rather than wire events);
+events); Copilot drops `rate_limit`;
 OpenAI-compat drops both `pre_compact` and `rate_limit` since it
 synthesises events from the tool loop; OpenCode Server drops the
 same two (its SDK doesn't surface distinct compaction or rate-limit
@@ -205,10 +204,10 @@ on the per-runtime set.
 * **`session()` is a factory; `AgentSession` is the canonical
   multi-turn handle.** Every vendor's SDK has a per-conversation
   abstraction (ClaudeSDKClient, CopilotSession,
-  `kimi_agent_sdk.Session`, the client-side message buffer); the
+  the client-side message buffer); the
   protocol mirrors that shape so the per-adapter glue is thin.
 * **`AgentSession.id` is `str | None`.** Adapters with server-side
-  sessions populate it (Claude Code, Copilot, Kimi); chat-completions
+  sessions populate it (Claude Code, Copilot); chat-completions
   vendors leave it `None` because there's no vendor-side session to
   refer to. Consumer code branching on `session.id is None` can
   treat that as the "stateless adapter" signal.
@@ -221,7 +220,7 @@ on the per-runtime set.
 * **`unwrap()` lives on both runtime and session.** Runtime-level
   vendor types (`CopilotClient`, `AsyncOpenAI`, `aioboto3` client)
   reach through `runtime.unwrap()`; session-level vendor types
-  (`ClaudeSDKClient`, `CopilotSession`, `kimi_agent_sdk.Session`)
+  (`ClaudeSDKClient`, `CopilotSession`)
   reach through `session.unwrap()`.
 
 ## Why errors are vendor-agnostic
@@ -302,29 +301,6 @@ These are the sharp edges the adapters absorb so you don't have to.
 * Cancellation: `CopilotSession.abort()` aborts the in-flight CLI
   turn.
 * Cost telemetry: `AssistantUsageData` events on the session stream.
-
-### Kimi Agent SDK
-
-* Streaming via `Session.prompt()` — an async generator yielding
-  `WireMessage` instances (`TextPart`, `ThinkPart`, `ToolCall`,
-  `ToolResult`, `ApprovalRequest`, `TokenUsage`, etc.). The adapter
-  classifies on `type(wire).__name__` rather than `isinstance` so
-  the unit tests can use `sys.modules`-injected fakes (the SDK can't
-  be co-installed with `claude-agent-sdk`).
-* Resume: `Session.resume(work_dir, session_id)`; multi-turn state
-  persists in the SDK's session store.
-* Cancellation: `Session.cancel()` sets the SDK's async cancel
-  event; the in-flight `prompt()` raises `RunCancelled` → surfaced
-  as `RuntimeCancelledError`.
-* `thinking` is session-scoped (`Session.create(thinking: bool)`).
-  Toggling between turns rebuilds the SDK session and re-resumes by
-  id to preserve conversation state.
-* Permission via `ApprovalRequest.resolve()` (per-call); `defer`
-  collapses to `reject` with feedback because the SDK's approval
-  channel is synchronous.
-* Auth: SDK reads `KIMI_API_KEY` from env; the adapter mutates
-  env for the call duration when an explicit `api_key=` is passed
-  and restores it on `close()`.
 
 ### AWS Bedrock (Converse API)
 
@@ -522,7 +498,7 @@ Adapters compute `cost_usd` two ways:
 
 1. **Vendor-reported.** Claude Agent SDK exposes `total_cost_usd`
    directly. `ClaudeCodeRuntime` propagates it unchanged.
-2. **Computed from token counts.** OpenAI-compat / Copilot / Kimi
+2. **Computed from token counts.** OpenAI-compat / Copilot
    return tokens but not cost. Each adapter ships a stub pricing
    map (USD per 1K tokens) and computes `cost_usd = (in_tokens /
    1000) * in_rate + (out_tokens / 1000) * out_rate`. Models not

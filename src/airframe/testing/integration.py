@@ -86,7 +86,8 @@ from airframe.features import Feature
 _PROVIDER_AUTH: dict[str, list[str]] = {
     "claude": ["CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY"],
     "github-copilot": ["GITHUB_TOKEN", "GH_TOKEN"],
-    "kimi": ["KIMI_API_KEY"],
+    # kimi adapter removed (security: drops vulnerable transitive mcp<1.17)
+    # "kimi": ["KIMI_API_KEY"],
     "opencode-zen": ["OPENCODE_API_KEY"],
     "opencode-go": ["OPENCODE_API_KEY"],
     "openrouter": ["OPENROUTER_API_KEY"],
@@ -317,7 +318,7 @@ async def test_integration_permission_callback_fires(adapter_runtime: Any) -> No
     """The :class:`PermissionCallback` is invoked at least once during
     a tool-using session.
 
-    Claude / Copilot / Kimi fire per call. Adapters with session-wide
+    Claude / Copilot fire per call. Adapters with session-wide
     permission models (e.g. a single up-front decision) satisfy the
     contract too — the assertion is "at least once," not "per call."
     """

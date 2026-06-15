@@ -192,13 +192,6 @@ pip install airframe-agents[all]            # Everything
 pip install airframe-agents[testing]        # Conformance contract suite (pytest)
 ```
 
-**Kimi is temporarily unavailable.** The `kimi` provider (Moonshot's
-Kimi Agent SDK) is disabled from discovery: `kimi-agent-sdk`'s
-`kimi-cli → fastmcp → mcp<1.17` chain can't co-install with
-`claude-agent-sdk`'s `mcp>=1.23`, and upstream hasn't yet widened the
-pin. For Kimi models in the meantime, reach Moonshot's OpenAI-compatible
-endpoint (`api.moonshot.ai/v1`) through the OpenAI-compatible family.
-
 `list_providers()` filters by which extras you installed:
 `airframe-agents[copilot]` makes `list_providers()` return
 `["github-copilot"]`. Pass `installed_only=False` to see every

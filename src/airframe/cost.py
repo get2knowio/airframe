@@ -7,7 +7,7 @@ sink the consumer uses.
 
 Adapters with vendor-computed cost (Claude Agent SDK exposes
 ``total_cost_usd`` directly) populate ``cost_usd`` from the vendor's
-report. Adapters without (raw OpenAI-family, Copilot, Kimi) compute
+report. Adapters without (raw OpenAI-family, Copilot) compute
 ``cost_usd`` from token counts × a per-model pricing rate — and emit
 ``cost_usd=None`` when no rate is configured for the model.
 """

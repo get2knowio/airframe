@@ -70,7 +70,7 @@ class ProviderModel:
 
     Attributes:
         provider_id: Canonical adapter identifier — ``"claude"``,
-            ``"github-copilot"``, ``"kimi"``, ``"opencode-zen"``,
+            ``"github-copilot"``, ``"opencode-zen"``,
             ``"opencode-go"``, etc.
         model_id: The model identifier the vendor recognises
             (e.g. ``"claude-haiku-4-5"``, ``"gpt-5-mini"``).
@@ -144,8 +144,9 @@ class AgentRuntime(Protocol):
       Claude family via ``claude-agent-sdk``; subscription auth.
     * :class:`airframe.adapters.copilot.CopilotRuntime` —
       Copilot via ``github-copilot-sdk``; GitHub Copilot subscription.
-    * :class:`airframe.adapters.kimi.KimiRuntime` — Moonshot Kimi
-      via ``kimi-agent-sdk``; ``KIMI_API_KEY``.
+    .. kimi adapter removed (security: drops vulnerable transitive mcp<1.17)
+    .. * :class:`airframe.adapters.kimi.KimiRuntime` — Moonshot Kimi
+    ..   via ``kimi-agent-sdk``; ``KIMI_API_KEY``.
     * :class:`airframe.adapters.opencode_zen.OpenCodeZenRuntime`
       — opencode-go Zen gateway via HTTP; opencode subscription.
 
@@ -372,8 +373,9 @@ class AgentRuntime(Protocol):
           :class:`TypeError` if requested before a client is built.
         * :class:`CopilotRuntime` accepts ``unwrap(CopilotClient)`` and
           ``unwrap(CopilotSession)``.
-        * :class:`KimiRuntime` accepts ``unwrap(kimi_agent_sdk.Session)``
-          on the session (after first ``execute()``).
+        .. kimi adapter removed (security: drops vulnerable transitive mcp<1.17)
+        .. * :class:`KimiRuntime` accepts ``unwrap(kimi_agent_sdk.Session)``
+        ..   on the session (after first ``execute()``).
         * :class:`OpenAICompatibleRuntime` accepts ``unwrap(AsyncOpenAI)``.
 
         Every adapter additionally accepts ``unwrap(type(self))`` and
@@ -518,9 +520,7 @@ class AgentRuntime(Protocol):
                 :data:`~airframe.features.Feature.TOOLS_FUNCTION`
                 True on every adapter that natively supports
                 function tools (Claude, Copilot, OpenAI-compat).
-                Kimi declines permanently — its Python SDK has no
-                Python-callable tool channel; wrap as MCP via
-                ``mcp_servers=`` instead. Adapters whose
+                Adapters whose
                 ``TOOLS_FUNCTION`` flag is False raise
                 :class:`~airframe.errors.UnsupportedFeatureError` on
                 a non-None ``tools=``.
@@ -532,7 +532,7 @@ class AgentRuntime(Protocol):
                 :data:`~airframe.features.Feature.TOOLS_MCP_STDIO` /
                 :data:`~airframe.features.Feature.TOOLS_MCP_HTTP` /
                 :data:`~airframe.features.Feature.TOOLS_MCP_SSE`
-                flags True per adapter (Claude / Kimi — all three;
+                flags True per adapter (Claude — all three;
                 Copilot — stdio + http; OpenAI-compat declines all).
                 Adapters whose transport flag is False raise
                 :class:`~airframe.errors.UnsupportedFeatureError` on
@@ -566,7 +566,7 @@ class AgentRuntime(Protocol):
                 returned :class:`~airframe.permission.PermissionDecision`
                 to the vendor's permission channel. Phase 5 flips
                 :data:`~airframe.features.Feature.PERMISSION_CALLBACK`
-                True on Claude / Copilot / Kimi; OpenAI-compat
+                True on Claude / Copilot; OpenAI-compat
                 declines permanently (Chat Completions has no
                 permission wire shape).
             on_event: Optional ``Callable[[HookEvent], None]`` that
@@ -638,7 +638,7 @@ class AgentSession(Protocol):
 
     The shape mirrors the per-vendor session abstractions airframe
     wraps — Claude's :class:`ClaudeSDKClient` lifecycle, Copilot's
-    :class:`CopilotSession`, Kimi's :class:`kimi_agent_sdk.Session`,
+    :class:`CopilotSession`,
     and the client-side ``messages=[]`` buffer used for
     OpenAI-compatible HTTP — collapsed onto one neutral interface.
 
@@ -808,7 +808,7 @@ class AgentSession(Protocol):
 
         Cooperative cancellation: the adapter signals its vendor
         (``client.interrupt()`` on Claude, ``session.abort()`` on
-        Copilot, ``Session.cancel()`` on Kimi, ``Task.cancel()`` on
+        Copilot, ``Task.cancel()`` on
         the OpenAI-compatible HTTP request). The cancelled
         :meth:`execute` / :meth:`stream` raises
         :class:`~airframe.errors.RuntimeCancelledError`; a stream may
@@ -832,7 +832,7 @@ class AgentSession(Protocol):
         """Release the session's vendor-side resources.
 
         Disconnects the vendor session (Claude subprocess link,
-        Copilot session handle, Kimi session, client-side message
+        Copilot session handle, client-side message
         buffer) but leaves the parent :class:`AgentRuntime`'s
         runtime-wide resources (subprocess pool, HTTP client, auth
         tokens) intact. Idempotent and must not raise — same
@@ -859,9 +859,10 @@ class AgentSession(Protocol):
         * :class:`CopilotAgentSession` accepts
           ``unwrap(CopilotSession)`` — returns the underlying vendor
           session once :meth:`_ensure_session` has run.
-        * :class:`KimiSession` accepts ``unwrap(Session)`` — returns
-          the underlying Kimi Agent SDK session once it has been
-          constructed.
+        .. kimi adapter removed (security: drops vulnerable transitive mcp<1.17)
+        .. * :class:`KimiSession` accepts ``unwrap(Session)`` — returns
+        ..   the underlying Kimi Agent SDK session once it has been
+        ..   constructed.
         * :class:`OpenAICompatibleSession` accepts no native types
           today — the OpenAI HTTP client lives on the runtime
           (reach it via ``runtime.unwrap(AsyncOpenAI)``); the

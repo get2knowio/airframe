@@ -13,7 +13,6 @@ production (explicit constructor argument).
 | **BedrockRuntime** | explicit `aws_access_key_id`/`secret`/`session_token` → `AWS_ACCESS_KEY_ID`+`AWS_SECRET_ACCESS_KEY` env → `AWS_PROFILE` env → default boto3 chain (IAM instance / ECS task / Lambda / IRSA) | `airframe-agents[bedrock]` |
 | **ClaudeCodeRuntime** | `CLAUDE_CODE_OAUTH_TOKEN` → `~/.claude/.credentials.json` → `ANTHROPIC_API_KEY` | `airframe-agents[claude]` |
 | **CopilotRuntime** | `github_token=` constructor arg → `GITHUB_TOKEN` env → `GH_TOKEN` env → `use_logged_in_user=True` (`gh auth login` storage) | `airframe-agents[copilot]` |
-| **KimiRuntime** | `api_key=` constructor arg → `KIMI_API_KEY` env → SDK's own resolution | `airframe-agents[kimi]` |
 | **OpenCodeGoRuntime** | `api_key=` constructor arg → `OPENCODE_API_KEY` env → `~/.local/share/opencode/auth.json::opencode-go.key` | `airframe-agents[openai-compat]` |
 | **OpenCodeServerRuntime** | explicit `username=`/`password=` → `OPENCODE_SERVER_USERNAME`+`OPENCODE_SERVER_PASSWORD` env → unauthenticated loopback (default) | `airframe-agents[opencode]` |
 | **OpenCodeZenRuntime** | `api_key=` constructor arg → `OPENCODE_API_KEY` env → `~/.local/share/opencode/auth.json::opencode.key` | `airframe-agents[openai-compat]` |
@@ -153,49 +152,6 @@ Three sources, checked in order at `execute()` time:
 - The Copilot CLI does not serve Claude models — `validate_binding()`
   returns False for any `model_id` starting with `claude-`. Route
   Claude work through `ClaudeCodeRuntime` instead.
-
-## KimiRuntime
-
-```python
-from airframe import KimiRuntime
-runtime = KimiRuntime()                      # env var
-runtime_explicit = KimiRuntime(api_key="sk-...")
-```
-
-Three sources, checked in order at session-construction time:
-
-1. **`api_key=` constructor arg** — explicit Moonshot API key.
-   Highest precedence. Mutates `os.environ["KIMI_API_KEY"]` for
-   the duration of the underlying SDK call and restores it on
-   `session.close()` so the key doesn't leak across runtimes in
-   the same process.
-2. **`KIMI_API_KEY` env var** — the SDK's native env-derived
-   default. `KIMI_BASE_URL` and `KIMI_MODEL_NAME` work the same
-   way for the companion knobs (base URL override, default model).
-3. **The SDK's own resolution** if neither of the above is set —
-   airframe doesn't override this layer; whatever
-   `kimi-agent-sdk`'s `Config` object picks up wins.
-
-If no API key resolves through any layer, the first network call
-raises `RuntimeAuthError` pointing at
-<https://platform.moonshot.ai/console/api-keys>.
-
-### Notes
-
-- The `kimi-cli` subprocess must be on PATH —
-  [install instructions](https://github.com/MoonshotAI/kimi-cli).
-  Like `ClaudeCodeRuntime`'s posture on the `claude` CLI, the
-  adapter does *not* bundle `kimi-cli`.
-- `base_url=` constructor arg overrides the Moonshot API endpoint
-  (defaults to `https://api.moonshot.ai/v1`); honours
-  `KIMI_BASE_URL` env var. Useful when fronting Kimi through a
-  proxy or hitting a region-specific endpoint.
-- `model=` constructor arg sets the default model when
-  `execute()` is called without a `ProviderModel`; honours
-  `KIMI_MODEL_NAME` env var.
-- Mutual-exclusion gate: `KimiOptions(yolo=True)` and
-  `on_permission=callback` cannot be combined; passing both
-  raises `UnsupportedFeatureError` at `runtime.session()`.
 
 ## OpenCodeGoRuntime
 

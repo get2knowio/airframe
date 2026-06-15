@@ -19,7 +19,6 @@ Usage::
     uv run python examples/probe_streaming.py
     uv run python examples/probe_streaming.py --provider claude
     uv run python examples/probe_streaming.py --provider github-copilot
-    uv run python examples/probe_streaming.py --provider kimi
     uv run python examples/probe_streaming.py --provider opencode
 
 Defaults to ``claude`` because Claude Code emits the richest delta
@@ -96,7 +95,7 @@ async def main() -> int:
             file=sys.stderr,
         )
         print(
-            "Install one with: pip install airframe-agents[claude|copilot|kimi|openai-compat]",
+            "Install one with: pip install airframe-agents[claude|copilot|openai-compat]",
             file=sys.stderr,
         )
         return 1

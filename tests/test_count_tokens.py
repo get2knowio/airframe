@@ -13,7 +13,6 @@ import pytest
 
 from airframe.adapters.bedrock import BedrockRuntime
 from airframe.adapters.copilot import CopilotRuntime
-from airframe.adapters.kimi import KimiRuntime
 from airframe.adapters.opencode_server import OpenCodeServerRuntime
 from airframe.adapters.opencode_zen import OpenCodeZenRuntime
 from airframe.errors import UnsupportedFeatureError
@@ -89,13 +88,6 @@ async def test_copilot_count_tokens_raises_unsupported() -> None:
     with pytest.raises(UnsupportedFeatureError) as excinfo:
         await runtime.count_tokens("hello")
     assert excinfo.value.feature == Feature.COUNT_TOKENS
-
-
-async def test_kimi_count_tokens_raises_unsupported() -> None:
-    runtime = KimiRuntime()
-    assert runtime.supports(Feature.COUNT_TOKENS) is False
-    with pytest.raises(UnsupportedFeatureError):
-        await runtime.count_tokens("hello")
 
 
 async def test_bedrock_count_tokens_raises_unsupported() -> None:

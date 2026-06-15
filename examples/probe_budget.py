@@ -18,7 +18,6 @@ Usage::
     uv run python examples/probe_budget.py
     uv run python examples/probe_budget.py --provider claude
     uv run python examples/probe_budget.py --provider github-copilot
-    uv run python examples/probe_budget.py --provider kimi
     uv run python examples/probe_budget.py --provider opencode
 
 Defaults to ``claude`` (broadest budget surface — both caps).
@@ -77,7 +76,6 @@ def _print_matrix() -> None:
     for pid in (
         "claude",
         "github-copilot",
-        "kimi",
         "bedrock",
         "opencode-zen",
         "opencode-go",
@@ -220,7 +218,7 @@ async def main() -> int:
             file=sys.stderr,
         )
         print(
-            "Install one with: pip install airframe-agents[claude|copilot|kimi|openai-compat]",
+            "Install one with: pip install airframe-agents[claude|copilot|openai-compat]",
             file=sys.stderr,
         )
         return 1

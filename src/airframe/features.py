@@ -154,7 +154,7 @@ class Feature(StrEnum):
     """``session(native_tools=[NativeTool(...)])`` enables vendor-hosted
     built-in tools — ones the wrapped SDK both describes to the model and
     executes itself (Claude ``WebSearch`` / ``WebFetch``, OpenAI ``web_search``,
-    Kimi ``$web_search``, Copilot ``fetch_webpage``). Distinct from
+    Copilot ``fetch_webpage``). Distinct from
     :data:`TOOLS_FUNCTION` (caller supplies a Python handler) and the
     :data:`TOOLS_MCP_STDIO` family (external server): native tools carry no
     handler and no server ref — the consumer references a capability and the

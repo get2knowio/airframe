@@ -17,7 +17,6 @@ Usage::
     uv run python examples/probe_session_resume.py
     uv run python examples/probe_session_resume.py --provider claude
     uv run python examples/probe_session_resume.py --provider github-copilot
-    uv run python examples/probe_session_resume.py --provider kimi
 
 Defaults to ``claude``. OpenAI-compat is rejected because the
 chat-completions wire format has no server-side session — see the
@@ -87,7 +86,7 @@ async def main() -> int:
     if not runtime.supports(Feature.SESSION_RESUME):
         print(
             f"FAIL: {type(runtime).__name__} does not declare Feature.SESSION_RESUME. "
-            f"Resume is wired on Claude Code, Copilot, and Kimi; OpenAI-compatible "
+            f"Resume is wired on Claude Code and Copilot; OpenAI-compatible "
             f"adapters can't resume because chat-completions has no server-side session.",
             file=sys.stderr,
         )

@@ -136,8 +136,7 @@ def test_unwired_features_stay_false(adapters: list) -> None:
         # TOOLS_NATIVE (vendor-hosted built-in tools): Claude serves
         # WEB_SEARCH + WEB_FETCH (→ allowed_tools), Copilot serves WEB_FETCH
         # (→ fetch_webpage), OpenCode serves both (→ websearch/webfetch chat
-        # allow-map). Kimi still declines (its $web_search SDK channel is
-        # unverified — tracked separately); OpenAI-compat / Bedrock decline
+        # allow-map). OpenAI-compat / Bedrock decline
         # on surface grounds.
         Feature.TOOLS_NATIVE,
         # Phase 5 Iteration B flipped PERMISSION_CALLBACK on Claude
@@ -340,7 +339,6 @@ def test_all_adapters_declare_vision_input(adapters: list) -> None:
 
     * Anthropic / Claude Code — prompt-text hint + Read tool.
     * GitHub Copilot — :class:`FileAttachment` on ``send_and_wait``.
-    * Moonshot Kimi — ``ImageURLPart`` in the prompt content list.
     * OpenAI-compatible HTTP — content-parts ``image_url`` shape.
 
     Path-only in v0 across the board; bytes / URL is deferred.
@@ -381,8 +379,6 @@ def test_tools_function_universal_across_in_tree_adapters(adapters: list) -> Non
     Iteration C wired Claude (in-process MCP server via
     :func:`claude_agent_sdk.create_sdk_mcp_server`) and Copilot
     (:func:`copilot.define_tool` registrations on the session).
-    Kimi declines permanently (no Python-callable channel) but isn't
-    in the default fixture because the SDK can't be co-installed.
     """
     from airframe import (
         ClaudeCodeRuntime,

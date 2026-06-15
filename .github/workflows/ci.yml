@@ -18,10 +18,7 @@ jobs:
       - name: Set up Python
         run: uv python install 3.12
       - name: Install
-        # --no-extra kimi: kimi-agent-sdk's mcp pin conflicts with
-        # claude-agent-sdk's. Kimi unit tests use mocks; CI doesn't
-        # need the real SDK installed.
-        run: uv sync --all-extras --no-extra kimi --group dev
+        run: uv sync --all-extras --group dev
       - name: Ruff check
         run: uv run ruff check src tests examples
       - name: Ruff format check
@@ -44,9 +41,6 @@ jobs:
       - name: Set up Python ${{ matrix.python-version }}
         run: uv python install ${{ matrix.python-version }}
       - name: Install
-        # --no-extra kimi: kimi-agent-sdk's mcp pin conflicts with
-        # claude-agent-sdk's. Kimi unit tests use mocks; CI doesn't
-        # need the real SDK installed.
-        run: uv sync --all-extras --no-extra kimi --group dev
+        run: uv sync --all-extras --group dev
       - name: Run tests
         run: uv run pytest
