@@ -6,6 +6,17 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Pin `github-copilot-sdk>=0.3.0,<1`** in the `[copilot]` and `[all]`
+  extras (and the test group). The pin was previously unbounded, so a fresh
+  `pip install airframe-agents[copilot]` resolved `github-copilot-sdk` 1.x —
+  which **breaks the Copilot adapter** (the 1.x SDK removed `SubprocessConfig`
+  and rewrote the session event model). airframe's own CI stayed green only
+  because it installs from the committed lockfile (0.3.x); downstream
+  installs got the broken 1.x. The `<1` bound keeps the adapter working until
+  the 1.x migration lands (#41).
+
 ### Added
 
 - **Native (vendor-hosted) web tools on Copilot + OpenCode.** Building on
