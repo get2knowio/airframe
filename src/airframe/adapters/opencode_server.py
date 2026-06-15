@@ -761,13 +761,36 @@ class OpenCodeServerSession:
             raise
         except Exception as exc:  # noqa: BLE001 — classify at boundary
             raise _classify_opencode_error(exc, self._runtime._base_url) from exc
+        # The 0.1.0a36 AssistantMessage returned by chat() carries only
+        # metadata (tokens/cost); its body text lives on the message parts.
+        # Fetch them so execute() returns the assistant text rather than the
+        # empty summary. Best-effort — failure falls back to summary-or-empty.
+        text_override = await self._fetch_assistant_text(client)
         result = _assistant_message_to_result(
             message,
             airframe_provider_id=self._runtime.PROVIDER_ID,
             upstream_provider_id=provider_id,
+            text_override=text_override,
         )
         self._record_turn_cost(result.cost.cost_usd)
         return result
+
+    async def _fetch_assistant_text(self, client: Any) -> str:
+        """Assemble the latest assistant message's body text from its parts.
+
+        ``chat()`` returns ``AssistantMessage`` metadata with no body text —
+        the text lives on the message's parts, fetched via
+        ``client.session.messages(session_id)``. Best-effort: any failure
+        returns ``""`` and the caller falls back to the message summary.
+        """
+        if self.id is None:
+            return ""
+        try:
+            resp = await client.session.messages(self.id)
+            return _assistant_text_from_messages(resp)
+        except Exception as exc:  # noqa: BLE001 — best-effort enrichment
+            logger.debug("opencode_server.fetch_assistant_text_failed error=%s", exc)
+            return ""
 
     async def stream(
         self,
@@ -1578,9 +1601,15 @@ def _assistant_message_to_result(
     *,
     airframe_provider_id: str,
     upstream_provider_id: str,
+    text_override: str | None = None,
 ) -> RuntimeResult:
-    """Build a :class:`RuntimeResult` from the terminal AssistantMessage."""
-    text = _assistant_message_text(message)
+    """Build a :class:`RuntimeResult` from the terminal AssistantMessage.
+
+    ``text_override`` supplies the body text assembled from the message
+    parts (the metadata-only ``AssistantMessage`` carries none); when empty
+    or ``None`` we fall back to the message ``summary``.
+    """
+    text = text_override or _assistant_message_text(message)
     finish = _assistant_message_finish(message)
     tokens = _attr(message, "tokens")
     input_tokens = int(_attr(tokens, "input") or 0) if tokens is not None else 0
@@ -1726,21 +1755,44 @@ def _tool_part_state(part: Any) -> tuple[str | None, str | None, Any, Any, str |
 
 
 def _assistant_message_text(message: Any) -> str:
-    """The plan returns the final assembled text from the AssistantMessage.
+    """Fallback text from the ``AssistantMessage`` metadata itself.
 
-    The 0.1.0a36 ``AssistantMessage`` doesn't carry the body parts on
-    itself — those live on the message's ``parts`` (fetched via
-    ``client.session.messages.list``). For Iteration B, we don't
-    refetch — the chat() call returns ``AssistantMessage`` *metadata*
-    only, and the text we already captured in the stream loop is the
-    canonical source. Callers using execute() (non-streaming) get
-    only the text the SDK chose to surface on the message itself
-    (``summary`` or empty); upstream-equivalent text appears in the
-    text-deltas emitted on ``stream()``.
+    The 0.1.0a36 ``AssistantMessage`` returned by ``chat()`` doesn't carry
+    the body parts — those live on the message's ``parts``. ``execute()``
+    now refetches them (see :func:`_assistant_text_from_messages`) and
+    passes the assembled text as ``text_override``; this helper is the
+    fallback when that fetch yields nothing, returning the message
+    ``summary`` (or ``""``).
     """
     summary = _attr(message, "summary")
     if isinstance(summary, str):
         return summary
+    return ""
+
+
+def _assistant_text_from_messages(resp: Any) -> str:
+    """Concatenated text parts of the most recent assistant message.
+
+    ``client.session.messages(session_id)`` returns the session's messages
+    as ``[{info: {role, ...}, parts: [...]}]`` (or a paginated wrapper with
+    ``.data``). We walk from the end to find the last ``assistant`` message
+    and join its ``text`` parts. Returns ``""`` when nothing matches or the
+    shape is unexpected — the caller treats that as "no override".
+    """
+    items = resp if isinstance(resp, list) else _attr(resp, "data")
+    if not isinstance(items, (list, tuple)):
+        return ""
+    for item in reversed(items):
+        info = _attr(item, "info")
+        if info is None:
+            info = item
+        if _attr(info, "role") != "assistant":
+            continue
+        parts = _attr(item, "parts") or []
+        if not isinstance(parts, (list, tuple)):
+            return ""
+        texts = [_part_text(p) for p in parts if _part_type(p) == "text"]
+        return "".join(t for t in texts if t)
     return ""
 
 

@@ -232,6 +232,79 @@ async def test_execute_parts_carry_user_prompt(mock_client: MagicMock) -> None:
     assert parts[0] == {"type": "text", "text": "freight train problem"}
 
 
+# --- execute() — body text assembled from message parts ----------------------
+
+
+@pytest.mark.asyncio
+async def test_execute_assembles_text_from_message_parts(mock_client: MagicMock) -> None:
+    """chat() returns metadata-only AssistantMessage (empty summary); the body
+    text is fetched from client.session.messages() and lands on result.text."""
+    mock_client.session.messages = AsyncMock(
+        return_value=[
+            {"info": {"role": "user"}, "parts": [{"type": "text", "text": "ignored"}]},
+            {
+                "info": {"role": "assistant"},
+                "parts": [
+                    {"type": "text", "text": "The answer is "},
+                    {"type": "text", "text": "42."},
+                ],
+            },
+        ]
+    )
+    rt = OpenCodeServerRuntime()
+    sess = rt.session(model=ProviderModel("opencode", "gpt-5-codex"))
+    result = await sess.execute("What is 17 + 25?")
+    assert result.text == "The answer is 42."
+    # Cost metadata still comes from the chat() AssistantMessage, unchanged.
+    assert result.cost.input_tokens == 100
+    mock_client.session.messages.assert_awaited_once_with("sess-1")
+
+
+@pytest.mark.asyncio
+async def test_execute_falls_back_to_summary_when_parts_fetch_fails(
+    mock_client: MagicMock,
+) -> None:
+    """A failing messages() fetch degrades to the AssistantMessage summary
+    rather than raising."""
+    mock_client.session.chat = AsyncMock(return_value=_assistant_message(summary="fallback text"))
+    mock_client.session.messages = AsyncMock(side_effect=RuntimeError("AccessDenied"))
+    rt = OpenCodeServerRuntime()
+    sess = rt.session(model=ProviderModel("opencode", "gpt-5-codex"))
+    result = await sess.execute("hi")
+    assert result.text == "fallback text"
+
+
+def test_assistant_text_from_messages_picks_last_assistant() -> None:
+    from airframe.adapters.opencode_server import _assistant_text_from_messages
+
+    resp = [
+        {"info": {"role": "assistant"}, "parts": [{"type": "text", "text": "old"}]},
+        {"info": {"role": "user"}, "parts": [{"type": "text", "text": "q"}]},
+        {
+            "info": {"role": "assistant"},
+            "parts": [
+                {"type": "reasoning", "text": "thinking"},  # non-text part skipped
+                {"type": "text", "text": "new answer"},
+            ],
+        },
+    ]
+    assert _assistant_text_from_messages(resp) == "new answer"
+
+
+def test_assistant_text_from_messages_handles_paginated_and_empty() -> None:
+    from airframe.adapters.opencode_server import _assistant_text_from_messages
+
+    # .data wrapper (paginated shape).
+    wrapped = _msg(
+        data=[{"info": {"role": "assistant"}, "parts": [{"type": "text", "text": "hi"}]}]
+    )
+    assert _assistant_text_from_messages(wrapped) == "hi"
+    # No assistant message → "".
+    assert _assistant_text_from_messages([{"info": {"role": "user"}, "parts": []}]) == ""
+    # Unexpected shape → "".
+    assert _assistant_text_from_messages(None) == ""
+
+
 # --- execute() — unsupported kwargs raise ------------------------------------
 
 
