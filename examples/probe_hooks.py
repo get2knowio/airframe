@@ -18,11 +18,10 @@ Usage::
     uv run python examples/probe_hooks.py
     uv run python examples/probe_hooks.py --provider claude
     uv run python examples/probe_hooks.py --provider github-copilot
-    uv run python examples/probe_hooks.py --provider kimi
     uv run python examples/probe_hooks.py --provider opencode
 
 Defaults to ``claude`` (richest emittable-kind set — includes
-``pre_compact`` and ``rate_limit`` neither Copilot, Kimi, nor
+``pre_compact`` and ``rate_limit`` neither Copilot nor
 OpenAI-compat fire). The other adapters skip a handful of kinds (see
 each adapter's :attr:`EMITTABLE_HOOK_KINDS`); the probe reports the
 declared set per run.
@@ -144,7 +143,7 @@ async def main() -> int:
             file=sys.stderr,
         )
         print(
-            "Install one with: pip install airframe-agents[claude|copilot|kimi|openai-compat]",
+            "Install one with: pip install airframe-agents[claude|copilot|openai-compat]",
             file=sys.stderr,
         )
         return 1

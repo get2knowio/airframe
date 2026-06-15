@@ -19,7 +19,6 @@ confirm credentials are wired and the vendor responds.
 | `examples/probe_bedrock.py` | `BedrockRuntime.execute(schema=)` round-trip |
 | `examples/probe_claude_code.py` | `ClaudeCodeRuntime.execute(schema=)` round-trip |
 | `examples/probe_copilot.py` | `CopilotRuntime.execute(schema=)` round-trip |
-| `examples/probe_kimi.py` | `KimiRuntime.execute()` round-trip (no `schema=` yet — see adapter docs) |
 | `examples/probe_opencode_server.py` | `OpenCodeServerRuntime` against a local `opencode serve` — plain-text execute, streaming, session resume |
 | `examples/probe_opencode_zen.py` | `OpenCodeZenRuntime.execute(schema=)` round-trip |
 
@@ -84,7 +83,7 @@ uv run python examples/probe_supports.py --provider claude
 
 | Probe | What it does |
 |---|---|
-| `examples/probe_permission.py` | `session(on_permission=)` with a logging callback that approves everything; surfaces the `PermissionRequest`s the adapter generates per call (Claude/Copilot/Kimi) |
+| `examples/probe_permission.py` | `session(on_permission=)` with a logging callback that approves everything; surfaces the `PermissionRequest`s the adapter generates per call (Claude/Copilot) |
 | `examples/probe_hooks.py` | `session(on_event=)` with a logging observer; prints the per-kind histogram and verifies causal ordering (`session_start` first, `session_end` last) |
 | `examples/probe_budget.py` | `session.execute(max_turns=2, max_budget_usd=0.0001)` with a deliberately tiny cap; demonstrates `RuntimeBudgetExceededError` firing on the second turn |
 

@@ -6,6 +6,18 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Removed
+
+- **Removed the `kimi` adapter and its `[kimi]` optional-dependency extra.**
+  This drops the vulnerable transitive `mcp<1.17` (pulled via
+  `kimi-cli → fastmcp 2.12.5`, which pinned `mcp<1.17`) — the only `mcp` in
+  the lockfile is now the patched `>=1.23` from `claude-agent-sdk`. The
+  `[tool.uv] conflicts` table (which existed solely to keep the Kimi and
+  Claude SDKs from co-installing) is gone as well. The standalone adapter,
+  tests, docs, and examples were deleted; references in shared core modules
+  are commented out for easy restoration. For Kimi models, reach Moonshot's
+  OpenAI-compatible endpoint through the OpenAI-compatible family.
+
 ### Changed
 
 - **Migrated the Copilot adapter to `github-copilot-sdk` 1.x**

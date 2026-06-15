@@ -203,12 +203,6 @@ def _make_copilot() -> object:
     return airframe.CopilotRuntime()
 
 
-def _make_kimi() -> object:
-    import airframe
-
-    return airframe.KimiRuntime()
-
-
 @pytest.mark.parametrize(
     "factory",
     [
@@ -217,7 +211,6 @@ def _make_kimi() -> object:
         pytest.param(_make_bedrock, id="bedrock"),
         pytest.param(_make_opencode_server, id="opencode-server"),
         pytest.param(_make_copilot, id="copilot"),
-        pytest.param(_make_kimi, id="kimi"),
     ],
 )
 async def test_every_adapter_declares_slash_commands_feature(factory: object) -> None:

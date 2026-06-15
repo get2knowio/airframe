@@ -8,8 +8,8 @@ only owns the cross-cutting invariants.
 
 Phase 0 shipped the namespaces empty; v0.5.0-readiness populates
 :class:`ClaudeOptions` (three fields), :class:`CopilotOptions`
-(four), :class:`OpenAICompatOptions` (six), :class:`BedrockOptions`,
-:class:`KimiOptions` and threads each adapter's fields through into
+(four), :class:`OpenAICompatOptions` (six), :class:`BedrockOptions`
+and threads each adapter's fields through into
 the matching vendor SDK at session-build time.
 """
 

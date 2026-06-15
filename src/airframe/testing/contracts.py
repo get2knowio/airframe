@@ -821,7 +821,7 @@ def test_session_rejects_wrong_provider_options_namespace(adapter_runtime: Any) 
         BedrockOptions,
         ClaudeOptions,
         CopilotOptions,
-        KimiOptions,
+        # KimiOptions,  # kimi adapter removed (security: drops vulnerable transitive mcp<1.17)
         OpenAICompatOptions,
         OpenCodeServerOptions,
     )
@@ -833,7 +833,8 @@ def test_session_rejects_wrong_provider_options_namespace(adapter_runtime: Any) 
         "opencode-go": OpenAICompatOptions,
         "openrouter": OpenAICompatOptions,
         "bedrock": BedrockOptions,
-        "kimi": KimiOptions,
+        # kimi adapter removed (security: drops vulnerable transitive mcp<1.17)
+        # "kimi": KimiOptions,
         "opencode": OpenCodeServerOptions,
     }
     own = matching.get(adapter_runtime.PROVIDER_ID)
@@ -843,7 +844,7 @@ def test_session_rejects_wrong_provider_options_namespace(adapter_runtime: Any) 
         CopilotOptions,
         OpenAICompatOptions,
         BedrockOptions,
-        KimiOptions,
+        # KimiOptions,  # kimi adapter removed (security: drops vulnerable transitive mcp<1.17)
         OpenCodeServerOptions,
     )
     others = [c for c in all_namespaces if c is not own]

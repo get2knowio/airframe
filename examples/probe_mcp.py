@@ -13,7 +13,7 @@ server exposes, and prints the
 
 * The runtime declares the matching
   :data:`~airframe.features.Feature.TOOLS_MCP_STDIO` flag (Claude
-  / Copilot / Kimi accept; OpenAI-compat declines).
+  / Copilot accept; OpenAI-compat declines).
 * ``session(mcp_servers=[...])`` accepts the registration.
 * If the model invokes a server tool, the matching
   ``ToolCallStart`` / ``ToolCallResult`` events fire with the
@@ -26,7 +26,6 @@ Usage::
     uv run python examples/probe_mcp.py
     uv run python examples/probe_mcp.py --provider claude
     uv run python examples/probe_mcp.py --provider github-copilot
-    uv run python examples/probe_mcp.py --provider kimi
     uv run python examples/probe_mcp.py --provider opencode  # declines
     uv run python examples/probe_mcp.py --transport http --url https://...
 
@@ -152,7 +151,7 @@ async def main() -> int:
             file=sys.stderr,
         )
         print(
-            "Install one with: pip install airframe-agents[claude|copilot|kimi|openai-compat]",
+            "Install one with: pip install airframe-agents[claude|copilot|openai-compat]",
             file=sys.stderr,
         )
         return 1

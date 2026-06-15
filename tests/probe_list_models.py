@@ -19,7 +19,6 @@ credentials are missing):
 * ``claude`` — ``ANTHROPIC_API_KEY`` env var (OAuth tokens don't work
   for ``/v1/models``).
 * ``github-copilot`` — ``gh auth login`` or ``GITHUB_TOKEN``.
-* ``kimi`` — ``KIMI_API_KEY`` env var.
 * ``opencode`` — ``OPENCODE_API_KEY`` or ``opencode auth login opencode-go``.
 """
 

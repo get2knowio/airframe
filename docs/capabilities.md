@@ -13,34 +13,34 @@ Renaming would be a major-version break.
 
 ## Capability matrix
 
-| Feature | Bedrock | Claude | Copilot | Kimi | OpenAI-compat | OpenCode |
-|---|---|---|---|---|---|---|
-| `STRUCTURED_OUTPUT_JSON_SCHEMA` | ✓ | ✓ | ✓ | ◐ scaffolded | ✓ | ✗ (SDK gap) |
-| `STRUCTURED_OUTPUT_STRICT` | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ |
-| `STREAMING` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `CANCEL` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `SESSION_RESUME` | ✗ | ✓ | ✓ | ✓ | ✗ | ✓ |
-| `REASONING_EFFORT` | ✓ (Anthropic-on-Bedrock) | ✓ | ✓ | ✓ (boolean) | ✓ | ✓ (per-upstream) |
-| `REASONING_BUDGET_TOKENS` | ✓ (Anthropic-on-Bedrock) | ✓ | ✗ | ✗ | ✗ | ✓ (Anthropic upstream) |
-| `VISION_INPUT` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `FILE_INPUT` | ✓ (Anthropic-on-Bedrock) | ✓ | ✓ | ✗ | ✗ | ✓ |
-| `TOOLS_FUNCTION` | ✓ | ✓ | ✓ | ✗ (permanent) | ✓ | ✗ (SDK gap) |
-| `TOOLS_MCP_STDIO` | ✗ (permanent) | ✓ | ✓ | ✓ | ✗ | ✗ (SDK gap) |
-| `TOOLS_MCP_HTTP` | ✗ (permanent) | ✓ | ✓ | ✓ | ✗ | ✗ (SDK gap) |
-| `TOOLS_MCP_SSE` | ✗ (permanent) | ✓ | ✗ | ✓ | ✗ | ✗ (SDK gap) |
-| `TOOLS_MCP_IN_PROCESS` | ✗ | (internal) | (internal) | ✗ (permanent) | ✗ | ✗ (permanent) |
-| `TOOLS_NATIVE` | ✗ | ✓ (`WEB_SEARCH`, `WEB_FETCH`) | ✓ (`WEB_FETCH` → `fetch_webpage`) | ✗ (follow-up: `$web_search`) | ✗ (Responses-API only) | ✓ (`WEB_SEARCH`, `WEB_FETCH` → `websearch`/`webfetch`) |
-| `PERMISSION_CALLBACK` | ✓ | ✓ | ✓ | ✓ | ✗ | ✗ (SDK gap) |
-| `LIFECYCLE_HOOKS` | ✓ (6 kinds) | ✓ (8 kinds) | ✓ (7 kinds) | ✓ (7 kinds) | ✓ (6 kinds) | ✓ (6 kinds) |
-| `BUDGET_USD_CAP` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ (best-effort) |
-| `BUDGET_TURN_CAP` | ✓ | ✓ | ✗ | ✓ | ✓ | ✓ |
-| `RATE_LIMIT_TELEMETRY` | ✗ | ✓ | ✗ | ✗ | ✓ | ✗ |
-| `REASONING_OUTPUT` | ✗ | ✓ | ✗ | ✗ | ✓ | ✗ |
-| `REQUEST_METADATA` | ✗ (soft drop) | ✓ | ✗ (soft drop) | ✗ (soft drop) | ✓ | ✗ (soft drop) |
-| `COUNT_TOKENS` | ✗ | ✓ | ✗ | ✗ | ✓ | ✗ |
-| `PROMPT_CACHE_CONTROL` | ✗ (soft drop) | ✗ (soft drop) | ✗ (soft drop) | ✗ (soft drop) | ✓ | ✗ (soft drop) |
-| `SLASH_COMMANDS` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `SANDBOX` / `SUBAGENTS` | ✗ (planned) | ✗ (planned) | ✗ (planned) | ✗ (planned) | ✗ (planned) | ✗ (planned) |
+| Feature | Bedrock | Claude | Copilot | OpenAI-compat | OpenCode |
+|---|---|---|---|---|---|
+| `STRUCTURED_OUTPUT_JSON_SCHEMA` | ✓ | ✓ | ✓ | ✓ | ✗ (SDK gap) |
+| `STRUCTURED_OUTPUT_STRICT` | ✗ | ✗ | ✗ | ✗ | ✗ |
+| `STREAMING` | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `CANCEL` | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `SESSION_RESUME` | ✗ | ✓ | ✓ | ✗ | ✓ |
+| `REASONING_EFFORT` | ✓ (Anthropic-on-Bedrock) | ✓ | ✓ | ✓ | ✓ (per-upstream) |
+| `REASONING_BUDGET_TOKENS` | ✓ (Anthropic-on-Bedrock) | ✓ | ✗ | ✗ | ✓ (Anthropic upstream) |
+| `VISION_INPUT` | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `FILE_INPUT` | ✓ (Anthropic-on-Bedrock) | ✓ | ✓ | ✗ | ✓ |
+| `TOOLS_FUNCTION` | ✓ | ✓ | ✓ | ✓ | ✗ (SDK gap) |
+| `TOOLS_MCP_STDIO` | ✗ (permanent) | ✓ | ✓ | ✗ | ✗ (SDK gap) |
+| `TOOLS_MCP_HTTP` | ✗ (permanent) | ✓ | ✓ | ✗ | ✗ (SDK gap) |
+| `TOOLS_MCP_SSE` | ✗ (permanent) | ✓ | ✗ | ✗ | ✗ (SDK gap) |
+| `TOOLS_MCP_IN_PROCESS` | ✗ | (internal) | (internal) | ✗ | ✗ (permanent) |
+| `TOOLS_NATIVE` | ✗ | ✓ (`WEB_SEARCH`, `WEB_FETCH`) | ✓ (`WEB_FETCH` → `fetch_webpage`) | ✗ (Responses-API only) | ✓ (`WEB_SEARCH`, `WEB_FETCH` → `websearch`/`webfetch`) |
+| `PERMISSION_CALLBACK` | ✓ | ✓ | ✓ | ✗ | ✗ (SDK gap) |
+| `LIFECYCLE_HOOKS` | ✓ (6 kinds) | ✓ (8 kinds) | ✓ (7 kinds) | ✓ (6 kinds) | ✓ (6 kinds) |
+| `BUDGET_USD_CAP` | ✓ | ✓ | ✓ | ✓ | ✓ (best-effort) |
+| `BUDGET_TURN_CAP` | ✓ | ✓ | ✗ | ✓ | ✓ |
+| `RATE_LIMIT_TELEMETRY` | ✗ | ✓ | ✗ | ✓ | ✗ |
+| `REASONING_OUTPUT` | ✗ | ✓ | ✗ | ✓ | ✗ |
+| `REQUEST_METADATA` | ✗ (soft drop) | ✓ | ✗ (soft drop) | ✓ | ✗ (soft drop) |
+| `COUNT_TOKENS` | ✗ | ✓ | ✗ | ✓ | ✗ |
+| `PROMPT_CACHE_CONTROL` | ✗ (soft drop) | ✗ (soft drop) | ✗ (soft drop) | ✓ | ✗ (soft drop) |
+| `SLASH_COMMANDS` | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `SANDBOX` / `SUBAGENTS` | ✗ (planned) | ✗ (planned) | ✗ (planned) | ✗ (planned) | ✗ (planned) |
 
 The OpenCode "SDK gap" entries are not adapter declines — OpenCode the *server* supports those features. The opencode-ai 0.1.0a36 Python SDK simply hasn't surfaced the matching endpoints yet (no `client.mcp` / `client.permission` resources). The flags will flip True once the SDK catches up. See `docs/adapters/opencode-server.md` for the full story.
 
@@ -63,8 +63,6 @@ Per-adapter mechanism:
 - **Claude:** native `output_format={"type":"json_schema","schema":...}`
 - **Copilot:** forced `submit_result` tool call (hidden from
   streaming events)
-- **Kimi:** scaffolded (declared True) but `execute(schema=…)` raises
-  `NotImplementedError` until the MCP forced-tool path lands
 - **OpenAI-compat:** native `response_format={"type":"json_schema",...}`
   (strict=False for compat-vendor portability)
 
@@ -95,7 +93,6 @@ flight; mid-turn it aborts and the awaiting call raises
 Per-adapter mechanism:
 - **Claude:** `ClaudeSDKClient.interrupt()` + task cancellation
 - **Copilot:** `CopilotSession.abort()`
-- **Kimi:** `Session.cancel()` sets the SDK's async cancel event
 - **OpenAI-compat:** `asyncio.Task.cancel()` → httpx; for `stream()`,
   a flag + `AsyncStream.close()`
 
@@ -133,8 +130,6 @@ input channel.
 Per-adapter mechanism:
 - **Claude:** Read tool (auto-allowed for attachments)
 - **Copilot:** `attachments=[FileAttachment{path}]`
-- **Kimi:** kosong `ImageURLPart` (URL pass-through; bytes / path
-  → `data:` URI)
 - **OpenAI-compat:** content-parts (`{"type":"image_url","image_url":{"url":"data:..base64..."}}`)
 
 `ImageInput` accepts `path=`, `bytes_= + media_type=`, or `url=`.
@@ -154,10 +149,6 @@ Wire shape: `runtime.session(tools=[FunctionTool(name, description, params=Pydan
 The model invokes registered tools; airframe drives the round-trip
 and surfaces results.
 
-Kimi declines permanently — its Python SDK has no
-Python-callable tool channel. Wrap the function as an MCP server
-and pass via `mcp_servers=` instead.
-
 ### `TOOLS_MCP_STDIO` / `_HTTP` / `_SSE`
 
 Wire shape: `runtime.session(mcp_servers=[McpServerRef(name, transport, command=..., url=..., auth_token=..., headers=...)])`.
@@ -165,7 +156,6 @@ Wire shape: `runtime.session(mcp_servers=[McpServerRef(name, transport, command=
 Per-transport coverage:
 - **Claude:** all three transports natively
 - **Copilot:** stdio + http; SSE declined (use http instead)
-- **Kimi:** all three transports via fastmcp's `MCPConfig` dict shape
 - **OpenAI-compat:** all three declined (Chat Completions has no
   MCP-as-tool slot)
 
@@ -226,9 +216,6 @@ Per-adapter mechanism:
   semantics: enabling a tool implies "everything else off", so a consumer who
   also needs other built-ins alongside a native tool should list them in
   `OpenCodeServerOptions.available_tools`.
-- **Kimi:** declined today — it exposes a hosted `$web_search`, but its SDK has
-  no verified builtin-function channel (and can't co-install with Claude);
-  wiring is tracked as a follow-up.
 - **OpenAI-compat / Bedrock:** permanently declined on the Chat Completions /
   Converse surfaces; OpenAI's `web_search` etc. are Responses-API tools, the
   home of a future `OpenAIResponsesRuntime`.
@@ -242,10 +229,6 @@ and returns `"allow"` / `"deny"` / `"defer"`.
 Per-adapter shape:
 - **Claude:** per-call via `can_use_tool`
 - **Copilot:** per-call via `on_permission_request`
-- **Kimi:** per-call dispatch from the SDK's `ApprovalRequest` wire
-  messages (`yolo=False` mode). `allow → approve`, `deny → reject`,
-  `defer → reject` with feedback (the SDK's approval channel is
-  synchronous so defer collapses)
 - **OpenAI-compat:** **permanently declined** — Chat Completions
   has no tool-permission wire shape; the *caller* decides whether
   to execute a returned `tool_call`
@@ -270,8 +253,6 @@ The `HookEvent.kind` enum has eight literals, shape-locked:
 Per-adapter emittable subset (`EMITTABLE_HOOK_KINDS` ClassVar):
 - **Claude:** all 8 (native `PreCompact` and `RateLimit` events)
 - **Copilot:** 7 (no `rate_limit` — surfaces as `SessionErrorData`)
-- **Kimi:** 7 (no `rate_limit` — Moonshot raises 429s as
-  `APIStatusError` exceptions, not wire events)
 - **OpenAI-compat:** 6 (no `pre_compact` — no compaction concept;
   no `rate_limit` — no discrete throttle event)
 
@@ -384,7 +365,7 @@ Per-adapter mapping:
   `request_id` → `extra_headers={"X-Request-ID": ...}`. Pre-existing
   values on the create kwargs are preserved + extended rather than
   overwritten.
-- **Copilot / Kimi / Bedrock / OpenCode-server:** silently dropped
+- **Copilot / Bedrock / OpenCode-server:** silently dropped
   (no native metadata channel today).
 
 ### `COUNT_TOKENS`
@@ -410,7 +391,7 @@ Per-adapter mechanism:
   compat-vendor models using non-OpenAI tokenisers (DeepSeek,
   Llama, etc.) — typically within 5–10% but not exact. Requires
   `[openai-compat]` extra (pulls `tiktoken`).
-- **Copilot / Kimi / Bedrock / OpenCode-server:** declined —
+- **Copilot / Bedrock / OpenCode-server:** declined —
   neither the vendor SDK exposes a counter endpoint nor is the
   per-family tokeniser bundled. Wrap with the consumer's own
   estimator if needed.
@@ -433,7 +414,7 @@ Per-adapter mapping:
   takes precedence over the OpenAI-specific
   `OpenAICompatOptions.prompt_cache_key` (consumers who set both
   get the cross-vendor surface through).
-- **Claude / Copilot / Kimi / Bedrock / OpenCode-server:**
+- **Claude / Copilot / Bedrock / OpenCode-server:**
   silently dropped — these adapters either manage caching via
   session warmth (Claude) or expose no explicit cache-key channel.
 
@@ -473,7 +454,7 @@ semantics differ:**
   use either path (call `execute("/refactor foo.py")` directly, or
   enumerate via `list_slash_commands()` for a palette and pass the
   expanded body).
-- **OpenAI-compat / Bedrock / Copilot / Kimi / OpenCode-server:**
+- **OpenAI-compat / Bedrock / Copilot / OpenCode-server:**
   no native slash-command channel; the consumer expands
   `SlashCommand.body` and calls `execute(expanded_text)`. The
   model receives the substituted body as a normal user prompt.

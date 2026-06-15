@@ -1,7 +1,7 @@
 """Airframe — vendor-neutral agent runtime.
 
 One protocol, pluggable adapters for Claude Code, GitHub Copilot,
-Moonshot Kimi, AWS Bedrock, the OpenCode HTTP agent server, and the
+AWS Bedrock, the OpenCode HTTP agent server, and the
 OpenAI-compatible family (OpenCode Zen / Go, OpenRouter).
 
 Quick start::
@@ -81,7 +81,7 @@ from airframe.options import (
     BedrockOptions,
     ClaudeOptions,
     CopilotOptions,
-    KimiOptions,
+    # KimiOptions,  # kimi adapter removed (security: drops vulnerable transitive mcp<1.17)
     OpenAICompatOptions,
     OpenCodeServerOptions,
     ProviderOptions,
@@ -108,7 +108,9 @@ __version__ = "0.9.0rc4"
 from airframe.adapters.bedrock import BedrockRuntime
 from airframe.adapters.claude_code import ClaudeCodeRuntime
 from airframe.adapters.copilot import CopilotRuntime
-from airframe.adapters.kimi import KimiRuntime
+
+# kimi adapter removed (security: drops vulnerable transitive mcp<1.17)
+# from airframe.adapters.kimi import KimiRuntime
 from airframe.adapters.opencode_go import OpenCodeGoRuntime
 from airframe.adapters.opencode_server import OpenCodeServerRuntime
 from airframe.adapters.opencode_zen import OpenCodeZenRuntime
@@ -137,8 +139,8 @@ __all__ = [
     "HookEvent",
     "HookEventKind",
     "ImageInput",
-    "KimiOptions",
-    "KimiRuntime",
+    # "KimiOptions",  # kimi adapter removed (security: drops vulnerable transitive mcp<1.17)
+    # "KimiRuntime",  # kimi adapter removed (security: drops vulnerable transitive mcp<1.17)
     "McpServerRef",
     "ModelInfo",
     "NativeCapability",

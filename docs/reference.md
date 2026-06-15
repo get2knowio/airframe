@@ -16,7 +16,6 @@ import airframe
 | `BedrockRuntime` | `bedrock` | [adapters/bedrock.md](./adapters/bedrock.md) |
 | `ClaudeCodeRuntime` | `claude` | [adapters/claude.md](./adapters/claude.md) |
 | `CopilotRuntime` | `github-copilot` | [adapters/copilot.md](./adapters/copilot.md) |
-| `KimiRuntime` | `kimi` | [adapters/kimi.md](./adapters/kimi.md) |
 | `OpenCodeGoRuntime` | `opencode-go` | [adapters/opencode-go.md](./adapters/opencode-go.md) |
 | `OpenCodeServerRuntime` | `opencode` | [adapters/opencode-server.md](./adapters/opencode-server.md) |
 | `OpenCodeZenRuntime` | `opencode-zen` | [adapters/opencode-zen.md](./adapters/opencode-zen.md) |
@@ -365,7 +364,7 @@ sess = runtime.session(on_permission=ApproveAll())
 # - "defer" falls through to the vendor's default policy
 ```
 
-Per-adapter shape: per-call on Claude / Copilot / Kimi; declined on
+Per-adapter shape: per-call on Claude / Copilot; declined on
 OpenAI-compat.
 
 ## Lifecycle hooks
@@ -546,7 +545,6 @@ from airframe import (
     BedrockOptions,
     ClaudeOptions,
     CopilotOptions,
-    KimiOptions,
     OpenAICompatOptions,
     OpenCodeServerOptions,
 )
@@ -561,7 +559,6 @@ Per-namespace fields: see each adapter page
 ([Bedrock](./adapters/bedrock.md#bedrockoptions),
 [Claude](./adapters/claude.md#claudeoptions-provider-options-namespace),
 [Copilot](./adapters/copilot.md#copilotoptions-provider-options-namespace),
-[Kimi](./adapters/kimi.md#kimioptions-provider-options-namespace),
 [OpenAI-compat](./adapters/opencode-zen.md#openaicompatoptions-provider-options-namespace),
 [OpenCode Server](./adapters/opencode-server.md#opencodeserveroptions)).
 
@@ -631,9 +628,9 @@ Everything below is importable from `airframe`:
 
 ```
 AgentRuntime, AgentSession, AgentRuntimeError
-BedrockRuntime, ClaudeCodeRuntime, CopilotRuntime, KimiRuntime,
+BedrockRuntime, ClaudeCodeRuntime, CopilotRuntime,
 OpenCodeGoRuntime, OpenCodeServerRuntime, OpenCodeZenRuntime, OpenRouterRuntime
-BedrockOptions, ClaudeOptions, CopilotOptions, KimiOptions,
+BedrockOptions, ClaudeOptions, CopilotOptions,
 OpenAICompatOptions, OpenCodeServerOptions, ProviderOptions
 ProviderModel, RuntimeResult, ModelInfo, CostRecord
 Feature

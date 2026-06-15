@@ -14,7 +14,7 @@ Two shapes of adapter:
    `src/airframe/adapters/opencode_zen.py`.
 2. **SDK-based (subprocess / native types)** — inherit
    `AgentRuntime` directly, implement the full protocol. Same
-   shape as `ClaudeCodeRuntime`, `CopilotRuntime`, `KimiRuntime`.
+   shape as `ClaudeCodeRuntime`, `CopilotRuntime`.
 
 This guide walks through shape (1) first because it's the most
 common case for new vendors.
@@ -109,15 +109,12 @@ on which features you wire — but you get full control over
 session lifecycle, native streaming, vendor-specific tool channels,
 etc.
 
-Use the four in-tree adapters as templates:
+Use the in-tree adapters as templates:
 
 - **`src/airframe/adapters/claude_code.py`** — full feature wiring;
   the broadest reference.
 - **`src/airframe/adapters/copilot.py`** — subprocess + JSON-RPC,
   forced `submit_result` tool for structured output.
-- **`src/airframe/adapters/kimi.py`** — `WireMessage`-stream driven,
-  per-call `ApprovalRequest` dispatch, MCP-only tools (no Python
-  callable channel).
 
 Each adapter file is fully self-contained except for the shared
 helpers in `airframe.sessions`.
@@ -268,7 +265,7 @@ adapters (when airframe ships an `AnthropicRuntime` against the
 Messages API or `OpenAIRuntime` against the Responses API).
 
 A few existing IDs are taken by the built-in adapters:
-`"claude"`, `"github-copilot"`, `"kimi"`, `"bedrock"`,
+`"claude"`, `"github-copilot"`, `"bedrock"`,
 `"opencode"`, `"opencode-zen"`, `"opencode-go"`, `"openrouter"`.
 If your adapter targets one of these vendors with a different
 transport or auth chain, choose a discriminating suffix:
@@ -284,8 +281,8 @@ in your package and accept it via
 expected_type=<Vendor>Options, adapter_label=self.label)` at the
 top of `session()` to enforce the tagged-union contract.
 
-The six built-in namespaces (`BedrockOptions`, `ClaudeOptions`,
-`CopilotOptions`, `KimiOptions`, `OpenAICompatOptions`,
+The five built-in namespaces (`BedrockOptions`, `ClaudeOptions`,
+`CopilotOptions`, `OpenAICompatOptions`,
 `OpenCodeServerOptions`) are independent — your namespace doesn't
 need to inherit from anything. The
 `ProviderOptions` type alias is just a union of the in-tree

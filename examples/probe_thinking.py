@@ -15,15 +15,13 @@ What this validates:
   (reasoning_effort=)``, ``ThreadOptions.modelReasoningEffort``, or
   ``chat.completions.create(reasoning_effort=)``.
 * Cost telemetry surfaces ``reasoning_tokens`` when the SDK exposes
-  the counter (most adapters do; Kimi reports 0 because the boolean
-  ``thinking`` knob doesn't surface a discrete reasoning-token count).
+  the counter (most adapters do).
 
 Usage::
 
     uv run python examples/probe_thinking.py
     uv run python examples/probe_thinking.py --provider claude
     uv run python examples/probe_thinking.py --provider github-copilot
-    uv run python examples/probe_thinking.py --provider kimi
     uv run python examples/probe_thinking.py --provider opencode
     uv run python examples/probe_thinking.py --provider bedrock
     uv run python examples/probe_thinking.py --effort medium
@@ -109,8 +107,7 @@ async def main() -> int:
             file=sys.stderr,
         )
         print(
-            "Install one with: pip install airframe-agents"
-            "[claude|copilot|kimi|openai-compat|bedrock]",
+            "Install one with: pip install airframe-agents[claude|copilot|openai-compat|bedrock]",
             file=sys.stderr,
         )
         return 1
@@ -156,7 +153,7 @@ async def main() -> int:
     print(f"    cache_read:       {result.cost.cache_read_tokens}")
     print(f"    cost_usd:         {result.cost.cost_usd}")
 
-    if result.cost.reasoning_tokens == 0 and args.provider != "kimi" and args.effort != "disabled":
+    if result.cost.reasoning_tokens == 0 and args.effort != "disabled":
         print(
             "\n  NOTE: reasoning_tokens=0 — either the model doesn't expose "
             "extended thinking at this effort level, or the vendor surfaces "

@@ -12,8 +12,9 @@ The six namespaces:
   :class:`airframe.adapters.claude_code.ClaudeCodeRuntime`.
 * :class:`CopilotOptions` — knobs honoured by
   :class:`airframe.adapters.copilot.CopilotRuntime`.
-* :class:`KimiOptions` — knobs honoured by
-  :class:`airframe.adapters.kimi.KimiRuntime`.
+.. kimi adapter removed (security: drops vulnerable transitive mcp<1.17)
+.. * :class:`KimiOptions` — knobs honoured by
+..   :class:`airframe.adapters.kimi.KimiRuntime`.
 * :class:`OpenAICompatOptions` — knobs honoured by every subclass of
   :class:`airframe.adapters.openai_compatible.OpenAICompatibleRuntime`
   (today: :class:`~airframe.adapters.opencode_zen.OpenCodeZenRuntime`).
@@ -216,71 +217,72 @@ class BedrockOptions:
     additional_model_fields: dict[str, Any] | None = None
 
 
-@dataclass(frozen=True, slots=True)
-class KimiOptions:
-    """Vendor-specific options for :class:`KimiRuntime`.
-
-    Iteration F completes the namespace; every field maps to a
-    :meth:`kimi_agent_sdk.Session.create` /
-    :meth:`Session.resume` kwarg or to a downstream
-    :class:`kimi_cli.config.Config` slot the adapter can't express
-    portably.
-
-    Attributes:
-        working_directory: Per-session working directory the SDK's
-            filesystem-affecting tools operate relative to. Resolves
-            on the adapter side via ``KaosPath`` (the SDK's required
-            path type) — pass a plain ``str`` or ``pathlib.Path``.
-            ``None`` defaults to the current working directory.
-        yolo: Auto-approve every tool / shell invocation at the SDK
-            boundary. **Mutually exclusive with** ``on_permission=``
-            on :meth:`session` — passing both raises
-            :class:`~airframe.errors.UnsupportedFeatureError` at
-            session-construction time. Default ``False``: when
-            ``on_permission`` is ``None`` and ``yolo`` is False the
-            adapter still passes ``yolo=True`` to the SDK so it
-            doesn't stall waiting for human input
-            (a session with no permission policy must auto-approve
-            to make any progress). The explicit ``yolo=True``
-            option matters when paired with skill / agent-file
-            configurations that would otherwise prompt for
-            confirmation outside the airframe permission channel.
-        additional_mcp_servers: Extra raw MCP-config entries passed
-            verbatim to :meth:`Session.create(mcp_configs=...)`
-            *after* the entries airframe synthesises from
-            :class:`~airframe.tools.McpServerRef`. Each entry should
-            match the fastmcp ``MCPConfig`` dict shape
-            (``{"mcpServers": {<name>: {<server-config>}}}`` or a
-            bare server-config dict). Use this slot for vendor-specific
-            knobs (``description``, ``icon``, ``cwd``,
-            ``authentication``) that
-            :class:`~airframe.tools.McpServerRef` doesn't surface.
-        skill_directories: Additional skill directories the Kimi
-            agent picks up at session start. Maps to
-            :meth:`Session.create(skills_dir=...)` (first entry —
-            the SDK accepts a single dir; airframe surfaces a tuple
-            so future SDK versions widening the surface require no
-            airframe-side change). When empty the SDK falls back to
-            its default discovery: the brand-specific kimi/claude/
-            codex dirs depending on
-            :attr:`Config.merge_all_available_skills`.
-        additional_config_fields: Pass-through merged onto the
-            in-process :class:`kimi_cli.config.Config` instance the
-            adapter constructs (and only when the adapter has reason
-            to instantiate one explicitly — Iteration F leaves config
-            construction to the SDK's defaults, so this slot is the
-            documented escape hatch should a future iteration
-            materialise a Config object).
-
-    All fields default to ``None`` / ``False`` / empty — passing
-    :class:`KimiOptions()` is a no-op.
-    """
-
-    working_directory: str | None = None
-    yolo: bool = False
-    additional_mcp_servers: tuple[Any, ...] = ()
-    skill_directories: tuple[str, ...] = ()
-    additional_config_fields: dict[str, Any] | None = None
+# kimi adapter removed (security: drops vulnerable transitive mcp<1.17)
+# @dataclass(frozen=True, slots=True)
+# class KimiOptions:
+#     """Vendor-specific options for :class:`KimiRuntime`.
+#
+#     Iteration F completes the namespace; every field maps to a
+#     :meth:`kimi_agent_sdk.Session.create` /
+#     :meth:`Session.resume` kwarg or to a downstream
+#     :class:`kimi_cli.config.Config` slot the adapter can't express
+#     portably.
+#
+#     Attributes:
+#         working_directory: Per-session working directory the SDK's
+#             filesystem-affecting tools operate relative to. Resolves
+#             on the adapter side via ``KaosPath`` (the SDK's required
+#             path type) — pass a plain ``str`` or ``pathlib.Path``.
+#             ``None`` defaults to the current working directory.
+#         yolo: Auto-approve every tool / shell invocation at the SDK
+#             boundary. **Mutually exclusive with** ``on_permission=``
+#             on :meth:`session` — passing both raises
+#             :class:`~airframe.errors.UnsupportedFeatureError` at
+#             session-construction time. Default ``False``: when
+#             ``on_permission`` is ``None`` and ``yolo`` is False the
+#             adapter still passes ``yolo=True`` to the SDK so it
+#             doesn't stall waiting for human input
+#             (a session with no permission policy must auto-approve
+#             to make any progress). The explicit ``yolo=True``
+#             option matters when paired with skill / agent-file
+#             configurations that would otherwise prompt for
+#             confirmation outside the airframe permission channel.
+#         additional_mcp_servers: Extra raw MCP-config entries passed
+#             verbatim to :meth:`Session.create(mcp_configs=...)`
+#             *after* the entries airframe synthesises from
+#             :class:`~airframe.tools.McpServerRef`. Each entry should
+#             match the fastmcp ``MCPConfig`` dict shape
+#             (``{"mcpServers": {<name>: {<server-config>}}}`` or a
+#             bare server-config dict). Use this slot for vendor-specific
+#             knobs (``description``, ``icon``, ``cwd``,
+#             ``authentication``) that
+#             :class:`~airframe.tools.McpServerRef` doesn't surface.
+#         skill_directories: Additional skill directories the Kimi
+#             agent picks up at session start. Maps to
+#             :meth:`Session.create(skills_dir=...)` (first entry —
+#             the SDK accepts a single dir; airframe surfaces a tuple
+#             so future SDK versions widening the surface require no
+#             airframe-side change). When empty the SDK falls back to
+#             its default discovery: the brand-specific kimi/claude/
+#             codex dirs depending on
+#             :attr:`Config.merge_all_available_skills`.
+#         additional_config_fields: Pass-through merged onto the
+#             in-process :class:`kimi_cli.config.Config` instance the
+#             adapter constructs (and only when the adapter has reason
+#             to instantiate one explicitly — Iteration F leaves config
+#             construction to the SDK's defaults, so this slot is the
+#             documented escape hatch should a future iteration
+#             materialise a Config object).
+#
+#     All fields default to ``None`` / ``False`` / empty — passing
+#     :class:`KimiOptions()` is a no-op.
+#     """
+#
+#     working_directory: str | None = None
+#     yolo: bool = False
+#     additional_mcp_servers: tuple[Any, ...] = ()
+#     skill_directories: tuple[str, ...] = ()
+#     additional_config_fields: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -353,7 +355,7 @@ ProviderOptions = (
     | CopilotOptions
     | OpenAICompatOptions
     | BedrockOptions
-    | KimiOptions
+    # | KimiOptions  # kimi adapter removed (security: drops vulnerable transitive mcp<1.17)
     | OpenCodeServerOptions
 )
 
@@ -362,7 +364,7 @@ __all__ = [
     "BedrockOptions",
     "ClaudeOptions",
     "CopilotOptions",
-    "KimiOptions",
+    # "KimiOptions",  # kimi adapter removed (security: drops vulnerable transitive mcp<1.17)
     "OpenAICompatOptions",
     "OpenCodeServerOptions",
     "ProviderOptions",

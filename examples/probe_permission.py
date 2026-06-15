@@ -12,16 +12,15 @@ through the callback, then the resulting
 
 * The runtime declares
   :data:`~airframe.features.Feature.PERMISSION_CALLBACK` (Claude /
-  Copilot / Kimi do; OpenAI-compat declines).
+  Copilot do; OpenAI-compat declines).
 * ``session(on_permission=...)`` accepts the registration.
-* The callback fires per call on Claude / Copilot / Kimi.
+* The callback fires per call on Claude / Copilot.
 
 Usage::
 
     uv run python examples/probe_permission.py
     uv run python examples/probe_permission.py --provider claude
     uv run python examples/probe_permission.py --provider github-copilot
-    uv run python examples/probe_permission.py --provider kimi
     uv run python examples/probe_permission.py --provider opencode  # declines
 
 Defaults to ``claude`` (richest per-call permission channel via
@@ -145,7 +144,7 @@ async def main() -> int:
             file=sys.stderr,
         )
         print(
-            "Install one with: pip install airframe-agents[claude|copilot|kimi|openai-compat]",
+            "Install one with: pip install airframe-agents[claude|copilot|openai-compat]",
             file=sys.stderr,
         )
         return 1
@@ -176,11 +175,10 @@ async def main() -> int:
         return 1
 
     # The probe registers an in-process FunctionTool so the model has
-    # something to ask permission for. Kimi declines tools= permanently
-    # (no Python-callable channel); on Kimi a real run would need to
-    # surface permission via an MCP server instead. The probe will
-    # raise UnsupportedFeatureError on Kimi at session() — that's the
-    # documented behaviour.
+    # something to ask permission for. Adapters that decline tools=
+    # (no Python-callable channel) would need to surface permission via
+    # an MCP server instead and raise UnsupportedFeatureError at
+    # session() — that's the documented behaviour.
     sess = runtime.session(on_permission=callback, tools=[_build_tool()])
     text_chunks = 0
     tool_starts: list[ToolCallStart] = []

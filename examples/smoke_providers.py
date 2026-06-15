@@ -76,14 +76,12 @@ CREDENTIALS: dict[str, list[list[str]]] = {
     "opencode-go": [["OPENCODE_API_KEY"]],
     "opencode": [["OPENCODE_SERVER_URL"]],  # also needs a running server
     "bedrock": [["AWS_ACCESS_KEY_ID"], ["AWS_PROFILE"]],
-    "kimi": [["KIMI_API_KEY"]],
 }
 
 # pip extra that installs each provider's SDK (for the skip hint).
 EXTRA_FOR: dict[str, str] = {
     "claude": "claude",
     "github-copilot": "copilot",
-    "kimi": "kimi",
     "bedrock": "bedrock",
     "openrouter": "openai-compat",
     "opencode-zen": "openai-compat",

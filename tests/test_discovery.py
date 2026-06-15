@@ -44,8 +44,7 @@ def _stub_find_spec(monkeypatch: pytest.MonkeyPatch, available: set[str]) -> Non
 
 def test_list_providers_returns_all_when_installed_only_false() -> None:
     """``installed_only=False`` surfaces every *registered* adapter's
-    PROVIDER_ID. ``kimi`` is intentionally absent — it's disabled from
-    discovery pending the kimi-agent-sdk mcp-pin alignment (#29)."""
+    PROVIDER_ID."""
     providers = list_providers(installed_only=False)
     assert set(providers) == {
         "bedrock",
@@ -56,7 +55,6 @@ def test_list_providers_returns_all_when_installed_only_false() -> None:
         "opencode-go",
         "openrouter",
     }
-    assert "kimi" not in providers
 
 
 def test_list_providers_sorted_alphabetically() -> None:
@@ -95,17 +93,6 @@ def test_list_providers_filters_when_only_bedrock_installed(
     """The ``[bedrock]`` extra brings ``aioboto3`` — gates only ``bedrock``."""
     _stub_find_spec(monkeypatch, available={"aioboto3"})
     assert list_providers() == ["bedrock"]
-
-
-def test_kimi_disabled_from_discovery_even_when_sdk_present(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """``kimi`` is unregistered (#29): even with ``kimi-agent-sdk`` installed,
-    it never surfaces from discovery. Re-enable by restoring the registration
-    in ``discovery._builtin_runtime_classes``."""
-    _stub_find_spec(monkeypatch, available={"kimi_agent_sdk"})
-    assert "kimi" not in list_providers()
-    assert "kimi" not in list_providers(installed_only=False)
 
 
 def test_list_providers_filters_when_only_opencode_installed(
@@ -292,7 +279,7 @@ def test_entry_point_adapter_appears_in_list_providers(
     )
     providers = list_providers(installed_only=False)
     assert "fake-third-party" in providers
-    # Built-ins still surface unchanged (kimi excluded — disabled, see #29).
+    # Built-ins still surface unchanged.
     assert {
         "bedrock",
         "claude",
