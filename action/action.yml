@@ -1,0 +1,168 @@
+name: 'Airframe Agent'
+description: >-
+  Run an agent prompt against any Airframe-supported provider — Claude,
+  GitHub Copilot, OpenCode (Zen / Go / server), OpenRouter, Bedrock, Kimi —
+  from one reusable step. Pick the provider per workflow job.
+author: 'Airframe Contributors'
+
+branding:
+  icon: 'cpu'
+  color: 'purple'
+
+inputs:
+  provider:
+    description: >-
+      Canonical provider id: claude, github-copilot, opencode-zen,
+      opencode-go, openrouter, bedrock, kimi. (The "opencode" server
+      adapter is not usable here — it needs a long-running `opencode
+      serve` process the action doesn't provision; use opencode-zen or
+      opencode-go instead.)
+    required: true
+  model:
+    description: "Model id to pin. Defaults to the adapter's default model."
+    required: false
+    default: ''
+  prompt:
+    description: 'Inline prompt text. Mutually exclusive with prompt-file.'
+    required: false
+    default: ''
+  prompt-file:
+    description: 'Path to a file holding the prompt. Used when prompt is empty.'
+    required: false
+    default: ''
+  system:
+    description: 'Optional system-prompt override.'
+    required: false
+    default: ''
+  format:
+    description: 'Output format: "text" (assistant reply) or "json" (full envelope).'
+    required: false
+    default: 'text'
+  timeout:
+    description: 'Hard wall-clock budget in seconds.'
+    required: false
+    default: '600'
+  api-key:
+    description: >-
+      Provider API key/secret. Routed to the env var the chosen adapter reads
+      (ANTHROPIC_API_KEY for claude, OPENCODE_API_KEY for opencode-zen/-go,
+      OPENROUTER_API_KEY for openrouter, KIMI_API_KEY for kimi). Not used for
+      github-copilot (use github-token) or bedrock (use AWS credentials —
+      configure them in a prior step, e.g. aws-actions/configure-aws-credentials).
+    required: false
+    default: ''
+  github-token:
+    description: >-
+      Token for the github-copilot provider. Defaults to the workflow token.
+      Note: Copilot API access requires a token with Copilot entitlement; the
+      default GITHUB_TOKEN may not have it.
+    required: false
+    default: ${{ github.token }}
+  airframe-version:
+    description: >-
+      Version spec for airframe-agents (e.g. "0.9.0"). Empty installs the
+      latest release. Pin this for reproducible runs.
+    required: false
+    default: ''
+  python-version:
+    description: 'Python version uv provisions to run airframe.'
+    required: false
+    default: '3.12'
+
+outputs:
+  result:
+    description: >-
+      The agent output — assistant text, or a JSON envelope
+      (text/structured/finish/cost) when format=json.
+    value: ${{ steps.run.outputs.result }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Set up uv
+      uses: astral-sh/setup-uv@v6
+      with:
+        python-version: ${{ inputs.python-version }}
+
+    - name: Run airframe
+      id: run
+      shell: bash
+      env:
+        # Inputs are funnelled through env to keep them out of the
+        # interpolated command line (no shell-injection surface).
+        AF_PROVIDER: ${{ inputs.provider }}
+        AF_MODEL: ${{ inputs.model }}
+        AF_PROMPT: ${{ inputs.prompt }}
+        AF_PROMPT_FILE: ${{ inputs.prompt-file }}
+        AF_SYSTEM: ${{ inputs.system }}
+        AF_FORMAT: ${{ inputs.format }}
+        AF_TIMEOUT: ${{ inputs.timeout }}
+        AF_API_KEY: ${{ inputs.api-key }}
+        AF_GITHUB_TOKEN: ${{ inputs.github-token }}
+        AF_VERSION: ${{ inputs.airframe-version }}
+        AF_PYTHON: ${{ inputs.python-version }}
+      run: |
+        set -euo pipefail
+
+        # provider → pip extra (which vendor SDK to install)
+        case "$AF_PROVIDER" in
+          claude)                              extra="claude" ;;
+          github-copilot)                      extra="copilot" ;;
+          opencode-zen|opencode-go|openrouter) extra="openai-compat" ;;
+          bedrock)                             extra="bedrock" ;;
+          kimi)                                extra="kimi" ;;
+          opencode)
+            echo "::error::airframe: the 'opencode' server adapter needs a running 'opencode serve' process, which this action does not provision. Use 'opencode-zen' or 'opencode-go' instead." >&2
+            exit 3 ;;
+          *)
+            echo "::error::airframe: unknown provider '$AF_PROVIDER'." >&2
+            exit 3 ;;
+        esac
+
+        # provider → credential env var (each adapter reads its own)
+        if [ -n "$AF_API_KEY" ]; then
+          case "$AF_PROVIDER" in
+            claude)                   export ANTHROPIC_API_KEY="$AF_API_KEY" ;;
+            opencode-zen|opencode-go) export OPENCODE_API_KEY="$AF_API_KEY" ;;
+            openrouter)               export OPENROUTER_API_KEY="$AF_API_KEY" ;;
+            kimi)                     export KIMI_API_KEY="$AF_API_KEY" ;;
+          esac
+        fi
+        if [ "$AF_PROVIDER" = "github-copilot" ] && [ -n "$AF_GITHUB_TOKEN" ]; then
+          export GITHUB_TOKEN="$AF_GITHUB_TOKEN"
+          export GH_TOKEN="$AF_GITHUB_TOKEN"
+        fi
+
+        # package spec, optionally version-pinned
+        spec="airframe-agents[$extra]"
+        if [ -n "$AF_VERSION" ]; then
+          spec="airframe-agents[$extra]==$AF_VERSION"
+        fi
+
+        # assemble CLI args (if-blocks, not `&&`, so `set -e` is honoured)
+        args=(run --provider "$AF_PROVIDER" --format "$AF_FORMAT" --timeout "$AF_TIMEOUT")
+        if [ -n "$AF_MODEL" ]; then
+          args+=(--model "$AF_MODEL")
+        fi
+        if [ -n "$AF_SYSTEM" ]; then
+          args+=(--system "$AF_SYSTEM")
+        fi
+        if [ -n "$AF_PROMPT" ]; then
+          args+=(--prompt "$AF_PROMPT")
+        elif [ -n "$AF_PROMPT_FILE" ]; then
+          args+=(--prompt-file "$AF_PROMPT_FILE")
+        fi
+
+        out_file="$RUNNER_TEMP/airframe-result.txt"
+        args+=(--output-file "$out_file")
+
+        uvx --python "$AF_PYTHON" --from "$spec" airframe "${args[@]}"
+
+        # Expose the (possibly multiline) result as a step output. Random
+        # delimiter so model output can't forge the heredoc terminator.
+        delim="airframe-$(openssl rand -hex 8)"
+        {
+          echo "result<<$delim"
+          cat "$out_file"
+          echo "$delim"
+        } >> "$GITHUB_OUTPUT"
