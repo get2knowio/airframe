@@ -100,6 +100,12 @@ all = [
     "opencode-ai>=0.1.0a36,<0.2",
 ]
 
+[project.scripts]
+# Thin shell over discovery + the AgentRuntime protocol. Lets one
+# prompt run against any installed adapter from a shell / CI step —
+# the foundation the GitHub Action wraps. See `airframe.cli`.
+airframe = "airframe.cli:main"
+
 [project.urls]
 Homepage = "https://github.com/get2knowio/airframe"
 Documentation = "https://github.com/get2knowio/airframe/tree/main/docs"
