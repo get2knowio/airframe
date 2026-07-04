@@ -37,8 +37,8 @@ dependencies = [
 # OAuth subscription auth (Bearer token + `oauth-2025-04-20` beta
 # header) works — `/v1/models` doesn't accept the OAuth bearer
 # without that header, and the Anthropic SDK manages the dance.
-claude = ["claude-agent-sdk>=0.2.0,<1", "anthropic>=0.40,<1"]
-copilot = ["github-copilot-sdk>=1.0.1,<2"]
+claude = ["claude-agent-sdk>=0.2.106,<1", "anthropic>=0.111.0,<1"]
+copilot = ["github-copilot-sdk>=1.0.2,<2"]
 # `openai-compat` covers every OpenAI-compatible HTTP adapter:
 # OpenCodeZenRuntime (per-token), OpenCodeGoRuntime (subscription),
 # and future siblings (Together, Groq, Fireworks, OpenRouter, ...).
@@ -47,7 +47,7 @@ copilot = ["github-copilot-sdk>=1.0.1,<2"]
 # vendors using non-OpenAI tokenisers (DeepSeek, Llama, etc.) get
 # an approximate count or a clean UnsupportedFeatureError per model.
 openai-compat = [
-    "openai>=1.50,<3",
+    "openai>=2.43.0,<3",
     "tiktoken>=0.7,<1",
 ]
 # `bedrock` covers AWS Bedrock's Converse API via aioboto3 — the
@@ -79,15 +79,15 @@ opencode = ["opencode-ai>=0.1.0a36,<0.2"]
 # `airframe.testing.contracts` conformance suite against their own
 # adapter. The main package does not depend on pytest.
 testing = [
-    "pytest>=8.2.0,<10",
+    "pytest>=9.1.1,<10",
     "pytest-asyncio>=0.24.0,<2",
 ]
 # "Batteries included" — installs every co-installable adapter SDK.
 all = [
-    "claude-agent-sdk>=0.2.0,<1",
-    "anthropic>=0.40,<1",
-    "github-copilot-sdk>=1.0.1,<2",
-    "openai>=1.50,<3",
+    "claude-agent-sdk>=0.2.106,<1",
+    "anthropic>=0.111.0,<1",
+    "github-copilot-sdk>=1.0.2,<2",
+    "openai>=2.43.0,<3",
     "tiktoken>=0.7,<1",
     "aioboto3>=13",
     "opencode-ai>=0.1.0a36,<0.2",
@@ -110,22 +110,22 @@ Changelog = "https://github.com/get2knowio/airframe/blob/main/CHANGELOG.md"
 
 [dependency-groups]
 test = [
-    "pytest>=8.2.0,<10",
+    "pytest>=9.1.1,<10",
     "pytest-asyncio>=0.24.0,<2",
     "pytest-cov>=4.0.0,<8",
     "pytest-timeout>=2.0.0,<3",
     # SDKs needed for the test suite (mocked at the boundary, but
     # tests import names like `claude_agent_sdk.ResultMessage`).
-    "claude-agent-sdk>=0.2.0,<1",
-    "anthropic>=0.40,<1",
-    "github-copilot-sdk>=1.0.1,<2",
-    "openai>=1.50,<3",
+    "claude-agent-sdk>=0.2.106,<1",
+    "anthropic>=0.111.0,<1",
+    "github-copilot-sdk>=1.0.2,<2",
+    "openai>=2.43.0,<3",
     "tiktoken>=0.7,<1",
     "aioboto3>=13",
     "opencode-ai>=0.1.0a36,<0.2",
 ]
 lint = [
-    "ruff>=0.1.0,<1",
+    "ruff>=0.15.18,<1",
     "mypy>=1.0.0,<3",
 ]
 dev = [
