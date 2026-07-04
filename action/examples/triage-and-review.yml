@@ -1,0 +1,89 @@
+# Example: one repo, two providers — pick the agent per job.
+#
+# OpenCode Zen (cheap, fast) triages newly-opened issues; Claude reviews
+# pull requests. The only thing that changes between jobs is the
+# `provider:` (and its key) — the step is otherwise identical. That is
+# the whole point of routing through Airframe.
+#
+# Copy this into `.github/workflows/` in your repo. The action ref below
+# (`get2knowio/airframe/action@v1`) assumes a published v1 tag; until one
+# exists, pin to a commit SHA or branch (`...@main`).
+
+name: Airframe agents
+
+on:
+  issues:
+    types: [opened]
+  pull_request:
+    types: [opened, synchronize]
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+jobs:
+  triage:
+    if: github.event_name == 'issues'
+    runs-on: ubuntu-latest
+    steps:
+      - id: triage
+        uses: get2knowio/airframe/action@v1
+        with:
+          provider: opencode-zen
+          api-key: ${{ secrets.OPENCODE_API_KEY }}
+          prompt: |
+            Triage this GitHub issue. Suggest up to 3 labels, a severity
+            (low / medium / high), and a one-paragraph summary.
+
+            Title: ${{ github.event.issue.title }}
+
+            Body:
+            ${{ github.event.issue.body }}
+
+      - uses: actions/github-script@v7
+        env:
+          TRIAGE: ${{ steps.triage.outputs.result }}
+        with:
+          script: |
+            await github.rest.issues.createComment({
+              ...context.repo,
+              issue_number: context.issue.number,
+              body: `### 🛬 Airframe triage (opencode-zen)\n\n${process.env.TRIAGE}`,
+            });
+
+  review:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Build review prompt
+        run: |
+          {
+            echo "Review the following pull-request diff. Flag correctness"
+            echo "bugs, security issues, and missing tests. Be concise and"
+            echo "cite file:line. If it looks clean, say so."
+            echo
+            git diff "origin/${{ github.base_ref }}...HEAD"
+          } > "$RUNNER_TEMP/review-prompt.md"
+
+      - id: review
+        uses: get2knowio/airframe/action@v1
+        with:
+          provider: claude
+          api-key: ${{ secrets.ANTHROPIC_API_KEY }}
+          prompt-file: ${{ runner.temp }}/review-prompt.md
+
+      - uses: actions/github-script@v7
+        env:
+          REVIEW: ${{ steps.review.outputs.result }}
+        with:
+          script: |
+            await github.rest.issues.createComment({
+              ...context.repo,
+              issue_number: context.issue.number,
+              body: `### 🛬 Airframe review (claude)\n\n${process.env.REVIEW}`,
+            });
