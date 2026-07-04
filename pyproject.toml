@@ -37,8 +37,8 @@ dependencies = [
 # OAuth subscription auth (Bearer token + `oauth-2025-04-20` beta
 # header) works — `/v1/models` doesn't accept the OAuth bearer
 # without that header, and the Anthropic SDK manages the dance.
-claude = ["claude-agent-sdk>=0.2.106,<1", "anthropic>=0.111.0,<1"]
-copilot = ["github-copilot-sdk>=1.0.2,<2"]
+claude = ["claude-agent-sdk>=0.2.110,<1", "anthropic>=0.112.0,<1"]
+copilot = ["github-copilot-sdk>=1.0.4,<2"]
 # `openai-compat` covers every OpenAI-compatible HTTP adapter:
 # OpenCodeZenRuntime (per-token), OpenCodeGoRuntime (subscription),
 # and future siblings (Together, Groq, Fireworks, OpenRouter, ...).
@@ -47,7 +47,7 @@ copilot = ["github-copilot-sdk>=1.0.2,<2"]
 # vendors using non-OpenAI tokenisers (DeepSeek, Llama, etc.) get
 # an approximate count or a clean UnsupportedFeatureError per model.
 openai-compat = [
-    "openai>=2.43.0,<3",
+    "openai>=2.44.0,<3",
     "tiktoken>=0.7,<1",
 ]
 # `bedrock` covers AWS Bedrock's Converse API via aioboto3 — the
@@ -84,10 +84,10 @@ testing = [
 ]
 # "Batteries included" — installs every co-installable adapter SDK.
 all = [
-    "claude-agent-sdk>=0.2.106,<1",
-    "anthropic>=0.111.0,<1",
-    "github-copilot-sdk>=1.0.2,<2",
-    "openai>=2.43.0,<3",
+    "claude-agent-sdk>=0.2.110,<1",
+    "anthropic>=0.112.0,<1",
+    "github-copilot-sdk>=1.0.4,<2",
+    "openai>=2.44.0,<3",
     "tiktoken>=0.7,<1",
     "aioboto3>=13",
     "opencode-ai>=0.1.0a36,<0.2",
@@ -116,16 +116,16 @@ test = [
     "pytest-timeout>=2.0.0,<3",
     # SDKs needed for the test suite (mocked at the boundary, but
     # tests import names like `claude_agent_sdk.ResultMessage`).
-    "claude-agent-sdk>=0.2.106,<1",
-    "anthropic>=0.111.0,<1",
-    "github-copilot-sdk>=1.0.2,<2",
-    "openai>=2.43.0,<3",
+    "claude-agent-sdk>=0.2.110,<1",
+    "anthropic>=0.112.0,<1",
+    "github-copilot-sdk>=1.0.4,<2",
+    "openai>=2.44.0,<3",
     "tiktoken>=0.7,<1",
     "aioboto3>=13",
     "opencode-ai>=0.1.0a36,<0.2",
 ]
 lint = [
-    "ruff>=0.15.18,<1",
+    "ruff>=0.15.20,<1",
     "mypy>=1.0.0,<3",
 ]
 dev = [
