@@ -49,3 +49,6 @@ Thumbs.db
 .env
 .env.local
 secrets/
+
+# Claude Code local state (agent worktrees, local settings/caches)
+.claude/
