@@ -22,6 +22,17 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `ORIGINATION`, or if the synthesisable (`DISPATCH`) set changes
   unexpectedly.
 
+### Changed
+
+- **`airframe.__version__` now derives from the installed distribution
+  metadata** (`importlib.metadata.version("airframe-agents")`) instead
+  of a hand-edited literal, making `pyproject.toml` the single source of
+  truth. Fixes the class of drift seen pre-0.9.0, where `__version__`
+  lagged `pyproject.toml` by two release candidates and
+  `airframe --version` under-reported.
+- **GitHub Action:** bumped `astral-sh/setup-uv` to `v8.2.0`, matching
+  the CI and release workflows.
+
 ## [0.9.0] — 2026-07-11
 
 ### Removed

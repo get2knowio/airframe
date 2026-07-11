@@ -40,6 +40,9 @@ airframe-agents[claude]``); see the README for the full extras matrix.
 
 from __future__ import annotations
 
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as _pkg_version
+
 from airframe.cache import CacheConfig
 from airframe.cost import CostRecord
 from airframe.discovery import list_providers, runtime_for
@@ -99,7 +102,13 @@ from airframe.slash_commands import SlashCommand, SlashCommandsConfig
 from airframe.thinking import ReasoningEffort, ThinkingMode
 from airframe.tools import FunctionTool, McpServerRef
 
-__version__ = "0.9.0"
+# Single source of truth: the version declared in ``pyproject.toml`` and
+# recorded in the installed distribution metadata. Avoids the hand-edited
+# literal drifting from ``pyproject.toml`` (as it did pre-0.9.0).
+try:
+    __version__ = _pkg_version("airframe-agents")
+except PackageNotFoundError:  # pragma: no cover — running from a source tree without an install
+    __version__ = "0.0.0+unknown"
 
 # Adapter imports live at the top level for ergonomic use, but the
 # adapter modules themselves lazy-import their underlying SDK so
