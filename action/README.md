@@ -35,7 +35,7 @@ provider/model/auth logic lives in the library, not in YAML.
 
 | input | required | default | notes |
 |---|---|---|---|
-| `provider` | ✅ | — | `claude`, `github-copilot`, `opencode-zen`, `opencode-go`, `openrouter`, `bedrock`, `kimi` (the `opencode` server adapter isn't usable here — see below) |
+| `provider` | ✅ | — | `claude`, `github-copilot`, `opencode-zen`, `opencode-go`, `openrouter`, `bedrock` (the `opencode` server adapter isn't usable here — see below) |
 | `prompt` | — | — | inline prompt text |
 | `prompt-file` | — | — | path to a prompt file (used when `prompt` is empty) |
 | `model` | — | adapter default | model id to pin |
@@ -63,7 +63,6 @@ the chosen adapter reads:
 | `claude` | `api-key` → `ANTHROPIC_API_KEY` |
 | `opencode-zen`, `opencode-go` | `api-key` → `OPENCODE_API_KEY` |
 | `openrouter` | `api-key` → `OPENROUTER_API_KEY` |
-| `kimi` | `api-key` → `KIMI_API_KEY` |
 | `github-copilot` | `github-token` (defaults to the workflow token) |
 | `bedrock` | AWS credentials — configure in a prior step (e.g. `aws-actions/configure-aws-credentials`); the action inherits the `AWS_*` env |
 
