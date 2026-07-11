@@ -6,6 +6,8 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.9.0] — 2026-07-11
+
 ### Removed
 
 - **Removed the `kimi` adapter and its `[kimi]` optional-dependency extra.**
