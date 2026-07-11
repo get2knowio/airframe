@@ -6,6 +6,22 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Polyfill-ring capability taxonomy** (`airframe.features.Ring`,
+  `airframe.features.POLYFILL_RING`). Every `Feature` is now classified
+  by the furthest airframe may go to satisfy it on a backend that lacks
+  it natively — `TRANSPORT` (shape the vendor call), `DISPATCH`
+  (a bounded, capped loop dispatching to a caller/vendor-supplied
+  capability), or `ORIGINATION` (airframe supplies the capability
+  itself — never assigned to any `Feature`). This codifies the
+  "translate and dispatch, never originate" boundary that keeps
+  airframe a wrapper rather than an agent framework; see
+  `dev-docs/capability-polyfill-boundary.md`. Enforced by tests that
+  fail if a new `Feature` is unclassified, if any `Feature` is marked
+  `ORIGINATION`, or if the synthesisable (`DISPATCH`) set changes
+  unexpectedly.
+
 ## [0.9.0] — 2026-07-11
 
 ### Removed
