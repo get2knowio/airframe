@@ -62,6 +62,80 @@ def test_feature_is_a_str_subclass() -> None:
     assert Feature("streaming") is Feature.STREAMING
 
 
+# ---------------------------------------------------------------------------
+# Polyfill rings — the "translate and dispatch, never originate" boundary
+# (see dev-docs/capability-polyfill-boundary.md)
+# ---------------------------------------------------------------------------
+
+
+def test_polyfill_ring_covers_every_feature() -> None:
+    """Every :class:`Feature` is classified in :data:`POLYFILL_RING`.
+
+    A new feature that lands without a ring assignment is the design
+    tripwire: the author must decide whether airframe may satisfy it by
+    shaping the vendor call (Transport), by a bounded caller/vendor
+    dispatch loop (Dispatch), or not at all (origination → gate it,
+    don't add the feature). Leaving it unclassified skips that
+    decision, so we fail the build instead.
+    """
+    from airframe.features import POLYFILL_RING
+
+    missing = set(Feature) - set(POLYFILL_RING)
+    assert not missing, (
+        f"POLYFILL_RING must classify every Feature; unclassified: "
+        f"{sorted(f.name for f in missing)}"
+    )
+    extra = set(POLYFILL_RING) - set(Feature)
+    assert not extra, f"POLYFILL_RING has stale keys: {sorted(extra)}"
+
+
+def test_no_feature_is_classified_as_origination() -> None:
+    """No :class:`Feature` may sit in :attr:`Ring.ORIGINATION`.
+
+    Origination — airframe supplying a web search / RAG / planner /
+    agent-router / memory / a prompt the caller didn't write — is the
+    Hermes/PI space airframe is not trying to occupy. Any capability
+    that could *only* be honoured that way must be gated behind
+    ``supports()``, not shipped as a synthesised feature. This is the
+    hard, machine-checked expression of that boundary.
+    """
+    from airframe.features import POLYFILL_RING, Ring
+
+    originated = [f.name for f, ring in POLYFILL_RING.items() if ring is Ring.ORIGINATION]
+    assert not originated, (
+        f"These features are classified Ring.ORIGINATION — airframe would have to "
+        f"become an agent to satisfy them: {sorted(originated)}. Gate them behind "
+        f"supports() instead (see dev-docs/capability-polyfill-boundary.md)."
+    )
+
+
+def test_dispatch_ring_is_the_known_synthesisable_set() -> None:
+    """Pin the exact set of features airframe may *synthesise*.
+
+    Dispatch-ring features are the only ones an adapter may satisfy by
+    running a loop of its own (bounded, capped, dispatching to a
+    caller/vendor-supplied capability) rather than by native
+    passthrough. Widening this set is a deliberate design act — it
+    means airframe takes on more orchestration — so it's pinned here
+    and a change forces a reviewer to look at
+    dev-docs/capability-polyfill-boundary.md before the set grows.
+    """
+    from airframe.features import POLYFILL_RING, Ring
+
+    dispatch = {f for f, ring in POLYFILL_RING.items() if ring is Ring.DISPATCH}
+    assert dispatch == {
+        Feature.STRUCTURED_OUTPUT_JSON_SCHEMA,
+        Feature.TOOLS_FUNCTION,
+        Feature.BUDGET_USD_CAP,
+        Feature.BUDGET_TURN_CAP,
+    }, (
+        "The synthesisable (Dispatch-ring) feature set changed. If this is "
+        "intentional, update dev-docs/capability-polyfill-boundary.md and confirm "
+        "the new feature is a bounded, capped loop that dispatches to a "
+        "caller/vendor-supplied capability — not origination."
+    )
+
+
 @pytest.fixture
 def adapters() -> list[object]:
     """All four in-tree adapters, instantiated without credentials.

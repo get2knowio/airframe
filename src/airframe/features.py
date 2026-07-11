@@ -79,11 +79,53 @@ The contract :meth:`AgentRuntime.supports` honours:
    support; everything else is False. Consumers branching on
    ``supports()`` get correct behaviour even when running against a
    future runtime that adds new enum members.
+
+Polyfill rings — how far an adapter may go to satisfy a feature
+--------------------------------------------------------------
+
+Some backends are full agent runtimes; others are bare chat surfaces.
+When a feature is native on some and absent on others, airframe holds
+a line documented in
+:doc:`dev-docs/capability-polyfill-boundary` — *translate and
+dispatch, never originate*. Each :class:`Feature` is classified by the
+**highest ring** an adapter may use to satisfy it, in
+:data:`POLYFILL_RING`:
+
+* :attr:`Ring.TRANSPORT` (0) — the adapter may satisfy the feature
+  only by shaping the vendor request/response or by a pure local
+  computation (tokeniser, filesystem discovery). It must be backed by
+  the vendor's *own* capability; where the vendor lacks it the adapter
+  returns ``False``. Airframe never fakes a Transport feature —
+  synthesising :data:`TOOLS_NATIVE`, :data:`SUBAGENTS`,
+  :data:`STREAMING`, or :data:`SANDBOX` would mean running a search /
+  an agent loop / a sandbox of our own, which is origination.
+* :attr:`Ring.DISPATCH` (1) — the adapter may *synthesise* the feature
+  with a bounded, capped, mechanical loop that hands control to a
+  capability the **caller or vendor** supplies (a
+  :class:`~airframe.tools.FunctionTool` handler; a vendor-hosted tool).
+  The canonical case is the client-side function-tool loop on
+  :class:`~airframe.adapters.openai_compatible.OpenAICompatibleRuntime`,
+  bounded by ``max_turns``. Airframe orchestrates round-trips but
+  originates nothing.
+* :attr:`Ring.ORIGINATION` (2) — airframe supplies capability or
+  judgment of its own (a built-in web search / RAG / planner /
+  agent-to-agent router / conversation memory / a prompt the caller
+  didn't write). **No :class:`Feature` is ever classified here** — it
+  is the Hermes/PI space airframe is not trying to occupy, and the
+  same set the README assigns to the consumer. A proposed feature that
+  can only be honoured by origination is the review tripwire: gate it
+  behind ``supports()`` and let the consumer bring the capability (as a
+  ``FunctionTool``) or pick a stronger backend, or spin it out as a
+  separate project above the protocol — never fold it into an adapter.
+
+The enforceable invariants (see ``tests/test_features.py``):
+:data:`POLYFILL_RING` covers every :class:`Feature`, and
+:attr:`Ring.ORIGINATION` never appears among its values.
 """
 
 from __future__ import annotations
 
-from enum import StrEnum
+from enum import IntEnum, StrEnum
 
 
 class Feature(StrEnum):
@@ -223,4 +265,98 @@ class Feature(StrEnum):
     """``session(agents=...)`` defines programmatic subagents."""
 
 
-__all__ = ["Feature"]
+class Ring(IntEnum):
+    """The highest degree of intervention airframe permits itself when
+    satisfying a :class:`Feature` on a backend that lacks it natively.
+
+    See the module docstring's "Polyfill rings" section and
+    :doc:`dev-docs/capability-polyfill-boundary`. Ordered by increasing
+    intervention; :attr:`ORIGINATION` is the out-of-scope marker no
+    :class:`Feature` may be assigned.
+    """
+
+    TRANSPORT = 0
+    """Shape the vendor request/response (or a pure local computation).
+    Native passthrough only — never synthesised."""
+
+    DISPATCH = 1
+    """A bounded, capped, mechanical loop dispatching to a capability the
+    caller or vendor supplies. Synthesis permitted; must stay legible,
+    capped, and delegate to the native loop wherever the vendor runs
+    one."""
+
+    ORIGINATION = 2
+    """Airframe supplies capability or judgment of its own. Out of scope
+    — no :class:`Feature` is ever classified here."""
+
+
+#: The highest :class:`Ring` an adapter may use to satisfy each
+#: :class:`Feature`. Transport features must be backed by the vendor's
+#: own capability (or a pure local computation); Dispatch features may
+#: additionally be synthesised via a capped caller/vendor-dispatched
+#: loop. No feature maps to :attr:`Ring.ORIGINATION` — synthesising one
+#: of these would make airframe an agent rather than a wrapper. Adding a
+#: feature that could *only* be honoured by origination is the design
+#: tripwire; gate it instead. Kept exhaustive over :class:`Feature` and
+#: asserted in ``tests/test_features.py``.
+POLYFILL_RING: dict[Feature, Ring] = {
+    # Structured output — JSON-schema may be synthesised via a forced
+    # tool / a bounded two-call "reason then structure" pass (Copilot
+    # already does the forced-tool form). Strict enforcement can't be
+    # honestly faked — the vendor either constrains decoding or it
+    # doesn't — so it stays native-only.
+    Feature.STRUCTURED_OUTPUT_JSON_SCHEMA: Ring.DISPATCH,
+    Feature.STRUCTURED_OUTPUT_STRICT: Ring.TRANSPORT,
+    # Streaming / sessions / cancellation — all pure wire shaping. A
+    # non-streaming endpoint is not made to "stream"; resume on a
+    # stateless backend is a client-side message buffer (bounded state,
+    # no model-controlled loop, nothing originated).
+    Feature.STREAMING: Ring.TRANSPORT,
+    Feature.SESSION_RESUME: Ring.TRANSPORT,
+    Feature.CANCEL: Ring.TRANSPORT,
+    # Reasoning / inputs — forward a knob, parse a field, encode a
+    # content part.
+    Feature.REASONING_EFFORT: Ring.TRANSPORT,
+    Feature.REASONING_BUDGET_TOKENS: Ring.TRANSPORT,
+    Feature.REASONING_OUTPUT: Ring.TRANSPORT,
+    Feature.VISION_INPUT: Ring.TRANSPORT,
+    Feature.FILE_INPUT: Ring.TRANSPORT,
+    # Function tools — the canonical Dispatch case: airframe runs the
+    # capped client-side loop but dispatches only to the caller's
+    # handler.
+    Feature.TOOLS_FUNCTION: Ring.DISPATCH,
+    # MCP / native tools — referenced and forwarded to the vendor's own
+    # entry point; the vendor hosts and executes. Airframe references,
+    # never runs. Synthesising these would mean running a tool server /
+    # a web search of our own (origination) — so native-only.
+    Feature.TOOLS_MCP_STDIO: Ring.TRANSPORT,
+    Feature.TOOLS_MCP_HTTP: Ring.TRANSPORT,
+    Feature.TOOLS_MCP_SSE: Ring.TRANSPORT,
+    Feature.TOOLS_MCP_IN_PROCESS: Ring.TRANSPORT,
+    Feature.TOOLS_NATIVE: Ring.TRANSPORT,
+    # Permission / observation — wire a callback or an event tap into
+    # the vendor's channel.
+    Feature.PERMISSION_CALLBACK: Ring.TRANSPORT,
+    Feature.LIFECYCLE_HOOKS: Ring.TRANSPORT,
+    # Budget caps — airframe may enforce these itself by accounting
+    # across the round-trips it already runs and aborting; that is
+    # bounded, mechanical, and originates nothing (the turn cap is
+    # literally the ceiling on the Dispatch loop).
+    Feature.BUDGET_USD_CAP: Ring.DISPATCH,
+    Feature.BUDGET_TURN_CAP: Ring.DISPATCH,
+    # Telemetry / metadata / offline computation — parse headers, forward
+    # a tag, run a tokeniser, discover files. Never originated.
+    Feature.RATE_LIMIT_TELEMETRY: Ring.TRANSPORT,
+    Feature.REQUEST_METADATA: Ring.TRANSPORT,
+    Feature.COUNT_TOKENS: Ring.TRANSPORT,
+    Feature.PROMPT_CACHE_CONTROL: Ring.TRANSPORT,
+    Feature.SLASH_COMMANDS: Ring.TRANSPORT,
+    # Sandbox / subagents — forwarded to vendors that have them; gated
+    # elsewhere. Synthesising a sandbox or a subagent orchestrator would
+    # be origination, so native-only.
+    Feature.SANDBOX: Ring.TRANSPORT,
+    Feature.SUBAGENTS: Ring.TRANSPORT,
+}
+
+
+__all__ = ["POLYFILL_RING", "Feature", "Ring"]
