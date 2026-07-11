@@ -197,6 +197,42 @@ pip install airframe-agents[testing]        # Conformance contract suite (pytest
 `["github-copilot"]`. Pass `installed_only=False` to see every
 built-in provider for documentation UIs.
 
+## Command line & CI
+
+Installing any extra also puts an `airframe` CLI on your `PATH` — a
+thin shell over discovery and the `AgentRuntime` protocol, so one
+prompt runs against any installed adapter:
+
+```bash
+airframe run --provider claude --prompt "Summarise this changelog" --format text
+airframe run --provider opencode-zen --prompt-file task.md --format json
+echo "explain this diff" | airframe run --provider openrouter   # prompt on stdin
+airframe providers                                              # list installed adapters
+```
+
+`--format json` emits the full envelope (`text` / `structured` /
+`finish` / `cost`); `--output-file` writes the reply to a file;
+`--system`, `--model`, and `--timeout` map to the matching
+`execute()` kwargs. Exit codes distinguish auth (`4`), runtime (`5`),
+and usage (`2`) failures for scripting.
+
+The same CLI is wrapped by a reusable **GitHub Action** so a workflow
+can run an agent step against any provider — pick the provider per
+job:
+
+```yaml
+- uses: get2knowio/airframe/action@v1
+  id: review
+  with:
+    provider: claude
+    api-key: ${{ secrets.ANTHROPIC_API_KEY }}
+    prompt-file: review-prompt.md
+# result is at ${{ steps.review.outputs.result }}
+```
+
+See [`action/README.md`](action/README.md) for the full input/output
+reference and the [issue-triage + PR-review example](action/examples/triage-and-review.yml).
+
 ## Sessions, streaming, and the new kwargs
 
 `runtime.execute(...)` is convenient single-turn sugar. The full

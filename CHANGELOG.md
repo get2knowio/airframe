@@ -50,6 +50,27 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`airframe` command-line interface.** Installing any extra now puts an
+  `airframe` console script on `PATH` — a thin shell over `discovery` and
+  the `AgentRuntime` protocol. `airframe run --provider <id>` executes one
+  prompt (inline `--prompt`, `--prompt-file`, or stdin) against any
+  installed adapter and prints plain text or a full JSON envelope
+  (`--format json`), with `--system` / `--model` / `--timeout` /
+  `--output-file`; `airframe providers` lists servable adapters. Exit
+  codes are stable for scripting (`0` ok, `2` usage, `3`
+  provider/extra-missing, `4` auth, `5` runtime, `1` unexpected). (#58)
+
+- **Vendor-neutral GitHub Action** (`get2knowio/airframe/action@v1`). A
+  composite action that wraps the `airframe` CLI: provisions `uv`,
+  installs `airframe-agents` with just the extra the chosen `provider`
+  needs, and runs one prompt — so a workflow can pick the provider per
+  job (cheap model to triage, premium to review). Inputs funnel through
+  env vars (no shell-injection surface) and the reply is exposed as a
+  step output. Supports `claude`, `github-copilot`, `opencode-zen`,
+  `opencode-go`, `openrouter`, and `bedrock`; the `opencode` server
+  adapter is declined (it needs a long-running `opencode serve`). See
+  [`action/README.md`](action/README.md). (#59)
+
 - **Native (vendor-hosted) web tools on Copilot + OpenCode.** Building on
   the `Feature.TOOLS_NATIVE` abstraction (Claude-only at first), two more
   adapters now serve hosted web tools through the same portable

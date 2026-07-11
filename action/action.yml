@@ -1,7 +1,7 @@
 name: 'Airframe Agent'
 description: >-
   Run an agent prompt against any Airframe-supported provider — Claude,
-  GitHub Copilot, OpenCode (Zen / Go / server), OpenRouter, Bedrock, Kimi —
+  GitHub Copilot, OpenCode (Zen / Go / server), OpenRouter, Bedrock —
   from one reusable step. Pick the provider per workflow job.
 author: 'Airframe Contributors'
 
@@ -13,7 +13,7 @@ inputs:
   provider:
     description: >-
       Canonical provider id: claude, github-copilot, opencode-zen,
-      opencode-go, openrouter, bedrock, kimi. (The "opencode" server
+      opencode-go, openrouter, bedrock. (The "opencode" server
       adapter is not usable here — it needs a long-running `opencode
       serve` process the action doesn't provision; use opencode-zen or
       opencode-go instead.)
@@ -46,7 +46,7 @@ inputs:
     description: >-
       Provider API key/secret. Routed to the env var the chosen adapter reads
       (ANTHROPIC_API_KEY for claude, OPENCODE_API_KEY for opencode-zen/-go,
-      OPENROUTER_API_KEY for openrouter, KIMI_API_KEY for kimi). Not used for
+      OPENROUTER_API_KEY for openrouter). Not used for
       github-copilot (use github-token) or bedrock (use AWS credentials —
       configure them in a prior step, e.g. aws-actions/configure-aws-credentials).
     required: false
@@ -80,7 +80,7 @@ runs:
   using: 'composite'
   steps:
     - name: Set up uv
-      uses: astral-sh/setup-uv@v6
+      uses: astral-sh/setup-uv@v7
       with:
         python-version: ${{ inputs.python-version }}
 
@@ -110,7 +110,6 @@ runs:
           github-copilot)                      extra="copilot" ;;
           opencode-zen|opencode-go|openrouter) extra="openai-compat" ;;
           bedrock)                             extra="bedrock" ;;
-          kimi)                                extra="kimi" ;;
           opencode)
             echo "::error::airframe: the 'opencode' server adapter needs a running 'opencode serve' process, which this action does not provision. Use 'opencode-zen' or 'opencode-go' instead." >&2
             exit 3 ;;
@@ -125,7 +124,6 @@ runs:
             claude)                   export ANTHROPIC_API_KEY="$AF_API_KEY" ;;
             opencode-zen|opencode-go) export OPENCODE_API_KEY="$AF_API_KEY" ;;
             openrouter)               export OPENROUTER_API_KEY="$AF_API_KEY" ;;
-            kimi)                     export KIMI_API_KEY="$AF_API_KEY" ;;
           esac
         fi
         if [ "$AF_PROVIDER" = "github-copilot" ] && [ -n "$AF_GITHUB_TOKEN" ]; then
