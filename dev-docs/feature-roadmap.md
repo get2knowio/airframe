@@ -1898,6 +1898,56 @@ work lands.
    `airframe-spec` package only if a real library consumer is
    bottlenecked on transitively pulling in subprocess-SDK deps.
 
+### 6.16 The polyfill boundary — translate and dispatch, never originate
+
+§6.12 (resisting the LiteLLM trap) is about *under*-abstracting —
+flattening every vendor to the lowest common denominator. The equal
+and opposite hazard is *over*-abstracting: synthesising enough
+capability onto a bare chat backend that airframe starts *containing*
+an agent (the LangChain failure mode — hidden base prompts, unbounded
+model-controlled loops, five layers to change one detail). When a
+feature is native on some backends and absent on others, the question
+"do we polyfill it or gate it?" needs a rule, not a case-by-case gut
+call. That rule lives in
+[`capability-polyfill-boundary.md`](./capability-polyfill-boundary.md);
+the short form is three concentric rings, each :class:`Feature`
+classified by the highest one an adapter may use to satisfy it
+(`airframe.features.POLYFILL_RING`, asserted in `tests/test_features.py`):
+
+* **Ring 0 — Transport.** Shape the vendor request/response, or a pure
+  local computation (tokeniser, filesystem discovery). Native
+  passthrough only; where the vendor lacks it, the adapter returns
+  `False`. Most features live here.
+* **Ring 1 — Dispatch.** Synthesise the feature with a *bounded,
+  capped, mechanical* loop that hands control to a capability the
+  **caller or vendor** supplies — the canonical case being the
+  client-side `FunctionTool` loop on `OpenAICompatibleRuntime`, capped
+  by `max_turns`. Airframe orchestrates round-trips but originates
+  nothing. Today exactly four features are Dispatch-eligible
+  (`STRUCTURED_OUTPUT_JSON_SCHEMA`, `TOOLS_FUNCTION`, `BUDGET_USD_CAP`,
+  `BUDGET_TURN_CAP`); widening that set is a deliberate design act.
+* **Ring 2 — Origination.** Airframe supplies capability or judgment of
+  its own — a built-in web search / RAG / planner / agent-to-agent
+  router / conversation memory / a prompt the caller didn't write.
+  **No `Feature` is ever classified here.** It's the Hermes/PI space
+  airframe is not trying to occupy, and the same set the README assigns
+  to the consumer. A feature that can only be honoured by origination
+  is the review tripwire: gate it behind `supports()` and let the
+  consumer bring the capability (as a `FunctionTool`) or pick a
+  stronger backend — or ship it as an explicit, replaceable helper
+  *above* the protocol (§6.9 middleware; a future
+  `airframe.harness.tool_loop`), never folded into an adapter.
+
+This is the same line §4's divergences already walk, viewed from the
+capability side. It's why `native_tools.py` *references* hosted web
+search (Ring 0, gated where absent) instead of running a search of its
+own, and why the `FunctionTool` loop (Ring 1) dispatches only to the
+caller's handler. The three guard-rails that keep Ring 1 from rotting
+into Ring 2: every synthesised loop is **capped, not model-controlled**;
+airframe injects **tool definitions but never hidden prompts**; and the
+shim **delegates to the native loop wherever the vendor runs one**
+(wrap SDKs, don't rewrite them).
+
 ---
 
 ## 7. Sources
