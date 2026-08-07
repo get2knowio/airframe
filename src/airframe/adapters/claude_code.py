@@ -114,7 +114,7 @@ from airframe.thinking import ThinkingMode
 from airframe.tools import FunctionTool, McpServerRef
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable
+    from collections.abc import AsyncIterator, Awaitable, Callable
 
     from airframe.hooks import HookEvent
     from airframe.options import ProviderOptions
@@ -296,16 +296,22 @@ class ClaudeCodeRuntime(AgentRuntime):
     #:   ``auth_token`` never enter the fingerprint (Phase 4,
     #:   Iteration B).
     #: * ``PERMISSION_CALLBACK`` — wired by translating
-    #:   :class:`~airframe.permission.PermissionCallback` into the
-    #:   SDK's :attr:`ClaudeAgentOptions.can_use_tool` callable. The
-    #:   adapter awaits the user's callback per tool-use request,
-    #:   maps ``"allow"`` / ``"deny"`` to
-    #:   :class:`PermissionResultAllow` / :class:`PermissionResultDeny`,
-    #:   and treats ``"defer"`` as ``"allow"`` (with a debug log)
-    #:   since the existing ``permission_mode="bypassPermissions"``
-    #:   default is already the no-gate behaviour. Callback identity
-    #:   joins the ``_ensure_client`` cache key so a callback swap
-    #:   forces reconnect (Phase 5, Iteration B).
+    #:   :class:`~airframe.permission.PermissionCallback` into a
+    #:   native ``PreToolUse`` hook that returns
+    #:   ``permissionDecision: "deny"`` when the callback denies, and
+    #:   an empty response for ``"allow"`` / ``"defer"``. The
+    #:   ``PreToolUse`` channel is used rather than
+    #:   :attr:`ClaudeAgentOptions.can_use_tool` because the SDK only
+    #:   invokes ``can_use_tool`` for calls that would otherwise
+    #:   prompt — under the adapter's
+    #:   ``permission_mode="bypassPermissions"`` nothing ever reaches
+    #:   it, whereas ``PreToolUse`` fires for every tool call
+    #:   regardless of permission mode. ``can_use_tool`` stays wired
+    #:   as a no-op belt-and-braces for non-bypass configurations.
+    #:   Callback raises are debug-logged and treated as ``"defer"``.
+    #:   Callback identity joins the ``_ensure_client`` cache key so a
+    #:   callback swap forces reconnect (Phase 5, Iteration B; hook
+    #:   gating added in 0.9.2).
     #: * ``LIFECYCLE_HOOKS`` — wired by translating each native
     #:   :attr:`ClaudeAgentOptions.hooks` event into a
     #:   :class:`~airframe.hooks.HookEvent` and fanning it out to the
@@ -521,15 +527,17 @@ class ClaudeCodeRuntime(AgentRuntime):
                 :class:`~airframe.events.ToolCallResult` events with
                 the ``mcp__<server>__`` prefix stripped. Phase 4
                 Iteration B.
-            on_permission: Phase 5 scaffolding accepted by the
-                signature; non-None raises
-                :class:`~airframe.errors.UnsupportedFeatureError`
-                until Phase 5 Iteration B wires
-                :attr:`ClaudeAgentOptions.can_use_tool`.
-            on_event: Phase 5 scaffolding accepted by the signature;
-                non-None raises until Phase 5 Iteration C wires
-                :attr:`ClaudeAgentOptions.hooks` +
-                ``include_hook_events=True``.
+            on_permission: Optional gate consulted before every tool
+                call. Wired through a native ``PreToolUse`` hook (see
+                :func:`_build_pre_tool_use_gate`): ``"deny"`` blocks
+                the call and hands the model a tool failure carrying
+                the reason; ``"allow"`` / ``"defer"`` fall through to
+                the session's permission posture. A callback that
+                raises is debug-logged and treated as ``"defer"``.
+            on_event: Optional observer called for each lifecycle
+                event. Wired through :attr:`ClaudeAgentOptions.hooks`;
+                observation only — the return value is discarded and
+                cannot alter SDK flow (use ``on_permission=`` to gate).
             provider_options: Optional :class:`ClaudeOptions` namespace
                 carrying Claude-only knobs. Three populated fields
                 as of v0.5.0:
@@ -1420,8 +1428,18 @@ class ClaudeCodeSession:
             options_kwargs["thinking"] = thinking_config
         if self._on_permission is not None:
             options_kwargs["can_use_tool"] = _translate_permission_for_claude(self._on_permission)
-        if self._on_event is not None:
-            options_kwargs["hooks"] = _build_claude_hooks_config(self._on_event, session=self)
+        # Hooks carry two jobs: the ``on_event=`` observer fan-out and
+        # the ``on_permission=`` gate. ``can_use_tool`` above is never
+        # invoked under ``permission_mode="bypassPermissions"`` (the SDK
+        # only calls it for tool calls that would otherwise prompt), so
+        # the PreToolUse hook is the channel that actually blocks. Build
+        # the config whenever either callback is present.
+        if self._on_event is not None or self._on_permission is not None:
+            options_kwargs["hooks"] = _build_claude_hooks_config(
+                self._on_event,
+                session=self,
+                on_permission=self._on_permission,
+            )
         if self._metadata is not None and self._metadata.user_id:
             options_kwargs["user"] = self._metadata.user_id
         po = self._provider_options
@@ -2032,6 +2050,18 @@ def _translate_permission_for_claude(callback: PermissionCallback) -> Any:
     """Wrap an airframe :class:`PermissionCallback` as Claude's
     :attr:`ClaudeAgentOptions.can_use_tool`.
 
+    .. note::
+
+       This channel is **inert** under the adapter's
+       ``permission_mode="bypassPermissions"`` — the SDK only invokes
+       ``can_use_tool`` for calls that would otherwise raise an
+       interactive prompt, and bypass mode means none do. The gate
+       that actually blocks lives on the ``PreToolUse`` hook
+       (:func:`_build_pre_tool_use_gate`); this wrapper stays wired so
+       the callback is still honoured if a consumer reaches through
+       :meth:`~ClaudeCodeRuntime.unwrap` to run under a stricter
+       permission mode.
+
     The SDK calls the returned coroutine with
     ``(tool_name, tool_args, ToolPermissionContext)`` and expects a
     :class:`PermissionResultAllow` / :class:`PermissionResultDeny`
@@ -2146,21 +2176,33 @@ _CLAUDE_HOOK_NAME_TO_KIND: dict[str, str] = {
 
 
 def _build_claude_hooks_config(
-    on_event: Callable[[HookEvent], None],
+    on_event: Callable[[HookEvent], None] | None,
     *,
     session: ClaudeCodeSession,
+    on_permission: PermissionCallback | None = None,
 ) -> dict[str, list[Any]]:
     """Build :attr:`ClaudeAgentOptions.hooks` that fans every native
-    Claude hook into the user's ``on_event=`` callback.
+    Claude hook into the user's ``on_event=`` callback and — when
+    ``on_permission=`` is set — gates tool calls on the ``PreToolUse``
+    hook.
 
     The SDK dispatches each hook with
     ``(HookInput, tool_use_id, HookContext)`` and expects a JSON
-    output back. airframe's observer contract is pure observation —
-    we never block or modify the SDK flow — so the returned
+    output back. The ``on_event=`` observer contract is pure
+    observation — it never blocks or modifies the SDK flow — so
+    without ``on_permission=`` the returned
     :class:`SyncHookJSONOutput` is always empty (``{}``). The session
     keeps the latest known ``session_id`` so subsequent
     synthesised events (``session_end`` at close) carry the right
     value.
+
+    ``on_permission=`` rides the same ``PreToolUse`` hook rather than
+    :attr:`ClaudeAgentOptions.can_use_tool`, which the SDK only invokes
+    for calls that would otherwise prompt — under the adapter's
+    ``permission_mode="bypassPermissions"`` nothing ever reaches that
+    channel. ``PreToolUse`` fires for *every* tool call regardless of
+    permission mode, so it is the only place a ``"deny"`` can actually
+    block. See :func:`_build_pre_tool_use_gate`.
 
     Per-kind payload schema (airframe normalises across vendors):
 
@@ -2177,6 +2219,12 @@ def _build_claude_hooks_config(
     """
     from claude_agent_sdk import HookMatcher
 
+    gate = (
+        _build_pre_tool_use_gate(on_permission, server_names=session._known_mcp_servers)
+        if on_permission is not None
+        else None
+    )
+
     async def _make_handler(kind: str, hook_input: Any) -> dict[str, Any]:
         # Hook inputs are TypedDicts at runtime (plain dicts). Pull
         # the session_id off the input when present and forward to
@@ -2185,13 +2233,16 @@ def _build_claude_hooks_config(
             sid = hook_input.get("session_id")
             if sid:
                 session.id = sid
-        payload = _extract_claude_hook_payload(kind, hook_input)
-        _fire_hook_event(
-            on_event,
-            kind,
-            session_id=session.id,
-            payload=payload,
-        )
+        if on_event is not None:
+            payload = _extract_claude_hook_payload(kind, hook_input)
+            _fire_hook_event(
+                on_event,
+                kind,
+                session_id=session.id,
+                payload=payload,
+            )
+        if gate is not None and kind == "pre_tool_use":
+            return await gate(hook_input)
         # Pure observation — no continue=/decision=/etc. signals.
         return {}
 
@@ -2205,6 +2256,84 @@ def _build_claude_hooks_config(
     for sdk_event_name, kind in _CLAUDE_HOOK_NAME_TO_KIND.items():
         hooks_config[sdk_event_name] = [HookMatcher(matcher=None, hooks=[_make_callback(kind)])]
     return hooks_config
+
+
+def _build_pre_tool_use_gate(
+    callback: PermissionCallback,
+    *,
+    server_names: frozenset[str],
+) -> Callable[[Any], Awaitable[dict[str, Any]]]:
+    """Wrap a :class:`PermissionCallback` as a ``PreToolUse`` hook body.
+
+    The returned coroutine takes the raw ``PreToolUseHookInput`` dict,
+    builds an airframe :class:`PermissionRequest` from it, awaits the
+    user's callback, and translates the :data:`PermissionDecision` into
+    the native hook response:
+
+    * ``"deny"`` → ``{"hookSpecificOutput": {"hookEventName":
+      "PreToolUse", "permissionDecision": "deny",
+      "permissionDecisionReason": …}}``. The CLI blocks the call and
+      feeds the reason back to the model as a tool failure, so the model
+      can recover and keep working.
+    * ``"allow"`` / ``"defer"`` → ``{}``. The adapter deliberately does
+      *not* emit ``permissionDecision: "allow"`` for ``"allow"``: an
+      empty response falls through to the session's existing posture
+      (``permission_mode="bypassPermissions"``), which already permits
+      the call, and avoids widening permissions for anything a
+      downstream hook or setting would otherwise gate.
+
+    Unlike the ``can_use_tool`` channel, ``PreToolUse`` carries no
+    vendor-supplied rationale, so :attr:`PermissionRequest.reason` is
+    always ``None`` here. ``tool_name`` gets the same
+    ``mcp__<server>__`` stripping as the event stream so callbacks
+    behave identically across providers.
+
+    A callback that raises is logged and treated as ``"defer"`` — a
+    buggy gate must never kill the session. Consumers needing
+    fail-closed semantics implement that inside their own callback.
+    """
+    from airframe.permission import PermissionRequest
+
+    async def _gate(hook_input: Any) -> dict[str, Any]:
+        if not isinstance(hook_input, dict):
+            return {}
+        raw_name = str(hook_input.get("tool_name", ""))
+        tool_name = _strip_mcp_prefix(raw_name, server_names)
+        tool_input = hook_input.get("tool_input", {})
+        request = PermissionRequest(
+            tool_name=tool_name,
+            tool_args=tool_input if isinstance(tool_input, dict) else {},
+            reason=None,
+        )
+        try:
+            decision = await callback.handle(request)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(
+                "claude_code: PermissionCallback raised for tool=%r error=%s; "
+                "treating as 'defer' (vendor default)",
+                tool_name,
+                exc,
+            )
+            return {}
+        if decision == "deny":
+            return {
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": "deny",
+                    "permissionDecisionReason": (
+                        f"airframe PermissionCallback denied {tool_name!r}"
+                    ),
+                }
+            }
+        if decision == "defer":
+            logger.debug(
+                "claude_code: PermissionCallback returned 'defer' for tool=%r; "
+                "falling through to the vendor default policy",
+                tool_name,
+            )
+        return {}
+
+    return _gate
 
 
 def _extract_claude_hook_payload(kind: str, hook_input: Any) -> dict[str, Any]:

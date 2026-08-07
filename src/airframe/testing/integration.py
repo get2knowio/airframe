@@ -362,6 +362,68 @@ async def test_integration_permission_callback_fires(adapter_runtime: Any) -> No
     assert received, "permission callback never fired"
 
 
+async def test_integration_permission_callback_denies_tool(adapter_runtime: Any) -> None:
+    """A ``"deny"`` decision actually blocks the tool call.
+
+    The behavioural half of ``on_permission=``: the handler must never
+    run, the model must be told why, and the session must survive the
+    denial well enough to answer afterwards. Declaring
+    :data:`Feature.PERMISSION_CALLBACK` without this property is the
+    bug airframe issue #79 tracked on the ``claude`` provider — the
+    callback was wired to a channel the vendor never invoked.
+    """
+    if not adapter_runtime.supports(Feature.PERMISSION_CALLBACK):
+        pytest.skip("adapter does not declare PERMISSION_CALLBACK")
+    if not adapter_runtime.supports(Feature.TOOLS_FUNCTION):
+        pytest.skip("adapter does not declare TOOLS_FUNCTION — needed to trigger the callback")
+    if not _has_credentials(adapter_runtime.PROVIDER_ID):
+        pytest.skip(f"no credentials for {adapter_runtime.PROVIDER_ID!r}")
+
+    from airframe.permission import PermissionCallback, PermissionDecision, PermissionRequest
+    from airframe.tools import FunctionTool
+
+    handler_ran: list[str] = []
+    decisions: list[PermissionDecision] = []
+
+    class _DenyWrites(PermissionCallback):
+        async def handle(self, request: PermissionRequest) -> PermissionDecision:
+            decision: PermissionDecision = "deny" if request.tool_name == "write_note" else "allow"
+            decisions.append(decision)
+            return decision
+
+    class _Note(BaseModel):
+        text: str
+
+    async def _write_note(params: BaseModel) -> str:
+        handler_ran.append(getattr(params, "text", ""))
+        return "written"
+
+    tool = FunctionTool(
+        name="write_note",
+        description="Write a note. Call this whenever asked to record something.",
+        params=_Note,
+        handler=_write_note,
+    )
+
+    sess = adapter_runtime.session(on_permission=_DenyWrites(), tools=[tool])
+    try:
+        result = await sess.execute(
+            "Use the `write_note` tool to record the text 'hello'. "
+            "If the tool call is blocked, don't retry it — just reply "
+            "with the word BLOCKED and nothing else."
+        )
+    except (RuntimeAuthError, RuntimeServerStartError) as exc:
+        pytest.skip(f"auth failed: {exc}")
+    finally:
+        await sess.close()
+
+    assert "deny" in decisions, "callback was never asked about the write tool"
+    assert not handler_ran, "denied tool handler executed anyway"
+    # The session survived the denial and produced a turn — we don't
+    # pin exact wording (models vary), only that the run completed.
+    assert result.text is not None
+
+
 async def test_integration_hook_observer_receives_events(adapter_runtime: Any) -> None:
     """The :class:`HookEvent` observer sees at least one event during
     a successful turn. Adapters synthesise session_start at first
@@ -429,6 +491,7 @@ __all__ = [
     "test_integration_function_tool_round_trip",
     "test_integration_hook_observer_receives_events",
     "test_integration_list_models",
+    "test_integration_permission_callback_denies_tool",
     "test_integration_permission_callback_fires",
     "test_integration_plain_text_execute",
     "test_integration_schema_round_trip",

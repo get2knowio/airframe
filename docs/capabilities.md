@@ -227,17 +227,28 @@ The callback receives a `PermissionRequest(tool_name, tool_args, reason)`
 and returns `"allow"` / `"deny"` / `"defer"`.
 
 Per-adapter shape:
-- **Claude:** per-call via `can_use_tool`
+- **Claude:** per-call via a native `PreToolUse` hook returning
+  `permissionDecision: "deny"`. Not `can_use_tool` — the SDK only
+  invokes that channel for calls that would otherwise raise an
+  interactive prompt, and the adapter runs
+  `permission_mode="bypassPermissions"`, so nothing reaches it.
+  `PreToolUse` fires for every tool call regardless of permission
+  mode, which is what makes a `"deny"` actually block
 - **Copilot:** per-call via `on_permission_request`
 - **OpenAI-compat:** **permanently declined** — Chat Completions
   has no tool-permission wire shape; the *caller* decides whether
   to execute a returned `tool_call`
 
 `"defer"` semantics: falls through to the vendor's default policy
-with a debug log. Claude's binary `PermissionResultAllow`/`Deny`
-maps `"defer"` to `PermissionResultAllow` because the default
-`permission_mode="bypassPermissions"` already matches the "defer"
-intent.
+with a debug log. On Claude both `"allow"` and `"defer"` return an
+empty hook response, which leaves the session's existing posture
+(`permission_mode="bypassPermissions"`) in charge — `"allow"`
+deliberately does not emit `permissionDecision: "allow"`, which would
+widen permissions past what the caller asked for.
+
+A callback that raises is debug-logged and treated as `"defer"`, so a
+buggy gate can't kill the session. Consumers needing fail-closed
+semantics implement that inside their own callback.
 
 ### `LIFECYCLE_HOOKS`
 
