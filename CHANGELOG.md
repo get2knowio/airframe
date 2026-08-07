@@ -6,10 +6,12 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.9.2] — 2026-08-07
+
 ### Fixed
 
 - **`on_permission=` can now actually block a tool call on the `claude`
-  provider** ([#79](https://github.com/pofallon/airframe/issues/79)).
+  provider** ([#79](https://github.com/get2knowio/airframe/issues/79)).
   The callback was wired only to the Claude Agent SDK's `can_use_tool`
   channel, which the SDK invokes solely for calls that would otherwise
   raise an interactive permission prompt — under the adapter's
