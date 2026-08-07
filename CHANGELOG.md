@@ -6,6 +6,32 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **`on_permission=` can now actually block a tool call on the `claude`
+  provider** ([#79](https://github.com/pofallon/airframe/issues/79)).
+  The callback was wired only to the Claude Agent SDK's `can_use_tool`
+  channel, which the SDK invokes solely for calls that would otherwise
+  raise an interactive permission prompt — under the adapter's
+  `permission_mode="bypassPermissions"` nothing ever reached it, so a
+  `"deny"` decision was silently discarded while
+  `supports(Feature.PERMISSION_CALLBACK)` still reported `True`. The
+  decision now rides a native `PreToolUse` hook, which fires for every
+  tool call regardless of permission mode: `"deny"` returns
+  `permissionDecision: "deny"` so the CLI blocks the call and hands the
+  model a tool failure carrying the reason, while `"allow"` / `"defer"`
+  return an empty response and leave the session's posture untouched.
+  The permission mode itself is unchanged — headless runs still never
+  see an interactive prompt. A callback that raises is debug-logged and
+  treated as `"defer"` rather than killing the session. Sessions with no
+  `on_permission=` keep the previous pure-observation hooks; sessions
+  with only `on_permission=` (no `on_event=`) now register hooks, which
+  they previously did not. `can_use_tool` stays wired for consumers who
+  reach through `unwrap()` to run under a stricter permission mode.
+  Adds a portable `test_integration_permission_callback_denies_tool`
+  contract to `airframe.testing.integration` so any adapter declaring
+  `PERMISSION_CALLBACK` can prove a denial really blocks.
+
 ## [0.9.1] — 2026-07-11
 
 ### Added

@@ -57,7 +57,7 @@ await runtime.close()
 | `TOOLS_MCP_HTTP` | ✓ | |
 | `TOOLS_MCP_SSE` | ✓ | Only adapter that supports SSE |
 | `TOOLS_NATIVE` | ✓ | Hosted `WebSearch` / `WebFetch` via `native_tools=` → `allowed_tools` (`supported_native_tools()` → `{WEB_SEARCH, WEB_FETCH}`) |
-| `PERMISSION_CALLBACK` | ✓ | Per-call via `can_use_tool` |
+| `PERMISSION_CALLBACK` | ✓ | Per-call via a native `PreToolUse` hook (`can_use_tool` is inert under `permission_mode="bypassPermissions"`) |
 | `LIFECYCLE_HOOKS` | ✓ | All 8 kinds emittable (native `PreCompact` + `RateLimit` events) |
 | `BUDGET_USD_CAP` | ✓ | Client-side accumulation against `total_cost_usd` |
 | `BUDGET_TURN_CAP` | ✓ | `ClaudeAgentOptions.max_turns` (overrides `DEFAULT_MAX_TURNS=60`) |

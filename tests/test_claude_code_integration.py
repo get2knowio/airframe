@@ -29,6 +29,7 @@ from airframe.testing.integration import (  # noqa: E402, F401
     test_integration_function_tool_round_trip,
     test_integration_hook_observer_receives_events,
     test_integration_list_models,
+    test_integration_permission_callback_denies_tool,
     test_integration_permission_callback_fires,
     test_integration_plain_text_execute,
     test_integration_schema_round_trip,

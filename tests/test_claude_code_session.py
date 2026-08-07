@@ -1803,6 +1803,299 @@ def test_permission_fingerprint_distinguishes_callback_identity() -> None:
 
 
 # ---------------------------------------------------------------------------
+# PreToolUse permission gate (issue #79)
+#
+# ``can_use_tool`` is never invoked under
+# ``permission_mode="bypassPermissions"``, so the callback rides the
+# PreToolUse hook — the only channel that fires for every tool call
+# regardless of permission mode.
+# ---------------------------------------------------------------------------
+
+
+def _pre_tool_use_hook(mock_sdk: dict[str, Any]) -> Any:
+    """Pull the registered PreToolUse hook callback off the captured options."""
+    hooks_dict = mock_sdk["options_kwargs"][0]["hooks"]
+    return hooks_dict["PreToolUse"][0].hooks[0]
+
+
+async def _run_one_turn(sess: Any) -> None:
+    try:
+        await sess.execute("hi")
+    finally:
+        await sess.close()
+
+
+def _pre_tool_input(tool_name: str, tool_input: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "hook_event_name": "PreToolUse",
+        "session_id": "sess-XYZ",
+        "tool_name": tool_name,
+        "tool_input": tool_input,
+        "tool_use_id": "toolu_1",
+    }
+
+
+async def test_on_permission_registers_hooks_without_on_event(
+    mock_sdk: dict[str, Any],
+) -> None:
+    """``on_permission=`` alone wires the hooks dict.
+
+    Before issue #79 the hooks config was built only for
+    ``on_event=``, so a permission-only session had no gate at all.
+    """
+    from airframe import PermissionDecision, PermissionRequest
+
+    class _AllowAll:
+        async def handle(self, request: PermissionRequest) -> PermissionDecision:
+            return "allow"
+
+    final = _FakeResultMessage(result="ok")
+
+    async def fake_receive() -> Any:
+        yield final
+
+    mock_sdk["client"].receive_response = fake_receive
+
+    rt = ClaudeCodeRuntime()
+    await _run_one_turn(rt.session(on_permission=_AllowAll()))
+
+    opts = mock_sdk["options_kwargs"][0]
+    assert "hooks" in opts
+    assert "PreToolUse" in opts["hooks"]
+    # The permission posture is untouched — routing through PreToolUse
+    # deliberately keeps bypassPermissions so headless runs never see
+    # an interactive prompt.
+    assert opts["permission_mode"] == "bypassPermissions"
+
+
+async def test_pre_tool_use_deny_returns_native_deny_payload(
+    mock_sdk: dict[str, Any],
+) -> None:
+    """A ``deny`` decision becomes the SDK's PreToolUse deny response."""
+    from airframe import PermissionDecision, PermissionRequest
+
+    seen: list[PermissionRequest] = []
+
+    class _ProtectClaudeMd:
+        async def handle(self, request: PermissionRequest) -> PermissionDecision:
+            seen.append(request)
+            if request.tool_name == "Write" and str(
+                request.tool_args.get("file_path", "")
+            ).endswith("CLAUDE.md"):
+                return "deny"
+            return "allow"
+
+    final = _FakeResultMessage(result="ok")
+
+    async def fake_receive() -> Any:
+        yield final
+
+    mock_sdk["client"].receive_response = fake_receive
+
+    rt = ClaudeCodeRuntime()
+    await _run_one_turn(rt.session(on_permission=_ProtectClaudeMd()))
+
+    cb = _pre_tool_use_hook(mock_sdk)
+    denied = await cb(
+        _pre_tool_input("Write", {"file_path": "/repo/CLAUDE.md", "content": "x"}),
+        "toolu_1",
+        None,
+    )
+    assert denied == {
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": "airframe PermissionCallback denied 'Write'",
+        }
+    }
+    # The callback saw the normalised request shape.
+    assert seen[-1].tool_name == "Write"
+    assert seen[-1].tool_args == {"file_path": "/repo/CLAUDE.md", "content": "x"}
+
+    # A non-matching call falls through untouched.
+    allowed = await cb(
+        _pre_tool_input("Write", {"file_path": "/repo/notes.md", "content": "x"}),
+        "toolu_2",
+        None,
+    )
+    assert allowed == {}
+
+
+async def test_pre_tool_use_gate_applies_to_every_call(
+    mock_sdk: dict[str, Any],
+) -> None:
+    """The gate is consulted per tool call, not just the first.
+
+    Also covers post-compaction calls: PreCompact doesn't re-register
+    hooks, so the same registered callback keeps gating.
+    """
+    from airframe import PermissionDecision, PermissionRequest
+
+    calls: list[str] = []
+
+    class _DenyAll:
+        async def handle(self, request: PermissionRequest) -> PermissionDecision:
+            calls.append(request.tool_name)
+            return "deny"
+
+    final = _FakeResultMessage(result="ok")
+
+    async def fake_receive() -> Any:
+        yield final
+
+    mock_sdk["client"].receive_response = fake_receive
+
+    rt = ClaudeCodeRuntime()
+    await _run_one_turn(rt.session(on_permission=_DenyAll()))
+
+    hooks_dict = mock_sdk["options_kwargs"][0]["hooks"]
+    pre_cb = hooks_dict["PreToolUse"][0].hooks[0]
+    compact_cb = hooks_dict["PreCompact"][0].hooks[0]
+
+    for i in range(3):
+        out = await pre_cb(_pre_tool_input("Write", {"n": i}), f"toolu_{i}", None)
+        assert out["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+    # Simulate a compaction, then keep gating.
+    await compact_cb({"hook_event_name": "PreCompact", "trigger": "auto"}, None, None)
+    out = await pre_cb(_pre_tool_input("Write", {"n": 99}), "toolu_99", None)
+    assert out["hookSpecificOutput"]["permissionDecision"] == "deny"
+    assert calls == ["Write"] * 4
+
+
+async def test_pre_tool_use_allow_and_defer_leave_tool_untouched(
+    mock_sdk: dict[str, Any],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """``allow`` and ``defer`` both return an empty hook response.
+
+    ``allow`` deliberately does not emit ``permissionDecision:
+    "allow"`` — falling through preserves the session's existing
+    posture rather than widening it.
+    """
+    import logging
+
+    from airframe import PermissionDecision, PermissionRequest
+
+    decisions: list[PermissionDecision] = ["allow", "defer"]
+
+    class _Scripted:
+        async def handle(self, request: PermissionRequest) -> PermissionDecision:
+            return decisions.pop(0)
+
+    final = _FakeResultMessage(result="ok")
+
+    async def fake_receive() -> Any:
+        yield final
+
+    mock_sdk["client"].receive_response = fake_receive
+
+    rt = ClaudeCodeRuntime()
+    await _run_one_turn(rt.session(on_permission=_Scripted()))
+
+    cb = _pre_tool_use_hook(mock_sdk)
+    assert await cb(_pre_tool_input("Read", {}), "toolu_1", None) == {}
+    with caplog.at_level(logging.DEBUG, logger="airframe.adapters.claude_code"):
+        assert await cb(_pre_tool_input("Read", {}), "toolu_2", None) == {}
+    assert any("defer" in rec.message and "Read" in rec.message for rec in caplog.records)
+
+
+async def test_pre_tool_use_without_permission_callback_is_pure_observation(
+    mock_sdk: dict[str, Any],
+) -> None:
+    """Observer-only sessions keep the pre-#79 empty-response behaviour."""
+    from airframe import HookEvent
+
+    received: list[HookEvent] = []
+    final = _FakeResultMessage(result="ok")
+
+    async def fake_receive() -> Any:
+        yield final
+
+    mock_sdk["client"].receive_response = fake_receive
+
+    rt = ClaudeCodeRuntime()
+    await _run_one_turn(rt.session(on_event=received.append))
+
+    cb = _pre_tool_use_hook(mock_sdk)
+    assert await cb(_pre_tool_input("Write", {"file_path": "/repo/CLAUDE.md"}), "t", None) == {}
+    assert [e.kind for e in received if e.kind == "pre_tool_use"] == ["pre_tool_use"]
+
+
+async def test_pre_tool_use_callback_raise_defers_and_survives(
+    mock_sdk: dict[str, Any],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A raising callback is logged and treated as ``defer``."""
+    import logging
+
+    from airframe import PermissionDecision, PermissionRequest
+
+    class _Boom:
+        async def handle(self, request: PermissionRequest) -> PermissionDecision:
+            raise RuntimeError("callback boom")
+
+    final = _FakeResultMessage(result="ok")
+
+    async def fake_receive() -> Any:
+        yield final
+
+    mock_sdk["client"].receive_response = fake_receive
+
+    rt = ClaudeCodeRuntime()
+    sess = rt.session(on_permission=_Boom())
+    try:
+        result = await sess.execute("hi")
+    finally:
+        await sess.close()
+    assert result.text == "ok"
+
+    cb = _pre_tool_use_hook(mock_sdk)
+    with caplog.at_level(logging.DEBUG, logger="airframe.adapters.claude_code"):
+        assert await cb(_pre_tool_input("Write", {}), "toolu_1", None) == {}
+    assert any("callback boom" in rec.message for rec in caplog.records)
+
+
+async def test_pre_tool_use_strips_mcp_prefix_and_fans_out_to_observer(
+    mock_sdk: dict[str, Any],
+) -> None:
+    """MCP-routed tools reach the callback under their bare name, and
+    ``on_permission=`` + ``on_event=`` coexist on the same hook."""
+    from airframe import HookEvent, McpServerRef, PermissionDecision, PermissionRequest
+
+    seen: list[str] = []
+    events: list[HookEvent] = []
+
+    class _Recorder:
+        async def handle(self, request: PermissionRequest) -> PermissionDecision:
+            seen.append(request.tool_name)
+            return "allow"
+
+    final = _FakeResultMessage(result="ok")
+
+    async def fake_receive() -> Any:
+        yield final
+
+    mock_sdk["client"].receive_response = fake_receive
+
+    rt = ClaudeCodeRuntime()
+    await _run_one_turn(
+        rt.session(
+            on_permission=_Recorder(),
+            on_event=events.append,
+            mcp_servers=[McpServerRef(name="fs", transport="stdio", command=["fs-server"])],
+        )
+    )
+
+    cb = _pre_tool_use_hook(mock_sdk)
+    assert await cb(_pre_tool_input("mcp__fs__write_file", {"p": "x"}), "toolu_1", None) == {}
+    assert seen == ["write_file"]
+    # The observer still sees the raw vendor payload.
+    pre = [e for e in events if e.kind == "pre_tool_use"]
+    assert pre[0].payload["tool_name"] == "mcp__fs__write_file"
+
+
+# ---------------------------------------------------------------------------
 # Lifecycle hooks (Phase 5 Iteration C)
 # ---------------------------------------------------------------------------
 
