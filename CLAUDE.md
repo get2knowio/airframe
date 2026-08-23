@@ -8,8 +8,8 @@ Airframe is "JDBC for LLM agent SDKs": a vendor-neutral `AgentRuntime`
 protocol (`src/airframe/protocol.py`) plus pluggable adapters under
 `src/airframe/adapters/`. Consumer code depends on the protocol;
 each adapter wraps a different vendor SDK (Claude Agent SDK, GitHub
-Copilot SDK, Moonshot Kimi Agent SDK, AWS Bedrock Converse via
-aioboto3, OpenAI-compatible HTTP). The PyPI distribution name is
+Copilot SDK, AWS Bedrock Converse via aioboto3, the OpenCode agent
+server, OpenAI-compatible HTTP). The PyPI distribution name is
 `airframe-agents`; the import name is `airframe`.
 
 ## Common commands
@@ -30,22 +30,27 @@ Run one test: `uv run pytest tests/test_claude_code.py::test_name -q`.
 Set `VERBOSE=1 make test` for non-quiet pytest/ruff output.
 
 Live probes (require real vendor credentials, kept out of the unit
-suite because pytest collects only `test_*.py`):
+suite because pytest collects only `test_*.py`). `examples/` holds
+about twenty; the feature-specific ones (`probe_thinking.py`,
+`probe_tools.py`, `probe_hooks.py`, …) follow the same pattern:
 
 ```bash
 uv run python examples/probe_claude_code.py
 uv run python examples/probe_copilot.py
-uv run python examples/probe_kimi.py
+uv run python examples/probe_bedrock.py
 uv run python examples/probe_opencode_zen.py
+uv run python examples/probe_opencode_server.py
 uv run python examples/probe_supports.py
+uv run python examples/smoke_providers.py
 uv run python tests/probe_list_models.py [--provider claude] [--installed-only=false]
 ```
 
 ## Architecture essentials
 
-The protocol is intentionally narrow — five methods: `execute`,
-`reset`, `close`, `validate_binding`, `list_models`, plus capability
-predicates `supports(Feature)` and the JDBC-style escape hatch
+The protocol is intentionally narrow: `execute`, `session`, `reset`,
+`close`, `validate_binding`, `list_models`, `count_tokens`, plus the
+capability predicates `supports(Feature)` /
+`supported_native_tools()` and the JDBC-style escape hatch
 `unwrap(NativeType)`. Everything above the protocol (retry, fallback,
 memory, orchestration) is consumer responsibility.
 
@@ -81,27 +86,83 @@ Key invariants when editing:
   on every adapter — they drive `airframe.discovery.list_providers`
   filtering by installed extras and the `airframe.adapters`
   entry-point group for third-party adapters.
+- **`PROVIDER_ID` identifies a *binding*, not a vendor.** This is the
+  rule for when to mint a new ID, and it is easy to get wrong because
+  the field is named `provider_id`. A binding is one **(wire protocol,
+  endpoint, auth mechanism, feature surface)** tuple. One vendor
+  routinely spans several:
+
+  | Vendor | IDs | What differs |
+  | --- | --- | --- |
+  | Anthropic | `anthropic` (reserved) vs `claude` | direct Messages API vs Agent SDK subprocess |
+  | Moonshot | `moonshot` (reserved) vs `kimi` (reserved) | OpenAI-compat HTTP vs Agent SDK subprocess |
+  | AWS | `bedrock` vs `bedrock-agents` (reserved) | Converse vs `bedrock-agent-runtime` |
+  | OpenCode | `opencode` / `opencode-zen` / `opencode-go` | local server / per-token gateway / flat-fee gateway |
+
+  It is not the framework either: `openrouter`, `opencode-zen`, and
+  `opencode-go` all inherit `OpenAICompatibleRuntime` and hold three
+  distinct IDs. So the ID tracks neither the company nor the client
+  library — it tracks the binding. The JDBC analogy is load-bearing:
+  `jdbc:postgresql:` names a subprotocol, not a company, and one DBMS
+  can have several drivers. `provider_id` is the subprotocol slot.
+
+  Two mechanisms break if an ID straddles two bindings:
+
+  - `REQUIRES_PACKAGE` / `EXTRA_NAME` gate `list_providers` on which
+    client library is importable. An ID spanning two harnesses cannot
+    answer "is this usable on this machine?" — the question discovery
+    exists to answer.
+  - `SUPPORTED_FEATURES` is a ClassVar frozenset: exactly one honest
+    capability manifest per ID. Two endpoints whose real capabilities
+    differ cannot share one without `supports()` lying about at least
+    one of them.
+
+  **Test before minting an ID:** if the new thing needs a different
+  auth variable, a different base URL, or a trimmed
+  `SUPPORTED_FEATURES` versus an existing adapter, it is a separate
+  binding — *even when it reuses that adapter's harness wholesale*.
+  Pointing an existing adapter at it through env vars stays available
+  as an escape hatch, but an escape hatch is not a supported binding.
+
+  **Name the axis that distinguishes it**, and don't claim a bare
+  vendor name when the vendor exposes more than one surface — the
+  same reason the Kimi Agent SDK adapter was never named `moonshot`.
+
 - **Provider IDs are strict; no aliases.** `"anthropic"` and
   `"openai"` are reserved for future direct-API adapters; today's
   subscription / gateway / managed / agent-server adapters use
   `"claude"`, `"github-copilot"`, `"opencode"`, `"opencode-zen"`,
-  `"opencode-go"`, `"openrouter"`, `"bedrock"`, and `"kimi"`. The
-  three `opencode*` IDs are deliberately distinct: `"opencode"`
-  wraps the local HTTP agent server (`opencode serve`),
-  `"opencode-zen"` wraps the per-token gateway at
-  `https://opencode.ai/zen/v1`, and `"opencode-go"` wraps the
-  flat-fee subscription gateway at `https://opencode.ai/zen/go/v1`
-  — different wire formats, different auth, different feature
-  surfaces. Reserved-but-not-shipped:
+  `"opencode-go"`, `"openrouter"`, and `"bedrock"`. The three
+  `opencode*` IDs are deliberately distinct: `"opencode"` wraps the
+  local HTTP agent server (`opencode serve`), `"opencode-zen"` wraps
+  the per-token gateway at `https://opencode.ai/zen/v1`, and
+  `"opencode-go"` wraps the flat-fee subscription gateway at
+  `https://opencode.ai/zen/go/v1` — different wire formats, different
+  auth, different feature surfaces. Reserved-but-not-shipped:
   `"bedrock-agents"` (future sibling wrapping `bedrock-agent-runtime`
   — Knowledge Bases, action groups; must not be folded into
-  `"bedrock"`); `"moonshot"` (future OpenAI-compat sibling fronting
-  `api.moonshot.ai/v1` chat-completions; must not be folded into
-  `"kimi"`, which wraps the Kimi Agent SDK subprocess surface);
-  `"codex"` (reserved for a possible future adapter wrapping
-  OpenAI's official `openai-codex` Python SDK once it leaves alpha
-  — `airframe-agents` 0.7.0 removed the earlier `CodexRuntime`
+  `"bedrock"`); `"kimi"` (the Kimi Agent SDK subprocess surface — an
+  adapter shipped and was removed because `kimi-cli` pinned a
+  transitive `mcp<1.17` carrying known advisories; the ID stays
+  reserved for its return); `"moonshot"` (future OpenAI-compat sibling
+  fronting `api.moonshot.ai/v1` chat-completions; must not be folded
+  into `"kimi"`); `"codex"` (reserved for a possible future adapter
+  wrapping OpenAI's official `openai-codex` Python SDK once it leaves
+  alpha — `airframe-agents` 0.7.0 removed the earlier `CodexRuntime`
   that wrapped the now-unmaintained `openai-codex-sdk` package).
+
+- **Subscription credentials are endpoint-scoped.** Anthropic-minted
+  OAuth tokens (`CLAUDE_CODE_OAUTH_TOKEN`,
+  `~/.claude/.credentials.json`) authenticate the *user's account* and
+  are worthless to any other vendor except as a stolen secret. They
+  must never be sent to a base URL that isn't the vendor's own — see
+  `_is_anthropic_endpoint` / `_resolve_anthropic_auth` in
+  `claude_code.py`. API-key-shaped slots (an explicit `api_key=` arg,
+  `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`) are deliberately *not*
+  scoped: compatible vendors reuse exactly those to carry their own
+  credentials, so scoping them would break the legitimate case. Any
+  adapter that lets a base URL be overridden inherits this obligation.
+
 - **`CopilotRuntime.validate_binding` deliberately rejects
   `claude-*` model IDs** — Claude via Copilot Chat Completions emits
   markdown-fenced JSON instead of honouring tool calls. Route Claude
@@ -133,15 +194,23 @@ adapter inherits it.
 `dev-docs/implementation-plan.md` and `dev-docs/feature-roadmap.md`
 describe the phased rollout. These docs are dev-internal — they
 don't ship in the PyPI sdist (see `[tool.hatch.build.targets.sdist]`).
-The current release (v0.3.0) is **Phase 0 —
-Foundations**: the `Feature` enum, `ProviderOptions` namespaces,
-`unwrap`, and entry-point discovery all shipped intentionally
-*before* substantive feature work, so later phases can land without
-re-shaping public surface. `ProviderOptions` dataclasses
-(`src/airframe/options.py`) are deliberately empty scaffolding —
-populate them only when the corresponding feature phase lands. Today
-only `Feature.STRUCTURED_OUTPUT_JSON_SCHEMA` returns `True`; other
-enum members exist to lock the names, and return `False`.
+
+Phase 0 — Foundations shipped the `Feature` enum, `ProviderOptions`
+namespaces, `unwrap`, and entry-point discovery *before* substantive
+feature work, so later phases could land without re-shaping public
+surface. That worked: the feature phases since have filled the
+scaffolding in rather than replacing it. `Feature` now has 27
+members, and coverage varies per binding — `claude` implements 22,
+the OpenAI-compatible bindings 15, `bedrock` 13, `opencode` 12.
+`ProviderOptions` dataclasses (`src/airframe/options.py`) are
+populated as their phases land; a namespace that is still empty is
+reserved surface, not an oversight.
+
+Check current coverage rather than trusting any list in this file:
+
+```bash
+uv run python examples/probe_supports.py
+```
 
 ## Style
 
