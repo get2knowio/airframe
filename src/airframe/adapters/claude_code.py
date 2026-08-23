@@ -111,6 +111,7 @@ from airframe.sessions import (
     _check_mcp_servers_supported,
     _check_permission_supported,
     _check_provider_options,
+    _check_thinking_supported,
     _check_tools_supported,
     _compose_mcp_headers,
     _enforce_budget_pre_turn,
@@ -651,6 +652,30 @@ class ClaudeCodeRuntime(AgentRuntime):
             slash_commands=slash_commands,
         )
 
+    def _subprocess_env(self) -> dict[str, str]:
+        """Env vars layered over the inherited environment for the CLI.
+
+        Returned dict rides into :attr:`ClaudeAgentOptions.env`, which the
+        Claude Agent SDK merges *over* ``os.environ`` when spawning the
+        ``claude`` subprocess. We never mutate ``os.environ`` ourselves —
+        two runtimes in one process must be able to target different
+        endpoints concurrently.
+
+        Because the SDK merges rather than replaces, this hook can only
+        set or shadow keys, never unset them. A subclass aiming the CLI
+        at a non-Anthropic endpoint must therefore shadow any inherited
+        Anthropic credential with an empty string rather than expecting
+        it to be absent — see :class:`~airframe.adapters.zai.ZaiAnthropicRuntime`.
+
+        Returns:
+            Env overrides for the subprocess. Empty when the CLI should
+            resolve auth entirely from the inherited environment.
+        """
+        env: dict[str, str] = {}
+        if self._api_key_override is not None:
+            env["ANTHROPIC_API_KEY"] = self._api_key_override
+        return env
+
     def _resolve_anthropic_auth(self, *, caller: str) -> dict[str, Any]:
         """Pick auth kwargs for a direct :class:`AsyncAnthropic` call.
 
@@ -752,8 +777,8 @@ class ClaudeCodeRuntime(AgentRuntime):
         text, images, files = _split_prompt_parts(
             prompt,
             adapter_label=self.label,
-            supports_vision=True,
-            supports_file=True,
+            supports_vision=self.supports(Feature.VISION_INPUT),
+            supports_file=self.supports(Feature.FILE_INPUT),
         )
         if images or files:
             raise UnsupportedFeatureError(
@@ -1123,6 +1148,11 @@ class ClaudeCodeSession:
             adapter_label=self._runtime.label,
             supports=self._runtime.supports,
         )
+        _check_thinking_supported(
+            thinking,
+            adapter_label=self._runtime.label,
+            supports=self._runtime.supports,
+        )
         _enforce_budget_pre_turn(
             max_turns=max_turns,
             max_budget_usd=max_budget_usd,
@@ -1133,8 +1163,8 @@ class ClaudeCodeSession:
         text, images, files = _split_prompt_parts(
             prompt,
             adapter_label=self._runtime.label,
-            supports_vision=True,
-            supports_file=True,
+            supports_vision=self._runtime.supports(Feature.VISION_INPUT),
+            supports_file=self._runtime.supports(Feature.FILE_INPUT),
         )
         has_attachments = bool(images or files)
         prompt_str = _build_claude_prompt(text, images, files)
@@ -1212,6 +1242,11 @@ class ClaudeCodeSession:
             adapter_label=self._runtime.label,
             supports=self._runtime.supports,
         )
+        _check_thinking_supported(
+            thinking,
+            adapter_label=self._runtime.label,
+            supports=self._runtime.supports,
+        )
         _enforce_budget_pre_turn(
             max_turns=max_turns,
             max_budget_usd=max_budget_usd,
@@ -1222,8 +1257,8 @@ class ClaudeCodeSession:
         text, images, files = _split_prompt_parts(
             prompt,
             adapter_label=self._runtime.label,
-            supports_vision=True,
-            supports_file=True,
+            supports_vision=self._runtime.supports(Feature.VISION_INPUT),
+            supports_file=self._runtime.supports(Feature.FILE_INPUT),
         )
         has_attachments = bool(images or files)
         prompt_str = _build_claude_prompt(text, images, files)
@@ -1444,9 +1479,7 @@ class ClaudeCodeSession:
 
         from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient
 
-        env_override: dict[str, str] = {}
-        if self._runtime._api_key_override is not None:
-            env_override["ANTHROPIC_API_KEY"] = self._runtime._api_key_override
+        env_override = self._runtime._subprocess_env()
 
         options_kwargs: dict[str, Any] = {
             "model": self._model_id,
@@ -1457,7 +1490,7 @@ class ClaudeCodeSession:
             # reconnect (same pattern as schema= / thinking=).
             "max_turns": max_turns if max_turns is not None else self._runtime._max_turns,
             "permission_mode": "bypassPermissions",
-            "env": env_override or {},
+            "env": env_override,
             # Always-on so stream() gets fine-grained deltas. execute()
             # ignores StreamEvents — receive_response drains them
             # alongside the ResultMessage and we only act on the latter.

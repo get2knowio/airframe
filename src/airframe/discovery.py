@@ -74,6 +74,7 @@ def _builtin_runtime_classes() -> list[type[AgentRuntime]]:
     from airframe.adapters.opencode_server import OpenCodeServerRuntime
     from airframe.adapters.opencode_zen import OpenCodeZenRuntime
     from airframe.adapters.openrouter import OpenRouterRuntime
+    from airframe.adapters.zai import ZaiAnthropicRuntime
 
     # KimiRuntime is intentionally NOT registered for now. `kimi-agent-sdk`
     # pins `kimi-cli<1.13 → fastmcp 2.12.5 → mcp<1.17`, which can't co-install
@@ -91,6 +92,7 @@ def _builtin_runtime_classes() -> list[type[AgentRuntime]]:
         OpenCodeGoRuntime,
         OpenRouterRuntime,
         BedrockRuntime,
+        ZaiAnthropicRuntime,
         # KimiRuntime,  # disabled pending kimi-agent-sdk mcp alignment (#29)
     ]
 

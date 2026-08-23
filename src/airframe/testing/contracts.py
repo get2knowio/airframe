@@ -828,6 +828,10 @@ def test_session_rejects_wrong_provider_options_namespace(adapter_runtime: Any) 
 
     matching = {
         "claude": ClaudeOptions,
+        # zai-anthropic reuses ClaudeCodeRuntime's harness wholesale, so it
+        # shares that harness's provider-options namespace. A distinct
+        # binding does not imply a distinct options namespace.
+        "zai-anthropic": ClaudeOptions,
         "github-copilot": CopilotOptions,
         "opencode-zen": OpenAICompatOptions,
         "opencode-go": OpenAICompatOptions,

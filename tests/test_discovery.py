@@ -54,6 +54,7 @@ def test_list_providers_returns_all_when_installed_only_false() -> None:
         "opencode-zen",
         "opencode-go",
         "openrouter",
+        "zai-anthropic",
     }
 
 
@@ -65,9 +66,16 @@ def test_list_providers_sorted_alphabetically() -> None:
 def test_list_providers_filters_when_only_claude_installed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`pip install airframe-agents[claude]` users see only ``claude``."""
+    """The ``[claude]`` extra brings ``claude-agent-sdk``.
+
+    That SDK is the harness for two bindings — ``claude`` (Anthropic's
+    own endpoint) and ``zai-anthropic`` (Z.AI's Anthropic-compatible
+    endpoint) — so installing it surfaces both. Distinct bindings can
+    share a harness; that is exactly why ``PROVIDER_ID`` is not the
+    same thing as ``REQUIRES_PACKAGE``.
+    """
     _stub_find_spec(monkeypatch, available={"claude_agent_sdk"})
-    assert list_providers() == ["claude"]
+    assert list_providers() == ["claude", "zai-anthropic"]
 
 
 def test_list_providers_filters_when_only_copilot_installed(
@@ -114,9 +122,9 @@ def test_list_providers_when_nothing_installed_is_empty(
 def test_list_providers_with_two_extras_installed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Two extras installed → both providers surface, sorted."""
+    """Two extras installed → every gated provider surfaces, sorted."""
     _stub_find_spec(monkeypatch, available={"claude_agent_sdk", "copilot"})
-    assert list_providers() == ["claude", "github-copilot"]
+    assert list_providers() == ["claude", "github-copilot", "zai-anthropic"]
 
 
 # ---------------------------------------------------------------------------

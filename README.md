@@ -26,7 +26,8 @@ class Brief(BaseModel):
     risks: list[str]
 
 # Provider ID comes from config — YAML, env, CLI flag, whatever.
-provider_id = "claude"  # or bedrock / github-copilot / opencode / opencode-go / opencode-zen / openrouter
+provider_id = "claude"  # or bedrock / github-copilot / opencode / opencode-go
+                       # / opencode-zen / openrouter / zai-anthropic
 
 cls = runtime_for(provider_id)       # discovery lookup by ID
 runtime = cls()                      # auth resolves from env / credential files
@@ -73,6 +74,7 @@ is `airframe`.
 | [`OpenCodeServerRuntime`](https://github.com/get2knowio/airframe/blob/main/docs/adapters/opencode-server.md) | `opencode` | `opencode-ai` | HTTP Basic (loopback unauthenticated; `OPENCODE_SERVER_PASSWORD` for remote) |
 | [`OpenCodeZenRuntime`](https://github.com/get2knowio/airframe/blob/main/docs/adapters/opencode-zen.md) | `opencode-zen` | OpenAI compatible | `OPENCODE_API_KEY` → opencode `auth.json::opencode.key` |
 | [`OpenRouterRuntime`](https://github.com/get2knowio/airframe/blob/main/docs/adapters/openrouter.md) | `openrouter` | OpenAI compatible | `OPENROUTER_API_KEY` |
+| [`ZaiAnthropicRuntime`](https://github.com/get2knowio/airframe/blob/main/docs/adapters/zai-anthropic.md) | `zai-anthropic` | `claude-agent-sdk` | `ZAI_API_KEY` |
 
 The OpenAI-compatible family (`OpenCodeZenRuntime` per-token,
 `OpenCodeGoRuntime` subscription, `OpenRouterRuntime` multi-vendor
@@ -415,7 +417,8 @@ Full list with one-line descriptions in
   [OpenCode Go](https://github.com/get2knowio/airframe/blob/main/docs/adapters/opencode-go.md) ·
   [OpenCode Server](https://github.com/get2knowio/airframe/blob/main/docs/adapters/opencode-server.md) ·
   [OpenCode Zen](https://github.com/get2knowio/airframe/blob/main/docs/adapters/opencode-zen.md) ·
-  [OpenRouter](https://github.com/get2knowio/airframe/blob/main/docs/adapters/openrouter.md).
+  [OpenRouter](https://github.com/get2knowio/airframe/blob/main/docs/adapters/openrouter.md) ·
+  [Z.AI (Anthropic-compatible)](https://github.com/get2knowio/airframe/blob/main/docs/adapters/zai-anthropic.md).
 - **[Writing your own adapter](https://github.com/get2knowio/airframe/blob/main/docs/adapters/third-party.md)** —
   the `airframe.adapters` entry-point group + conformance
   contracts.

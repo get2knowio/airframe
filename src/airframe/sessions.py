@@ -591,6 +591,47 @@ def _check_budget_supported(
         )
 
 
+def _check_thinking_supported(
+    thinking: ThinkingMode,
+    *,
+    adapter_label: str,
+    supports: Callable[[Feature], bool],
+) -> None:
+    """Gate ``execute(thinking=...)`` against the reasoning capability flags.
+
+    The :data:`~airframe.thinking.ThinkingMode` union spans two
+    capabilities: a literal effort level maps to
+    :data:`~airframe.features.Feature.REASONING_EFFORT`, while the
+    Claude-style ``{"budget_tokens": N}`` dict maps to
+    :data:`~airframe.features.Feature.REASONING_BUDGET_TOKENS`. Each form
+    is gated on its own flag, since an adapter can honour one without the
+    other.
+
+    ``None`` and ``"disabled"`` are always permitted — neither asks the
+    adapter to do anything it might not support.
+
+    Args:
+        thinking: The ``thinking=`` value, or ``None``.
+        adapter_label: Adapter name for the error message.
+        supports: Bound :meth:`~airframe.protocol.AgentRuntime.supports`.
+
+    Raises:
+        UnsupportedFeatureError: The requested form's flag is False.
+    """
+    if thinking is None or thinking == "disabled":
+        return
+    feature = (
+        Feature.REASONING_BUDGET_TOKENS if isinstance(thinking, dict) else Feature.REASONING_EFFORT
+    )
+    if not supports(feature):
+        raise UnsupportedFeatureError(
+            f"{adapter_label}: thinking={thinking!r} is not supported on this "
+            f"adapter. Check runtime.supports(Feature.{feature.name}) before "
+            f"passing thinking=.",
+            feature=feature,
+        )
+
+
 def _enforce_budget_pre_turn(
     *,
     max_turns: int | None,
