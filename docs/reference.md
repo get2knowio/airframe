@@ -20,6 +20,7 @@ import airframe
 | `OpenCodeServerRuntime` | `opencode` | [adapters/opencode-server.md](./adapters/opencode-server.md) |
 | `OpenCodeZenRuntime` | `opencode-zen` | [adapters/opencode-zen.md](./adapters/opencode-zen.md) |
 | `OpenRouterRuntime` | `openrouter` | [adapters/openrouter.md](./adapters/openrouter.md) |
+| `ZaiAnthropicRuntime` | `zai-anthropic` | [adapters/zai-anthropic.md](./adapters/zai-anthropic.md) |
 
 Every runtime implements the `AgentRuntime` protocol.
 

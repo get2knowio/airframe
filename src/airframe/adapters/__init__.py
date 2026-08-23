@@ -11,9 +11,11 @@ from __future__ import annotations
 from airframe.adapters.claude_code import ClaudeCodeRuntime
 from airframe.adapters.copilot import CopilotRuntime
 from airframe.adapters.opencode_zen import OpenCodeZenRuntime
+from airframe.adapters.zai import ZaiAnthropicRuntime
 
 __all__ = [
     "ClaudeCodeRuntime",
     "CopilotRuntime",
     "OpenCodeZenRuntime",
+    "ZaiAnthropicRuntime",
 ]

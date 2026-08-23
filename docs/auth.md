@@ -17,6 +17,7 @@ production (explicit constructor argument).
 | **OpenCodeServerRuntime** | explicit `username=`/`password=` → `OPENCODE_SERVER_USERNAME`+`OPENCODE_SERVER_PASSWORD` env → unauthenticated loopback (default) | `airframe-agents[opencode]` |
 | **OpenCodeZenRuntime** | `api_key=` constructor arg → `OPENCODE_API_KEY` env → `~/.local/share/opencode/auth.json::opencode.key` | `airframe-agents[openai-compat]` |
 | **OpenRouterRuntime** | `api_key=` constructor arg → `OPENROUTER_API_KEY` env | `airframe-agents[openai-compat]` |
+| **ZaiAnthropicRuntime** | `api_key=` constructor arg → `ZAI_API_KEY` env. No Anthropic fallback — see [zai-anthropic.md](./adapters/zai-anthropic.md#authentication) | `airframe-agents[claude]` |
 
 `list_models()` calls always require a credential — the vendor's
 models endpoint won't honour an anonymous request. Tests / scripts

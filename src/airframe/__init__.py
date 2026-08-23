@@ -124,6 +124,7 @@ from airframe.adapters.opencode_go import OpenCodeGoRuntime
 from airframe.adapters.opencode_server import OpenCodeServerRuntime
 from airframe.adapters.opencode_zen import OpenCodeZenRuntime
 from airframe.adapters.openrouter import OpenRouterRuntime
+from airframe.adapters.zai import ZaiAnthropicRuntime
 
 __all__ = [
     "AgentRuntime",
@@ -160,6 +161,7 @@ __all__ = [
     "OpenCodeServerRuntime",
     "OpenCodeZenRuntime",
     "OpenRouterRuntime",
+    "ZaiAnthropicRuntime",
     "PermissionCallback",
     "PermissionDecision",
     "PermissionRequest",

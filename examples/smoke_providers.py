@@ -76,6 +76,7 @@ CREDENTIALS: dict[str, list[list[str]]] = {
     "opencode-go": [["OPENCODE_API_KEY"]],
     "opencode": [["OPENCODE_SERVER_URL"]],  # also needs a running server
     "bedrock": [["AWS_ACCESS_KEY_ID"], ["AWS_PROFILE"]],
+    "zai-anthropic": [["ZAI_API_KEY"]],  # also needs the `claude` CLI on PATH
 }
 
 # pip extra that installs each provider's SDK (for the skip hint).
@@ -87,6 +88,7 @@ EXTRA_FOR: dict[str, str] = {
     "opencode-zen": "openai-compat",
     "opencode-go": "openai-compat",
     "opencode": "opencode",
+    "zai-anthropic": "claude",  # shares the Claude Agent SDK harness
 }
 
 # Curated capabilities to surface per provider (declared, not exercised).
