@@ -23,9 +23,81 @@ jobs:
       - name: Run tests
         run: uv run --python ${{ matrix.python-version }} pytest --tb=short -q
 
+  build:
+    name: Build and verify artifacts
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v8.2.0
+      # --no-sources proves the build works with `tool.uv.sources`
+      # disabled, which is how every other build tool — and therefore
+      # PyPI — sees this project. Cheap insurance today (we declare no
+      # sources), load-bearing the moment a path or git source is added.
+      - name: Build sdist and wheel
+        run: uv build --no-sources
+      - name: Verify artifact metadata and contents
+        run: |
+          uvx twine check dist/*
+          uvx check-wheel-contents dist/*.whl
+      # Everything downstream consumes THIS artifact. Rebuilding in the
+      # publish job would mean shipping bytes nothing ever installed.
+      - name: Upload dist
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+
+  install-matrix:
+    name: Install ${{ matrix.label }} (Python ${{ matrix.python-version }})
+    needs: build
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13"]
+        include:
+          # The bare install is the important row: it is the only
+          # configuration where the vendor SDKs are genuinely absent, so
+          # it is the only place the lazy-import invariant can actually
+          # fail. `uv sync --all-extras` in the test job can never catch it.
+          - { extra: "", label: "no extras" }
+          - { extra: "[claude]", label: "claude" }
+          - { extra: "[copilot]", label: "copilot" }
+          - { extra: "[openai-compat]", label: "openai-compat" }
+          - { extra: "[bedrock]", label: "bedrock" }
+          - { extra: "[opencode]", label: "opencode" }
+          - { extra: "[all]", label: "all" }
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v8.2.0
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      # Install the wheel by explicit PATH, not by name. `--find-links`
+      # only *adds* to the index, so if PyPI already carries a version
+      # newer than the one being released, the resolver picks that one and
+      # the whole matrix silently verifies the previously-published
+      # package instead of the artifact about to ship. Appending the extra
+      # to the path still resolves that extra's dependencies from PyPI,
+      # which is the behaviour we want.
+      - name: Install the built wheel into a clean environment
+        run: |
+          uv venv --python ${{ matrix.python-version }}
+          WHEEL=$(ls dist/*.whl)
+          echo "Installing ${WHEEL}${{ matrix.extra }}"
+          uv pip install "${WHEEL}${{ matrix.extra }}"
+      # Invoke the venv interpreter directly rather than through `uv run`,
+      # so there is no chance of the repo checkout's own project env being
+      # picked up instead of the environment the wheel was installed into.
+      - name: Smoke the installed distribution
+        run: .venv/bin/python scripts/smoke_install.py
+
   release:
     name: Create GitHub Release
-    needs: test
+    needs: install-matrix
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -139,15 +211,19 @@ jobs:
 
   publish:
     name: Publish to PyPI
-    needs: [test, release]
+    needs: [install-matrix, release]
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
       id-token: write
     steps:
-      - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v8.2.0
-      - name: Build package
-        run: uv build
+      # No checkout, no rebuild. Publishing the exact artifact the
+      # install matrix exercised is the whole point of this restructure:
+      # a rebuild here could differ from what was verified.
+      - name: Download the verified dist
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
