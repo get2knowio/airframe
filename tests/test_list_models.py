@@ -58,6 +58,18 @@ class _FakeAnthropicModel:
             self.display_name = display_name
 
 
+@pytest.fixture(autouse=True)
+def _clear_anthropic_endpoint_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Neutralise ambient endpoint/auth env for every test in this module.
+
+    ``ANTHROPIC_BASE_URL`` now changes which credentials airframe is
+    willing to send, so a developer running the suite with it exported
+    would otherwise get different behaviour than CI.
+    """
+    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+    monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
+
+
 def _patch_anthropic_sdk(
     monkeypatch: pytest.MonkeyPatch,
     *,
@@ -362,6 +374,208 @@ def test_credentials_helper_returns_token_when_present(
     p.write_text(json.dumps({"claudeAiOauth": {"accessToken": "sk-ant-oat-VALID"}}))
     monkeypatch.setenv("CLAUDE_CREDENTIALS_PATH", str(p))
     assert _read_claude_credentials_oauth_token() == "sk-ant-oat-VALID"
+
+
+# ---------------------------------------------------------------------------
+# Credential scoping — ANTHROPIC_BASE_URL pointed at a third-party endpoint
+#
+# ANTHROPIC_BASE_URL is the documented way to aim the Claude Agent SDK at an
+# Anthropic-compatible vendor. Anthropic subscription OAuth tokens must never
+# follow it off-site: they authenticate the user's own Anthropic account.
+# ---------------------------------------------------------------------------
+
+#: Stand-in for any Anthropic-compatible third-party endpoint.
+THIRD_PARTY_BASE_URL = "https://api.z.ai/api/anthropic"
+
+#: A token that must never appear in kwargs handed to AsyncAnthropic when the
+#: base URL is third-party.
+SUBSCRIPTION_TOKEN = "sk-ant-oat-SUBSCRIPTION-MUST-NOT-LEAK"
+
+
+def _write_credentials_file(tmp_path: Any, monkeypatch: pytest.MonkeyPatch, token: str) -> None:
+    """Point CLAUDE_CREDENTIALS_PATH at a file holding ``token``."""
+    cred_path = tmp_path / "credentials.json"
+    cred_path.write_text(
+        json.dumps(
+            {
+                "claudeAiOauth": {
+                    "accessToken": token,
+                    "refreshToken": "refresh-...",
+                    "expiresAt": 9_999_999_999,
+                    "subscriptionType": "max",
+                }
+            }
+        )
+    )
+    monkeypatch.setenv("CLAUDE_CREDENTIALS_PATH", str(cred_path))
+
+
+@pytest.mark.parametrize(
+    ("base_url", "expected"),
+    [
+        (None, True),
+        ("", True),
+        ("   ", True),
+        ("https://api.anthropic.com", True),
+        ("https://api.anthropic.com/v1", True),
+        ("https://API.Anthropic.com", True),
+        ("https://api.us.anthropic.com", True),
+        (THIRD_PARTY_BASE_URL, False),
+        ("http://localhost:8080", False),
+        ("https://evilanthropic.com", False),
+        ("https://api.anthropic.com.evil.test", False),
+        ("not-a-url", False),
+    ],
+)
+def test_is_anthropic_endpoint(base_url: str | None, expected: bool) -> None:
+    """Only Anthropic's own hosts count as first-party."""
+    from airframe.adapters.claude_code import _is_anthropic_endpoint
+
+    assert _is_anthropic_endpoint(base_url) is expected
+
+
+@pytest.mark.asyncio
+async def test_claude_list_models_withholds_credentials_file_from_third_party(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Any,
+) -> None:
+    """Regression: the on-disk subscription token must not reach a third party.
+
+    Previously the auth ladder had no ``ANTHROPIC_AUTH_TOKEN`` rung, so a
+    user following a vendor's "export ANTHROPIC_BASE_URL +
+    ANTHROPIC_AUTH_TOKEN" instructions fell through to
+    ``~/.claude/.credentials.json`` — and the Anthropic SDK, which reads
+    ANTHROPIC_BASE_URL from env on its own, POSTed that subscription token
+    to the vendor.
+    """
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", THIRD_PARTY_BASE_URL)
+    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "zai-endpoint-token")
+    _write_credentials_file(tmp_path, monkeypatch, SUBSCRIPTION_TOKEN)
+
+    captured = _patch_anthropic_sdk(monkeypatch, models=[])
+
+    await ClaudeCodeRuntime().list_models()
+
+    # Deferred to the SDK, which picks up ANTHROPIC_AUTH_TOKEN itself.
+    assert captured == {}
+    assert SUBSCRIPTION_TOKEN not in repr(captured)
+
+
+@pytest.mark.asyncio
+async def test_claude_list_models_withholds_oauth_env_from_third_party(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``CLAUDE_CODE_OAUTH_TOKEN`` is equally Anthropic-scoped.
+
+    It is minted by ``claude setup-token`` against the user's Anthropic
+    account, so an ambient export (a shell profile, a CI secret) must not
+    ride along to a third-party base URL either.
+    """
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", SUBSCRIPTION_TOKEN)
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", THIRD_PARTY_BASE_URL)
+    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "zai-endpoint-token")
+    monkeypatch.setenv("CLAUDE_CREDENTIALS_PATH", "/nonexistent/path")
+
+    captured = _patch_anthropic_sdk(monkeypatch, models=[])
+
+    await ClaudeCodeRuntime().list_models()
+
+    assert captured == {}
+    assert SUBSCRIPTION_TOKEN not in repr(captured)
+
+
+@pytest.mark.asyncio
+async def test_claude_list_models_third_party_without_endpoint_credential_raises(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Any,
+) -> None:
+    """Third-party base URL + only Anthropic creds → refuse, don't fall back."""
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", THIRD_PARTY_BASE_URL)
+    _write_credentials_file(tmp_path, monkeypatch, SUBSCRIPTION_TOKEN)
+
+    with pytest.raises(RuntimeAuthError) as excinfo:
+        await ClaudeCodeRuntime().list_models()
+
+    msg = str(excinfo.value)
+    assert "ANTHROPIC_AUTH_TOKEN" in msg
+    assert THIRD_PARTY_BASE_URL in msg
+    # The error must not echo the withheld secret.
+    assert SUBSCRIPTION_TOKEN not in msg
+
+
+@pytest.mark.asyncio
+async def test_claude_list_models_accepts_anthropic_auth_token_env(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Any,
+) -> None:
+    """``ANTHROPIC_AUTH_TOKEN`` is a first-class rung, ahead of the creds file.
+
+    Even on Anthropic's own endpoint, an explicitly exported
+    ANTHROPIC_AUTH_TOKEN should win over the ambient on-disk token.
+    """
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "explicitly-exported")
+    _write_credentials_file(tmp_path, monkeypatch, SUBSCRIPTION_TOKEN)
+
+    captured = _patch_anthropic_sdk(monkeypatch, models=[])
+
+    await ClaudeCodeRuntime().list_models()
+
+    assert captured == {}
+    assert SUBSCRIPTION_TOKEN not in repr(captured)
+
+
+@pytest.mark.asyncio
+async def test_claude_list_models_explicit_api_key_still_wins_on_third_party(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An explicit ``api_key=`` is caller intent — not scoped to Anthropic.
+
+    Compatible vendors reuse the API-key slot for their own credentials,
+    so the constructor argument must keep working against a third-party
+    base URL.
+    """
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", THIRD_PARTY_BASE_URL)
+    monkeypatch.setenv("CLAUDE_CREDENTIALS_PATH", "/nonexistent/path")
+
+    captured = _patch_anthropic_sdk(monkeypatch, models=[])
+
+    await ClaudeCodeRuntime(api_key="vendor-key").list_models()
+
+    assert captured == {"api_key": "vendor-key"}
+
+
+@pytest.mark.asyncio
+async def test_claude_count_tokens_shares_the_same_credential_scoping(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Any,
+) -> None:
+    """``count_tokens`` hits the same endpoint, so it inherits the same rule."""
+    import anthropic
+
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", THIRD_PARTY_BASE_URL)
+    _write_credentials_file(tmp_path, monkeypatch, SUBSCRIPTION_TOKEN)
+
+    def _explode(**kwargs: Any) -> Any:  # pragma: no cover - must not be reached
+        raise AssertionError(f"AsyncAnthropic constructed with {kwargs!r}")
+
+    monkeypatch.setattr(anthropic, "AsyncAnthropic", _explode)
+
+    with pytest.raises(RuntimeAuthError) as excinfo:
+        await ClaudeCodeRuntime().count_tokens("hello")
+
+    assert "count_tokens" in str(excinfo.value)
+    assert SUBSCRIPTION_TOKEN not in str(excinfo.value)
 
 
 # ---------------------------------------------------------------------------

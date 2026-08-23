@@ -14,8 +14,18 @@ maintain any client code.
 2. ``~/.claude/.credentials.json`` — the interactive Claude Code
    OAuth flow's stored token. What you get when you've logged in
    via the ``claude`` CLI on this machine.
-3. ``ANTHROPIC_API_KEY`` env var — pay-per-token API access. Useful
-   for production deployments without a Max subscription.
+3. ``ANTHROPIC_API_KEY`` / ``ANTHROPIC_AUTH_TOKEN`` env var —
+   pay-per-token API access. Useful for production deployments
+   without a Max subscription.
+
+Setting ``ANTHROPIC_BASE_URL`` aims the adapter at an
+Anthropic-compatible third-party endpoint. In that mode options 1
+and 2 are skipped: they are Anthropic subscription credentials and
+airframe will not forward them off-site. Supply the endpoint's own
+credential via ``ANTHROPIC_AUTH_TOKEN``. Note this scoping applies
+to airframe's own direct calls (:meth:`list_models`,
+:meth:`count_tokens`); the ``claude`` CLI subprocess does its own
+auth resolution from the inherited environment.
 
 **Structured output.** Uses the SDK's native
 :attr:`ClaudeAgentOptions.output_format` —
@@ -57,6 +67,7 @@ import os
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, ClassVar, TypeVar
+from urllib.parse import urlparse
 
 from pydantic import BaseModel
 
@@ -148,6 +159,41 @@ class _ModelMeta:
 #: per the documented auth chain — overridden by ``CLAUDE_CODE_OAUTH_TOKEN``
 #: env var on machines where the file isn't reachable.
 DEFAULT_CLAUDE_CREDENTIALS_PATH = "~/.claude/.credentials.json"
+
+
+#: Hosts that count as "Anthropic's own API" when scoping credentials.
+#: Subscription OAuth tokens are only ever sent to these.
+_ANTHROPIC_API_HOSTS = frozenset({"api.anthropic.com"})
+
+
+def _is_anthropic_endpoint(base_url: str | None) -> bool:
+    """``True`` when ``base_url`` is unset or points at Anthropic's own API.
+
+    ``ANTHROPIC_BASE_URL`` is the documented way to aim the Claude
+    Agent SDK — and therefore this adapter — at an Anthropic-compatible
+    third-party endpoint (a vendor gateway, a corporate proxy, a local
+    mock). When it points off-site, airframe must withhold
+    Anthropic-minted subscription credentials: those bearer tokens
+    authenticate *the user's Anthropic account* and are meaningless to
+    any other vendor except as a stolen secret.
+
+    A ``base_url`` that fails to parse into a hostname is treated as
+    third-party — the conservative direction, since the cost of a false
+    negative is a withheld token and the cost of a false positive is a
+    leaked one.
+
+    Args:
+        base_url: Raw ``ANTHROPIC_BASE_URL`` value, or ``None`` when unset.
+
+    Returns:
+        ``True`` when subscription OAuth tokens may safely be sent.
+    """
+    if not base_url or not base_url.strip():
+        return True
+    host = (urlparse(base_url).hostname or "").lower()
+    if not host:
+        return False
+    return host in _ANTHROPIC_API_HOSTS or host.endswith(".anthropic.com")
 
 
 def _read_claude_credentials_oauth_token() -> str | None:
@@ -613,6 +659,76 @@ class ClaudeCodeRuntime(AgentRuntime):
             slash_commands=slash_commands,
         )
 
+    def _resolve_anthropic_auth(self, *, caller: str) -> dict[str, Any]:
+        """Pick auth kwargs for a direct :class:`AsyncAnthropic` call.
+
+        Shared by :meth:`list_models` and :meth:`count_tokens` — the two
+        places this adapter talks to an Anthropic-shaped HTTP endpoint
+        itself instead of going through the ``claude`` CLI subprocess.
+
+        Resolution order:
+
+        1. Explicit ``api_key=`` constructor arg → ``api_key=``.
+        2. ``CLAUDE_CODE_OAUTH_TOKEN`` env → ``auth_token=``.
+        3. ``ANTHROPIC_API_KEY`` / ``ANTHROPIC_AUTH_TOKEN`` env → no
+           kwargs at all; the SDK reads either one itself.
+        4. ``~/.claude/.credentials.json`` → ``auth_token=``.
+
+        Rungs 2 and 4 are **Anthropic-only**. Both carry subscription
+        OAuth tokens minted for the user's own Anthropic account, so
+        they are skipped when ``ANTHROPIC_BASE_URL`` aims at a
+        third-party endpoint — otherwise pointing the adapter at an
+        Anthropic-compatible vendor would silently forward the user's
+        subscription credential to that vendor. Rungs 1 and 3 are
+        deliberately *not* scoped: an explicit constructor argument and
+        the API-key-shaped env vars are exactly what compatible vendors
+        reuse to carry their own credentials.
+
+        Args:
+            caller: Public method name, used in the error message.
+
+        Returns:
+            Kwargs to splat into :class:`AsyncAnthropic`. Empty when the
+            SDK should resolve auth from the environment on its own.
+
+        Raises:
+            RuntimeAuthError: No credential resolved through any rung.
+        """
+        if self._api_key_override:
+            return {"api_key": self._api_key_override}
+
+        base_url = os.environ.get("ANTHROPIC_BASE_URL")
+        first_party = _is_anthropic_endpoint(base_url)
+
+        if first_party and (oauth := os.environ.get("CLAUDE_CODE_OAUTH_TOKEN")):
+            return {"auth_token": oauth}
+        if os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN"):
+            # Let the SDK pick whichever is set — it reads both from env.
+            return {}
+        if first_party:
+            # Last-resort: the interactive Claude Code credentials file.
+            # The SDK doesn't know about this path, so airframe extracts
+            # the token and passes it as auth_token=.
+            oauth_from_file = _read_claude_credentials_oauth_token()
+            if oauth_from_file:
+                return {"auth_token": oauth_from_file}
+            raise RuntimeAuthError(
+                f"ClaudeCodeRuntime.{caller}(): no credentials found. "
+                "Set CLAUDE_CODE_OAUTH_TOKEN (Claude Max subscription), "
+                "ANTHROPIC_API_KEY (pay-per-token API), or run "
+                "`claude setup-token` to populate ~/.claude/.credentials.json."
+            )
+        raise RuntimeAuthError(
+            f"ClaudeCodeRuntime.{caller}(): ANTHROPIC_BASE_URL is set to "
+            f"{base_url!r}, which is not Anthropic's API, and no credential "
+            "for that endpoint was found. Anthropic subscription tokens "
+            "(CLAUDE_CODE_OAUTH_TOKEN, ~/.claude/.credentials.json) are "
+            "deliberately withheld from third-party endpoints — they "
+            "authenticate your Anthropic account and must not be sent "
+            "elsewhere. Set ANTHROPIC_AUTH_TOKEN (or ANTHROPIC_API_KEY) to "
+            "this endpoint's own credential."
+        )
+
     async def count_tokens(
         self,
         prompt: Prompt,
@@ -624,9 +740,7 @@ class ClaudeCodeRuntime(AgentRuntime):
 
         Delegates to the official ``anthropic`` Python SDK rather than
         rolling an HTTP call ourselves — same pattern :meth:`list_models`
-        uses. Auth resolution mirrors :meth:`list_models`: explicit
-        ``api_key`` arg → ``CLAUDE_CODE_OAUTH_TOKEN`` env →
-        ``ANTHROPIC_API_KEY`` env → ``~/.claude/.credentials.json``.
+        uses, and the same shared :meth:`_resolve_anthropic_auth` ladder.
 
         v1 supports plain-text and string-only multi-part prompts.
         Image / file attachments would require base64-encoding into
@@ -661,26 +775,7 @@ class ClaudeCodeRuntime(AgentRuntime):
 
         model_id = self._resolve_model(model) if model is not None else self._default_model
 
-        # Same auth-resolution dance as list_models(). Kept inline rather
-        # than factored out because the runtime currently has only these
-        # two consumers and the duplication is readable.
-        kwargs: dict[str, Any] = {}
-        if self._api_key_override:
-            kwargs["api_key"] = self._api_key_override
-        elif oauth := os.environ.get("CLAUDE_CODE_OAUTH_TOKEN"):
-            kwargs["auth_token"] = oauth
-        elif os.environ.get("ANTHROPIC_API_KEY"):
-            pass
-        else:
-            oauth_from_file = _read_claude_credentials_oauth_token()
-            if oauth_from_file:
-                kwargs["auth_token"] = oauth_from_file
-            else:
-                raise RuntimeAuthError(
-                    "ClaudeCodeRuntime.count_tokens(): no credentials found. "
-                    "Set CLAUDE_CODE_OAUTH_TOKEN, ANTHROPIC_API_KEY, or run "
-                    "`claude setup-token`."
-                )
+        kwargs = self._resolve_anthropic_auth(caller="count_tokens")
 
         messages = [{"role": "user", "content": text}]
         count_kwargs: dict[str, Any] = {"model": model_id, "messages": messages}
@@ -724,16 +819,9 @@ class ClaudeCodeRuntime(AgentRuntime):
           versions of this adapter hand-rolled the request and missed
           the header, so subscription users saw 401s.
 
-        Auth resolution (delegated to the SDK once we pick a slot):
-
-        1. Explicit ``api_key=`` constructor arg → ``api_key=`` on
-           :class:`AsyncAnthropic`.
-        2. ``CLAUDE_CODE_OAUTH_TOKEN`` env var → ``auth_token=`` on
-           :class:`AsyncAnthropic`.
-        3. ``ANTHROPIC_API_KEY`` env var → ``api_key=`` (SDK reads
-           this from env on its own when we pass nothing).
-        4. ``~/.claude/.credentials.json`` (the interactive Claude
-           Code OAuth flow's stored token) → ``auth_token=``.
+        Auth resolution lives in :meth:`_resolve_anthropic_auth`, which
+        also scopes subscription OAuth tokens to Anthropic's own API —
+        see that method for the full ladder.
 
         Raises:
             RuntimeAuthError: no credential resolved through any layer.
@@ -753,37 +841,7 @@ class ClaudeCodeRuntime(AgentRuntime):
         )
         from anthropic import AsyncAnthropic
 
-        # Pick the auth slot before constructing the client. The
-        # SDK's own env auto-discovery handles ANTHROPIC_API_KEY /
-        # ANTHROPIC_AUTH_TOKEN when we pass nothing; we step in for
-        # the explicit-kwarg case and the Claude-Code-specific
-        # CLAUDE_CODE_OAUTH_TOKEN env / credentials.json paths the
-        # SDK doesn't know about. Annotated as ``dict[str, Any]``
-        # because AsyncAnthropic's typed kwargs widen beyond ``str``
-        # (httpx.Client, NotGiven, etc.) and the ``**unpack`` would
-        # otherwise trip mypy on the union.
-        kwargs: dict[str, Any] = {}
-        if self._api_key_override:
-            kwargs["api_key"] = self._api_key_override
-        elif oauth := os.environ.get("CLAUDE_CODE_OAUTH_TOKEN"):
-            kwargs["auth_token"] = oauth
-        elif os.environ.get("ANTHROPIC_API_KEY"):
-            # Let the SDK pick this up itself — no kwargs needed.
-            pass
-        else:
-            # Last-resort: read the interactive Claude Code credentials
-            # file. The SDK doesn't know about this path, so airframe
-            # extracts the token and passes it as auth_token=.
-            oauth_from_file = _read_claude_credentials_oauth_token()
-            if oauth_from_file:
-                kwargs["auth_token"] = oauth_from_file
-            else:
-                raise RuntimeAuthError(
-                    "ClaudeCodeRuntime.list_models(): no credentials found. "
-                    "Set CLAUDE_CODE_OAUTH_TOKEN (Claude Max subscription), "
-                    "ANTHROPIC_API_KEY (pay-per-token API), or run "
-                    "`claude setup-token` to populate ~/.claude/.credentials.json."
-                )
+        kwargs = self._resolve_anthropic_auth(caller="list_models")
 
         try:
             async with AsyncAnthropic(**kwargs) as client:
