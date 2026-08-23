@@ -91,6 +91,9 @@ _PROVIDER_AUTH: dict[str, list[str]] = {
     "opencode-zen": ["OPENCODE_API_KEY"],
     "opencode-go": ["OPENCODE_API_KEY"],
     "openrouter": ["OPENROUTER_API_KEY"],
+    # Z.AI carries its own credential — deliberately NOT any Anthropic
+    # variable, even though it shares the claude-agent-sdk harness.
+    "zai-anthropic": ["ZAI_API_KEY"],
     # Bedrock resolves via the boto3 four-step chain: explicit args →
     # env keys → AWS_PROFILE → IAM-instance / IRSA. The env-var probe
     # here looks for the access key or the profile name; a live call
