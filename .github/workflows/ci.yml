@@ -26,6 +26,79 @@ jobs:
       - name: Mypy
         run: uv run mypy src/airframe
 
+  build:
+    name: Build installable wheel
+    runs-on: ubuntu-latest
+    # Deliberately not `needs: test`. The point of this job is to hand you
+    # something to install from a branch, and a branch you are still
+    # debugging is exactly when you want it. The run's own status already
+    # tells you whether the tests passed.
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v8.2.0
+        with:
+          enable-cache: true
+
+      # On `pull_request`, github.sha is the ephemeral merge commit, which
+      # nobody can find in their branch history. Use the head commit so the
+      # artifact name matches what you actually pushed.
+      - name: Resolve head SHA
+        id: sha
+        run: |
+          FULL="${{ github.event.pull_request.head.sha || github.sha }}"
+          echo "full=${FULL}" >> "$GITHUB_OUTPUT"
+          echo "short=${FULL:0:7}" >> "$GITHUB_OUTPUT"
+
+      # --no-sources matches the release workflow: build as every other
+      # tool would, with `tool.uv.sources` disabled.
+      - name: Build sdist and wheel
+        run: uv build --no-sources
+
+      # Running these on every PR is the real win beyond distributing the
+      # wheel: packaging regressions currently surface only at release
+      # time, when the tag is already cut.
+      - name: Verify artifact metadata and contents
+        run: |
+          uvx twine check dist/*
+          uvx check-wheel-contents dist/*.whl
+
+      - name: Upload dist
+        uses: actions/upload-artifact@v7
+        with:
+          name: dist-${{ steps.sha.outputs.short }}
+          path: dist/
+          if-no-files-found: error
+          # Dev builds go stale fast; 14 days beats the 90-day default.
+          retention-days: 14
+
+      - name: Write install instructions to the run summary
+        run: |
+          WHEEL=$(basename dist/*.whl)
+          cat >> "$GITHUB_STEP_SUMMARY" <<SUMMARY
+          ## Installable build \`${{ steps.sha.outputs.short }}\`
+
+          Built from \`${{ github.event.pull_request.head.ref || github.ref_name }}\`
+          at \`${{ steps.sha.outputs.full }}\`. No release, no tag — expires in 14 days.
+
+          \`\`\`bash
+          gh run download --repo ${{ github.repository }} ${{ github.run_id }} \\
+            --name dist-${{ steps.sha.outputs.short }} --dir /tmp/airframe-build
+
+          # Install by path so no published version can win the resolution.
+          uv pip install /tmp/airframe-build/${WHEEL}
+
+          # …or with an extra; its dependencies still resolve from PyPI:
+          uv pip install "/tmp/airframe-build/${WHEEL}[claude]"
+          \`\`\`
+
+          To pull it into another project's environment, run the same
+          \`gh run download\`, then point that project at the file:
+
+          \`\`\`bash
+          uv add "airframe-agents @ /tmp/airframe-build/${WHEEL}"
+          \`\`\`
+          SUMMARY
+
   test:
     name: Test (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
