@@ -566,7 +566,7 @@ tests/test_bedrock.py                   # new — identity, validate_binding, au
 tests/test_discovery.py                 # +bedrock in expected sets
 ```
 
-That should pass `make ci` cleanly with `Feature` flags all False
+That should pass `mise run check` cleanly with `Feature` flags all False
 (no behaviour wired yet). After review, Iteration B adds
 `execute()` + `stream()` + `cancel()` and flips the first three
 `Feature` flags True.

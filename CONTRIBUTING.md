@@ -9,14 +9,15 @@ that the rules can fit in one file.
 git clone https://github.com/get2knowio/airframe
 cd airframe
 uv sync --all-extras --group dev
-make ci
+mise run check
 ```
 
 ## Code style
 
 - Python 3.12+; type hints on every public function.
-- `make format-fix` before pushing.
-- `make ci` is the pre-push gate (lint + format + typecheck + test).
+- `mise run fmt` before pushing.
+- `mise run check` is the pre-push gate, and it is exactly what CI runs
+  (format + lint + types + tests with the coverage floor).
 - Docstrings: Google style (Args / Returns / Raises).
 - Stay terse. Most modules in `src/airframe/` are under 500 LOC;
   keep them that way.
@@ -30,7 +31,7 @@ A new adapter PR should include:
    that needs it so `import airframe` doesn't pull the SDK in.
 2. **Optional dependency extra** in `pyproject.toml` so consumers
    can `pip install airframe-agents[<vendor>]`.
-3. **`tests/test_<vendor>.py`** — unit tests with the SDK mocked at
+3. **`tests/unit/test_<vendor>.py`** — unit tests with the SDK mocked at
    the boundary. Cover binding validation, structured-output happy
    path, missing structured output, full error classification matrix,
    timeout, lifecycle (`reset` / `close`), and cost.
@@ -58,7 +59,7 @@ Include:
 - Branch off `main`.
 - One logical change per PR. Adapter-add PRs and protocol-change PRs
   should be separate.
-- Run `make ci` before opening the PR.
+- Run `mise run check` before opening the PR.
 - Sign-off the commit (`git commit -s`) is appreciated but not
   required.
 

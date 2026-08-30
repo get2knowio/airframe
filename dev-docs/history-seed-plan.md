@@ -452,5 +452,5 @@ tests/test_bedrock_session.py                     # +seed behaviour
 tests/test_bedrock_conformance.py                 # +import contract
 ```
 
-That should pass `make ci` cleanly. Iteration B adds the SDK
+That should pass `mise run check` cleanly. Iteration B adds the SDK
 adapters; Iteration C adds OpenCode-Server decline + docs.

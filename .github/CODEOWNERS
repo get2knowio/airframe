@@ -1,0 +1,14 @@
+# Default owner for everything in the repo.
+*                               @pofallon
+
+# The protocol and the shared conformance contracts are the surface
+# every third-party adapter builds against — changes here ripple
+# outside this repository.
+/src/airframe/protocol.py       @pofallon
+/src/airframe/testing/          @pofallon
+
+# Governance, gates, and anything that can publish.
+/.specify/                      @pofallon
+/.github/workflows/             @pofallon
+/mise.toml                      @pofallon
+/pyproject.toml                 @pofallon

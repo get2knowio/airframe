@@ -1,22 +1,31 @@
-"""Conformance contract suite for :class:`BedrockRuntime`.
+"""Conformance contract suite for :class:`ClaudeCodeRuntime`.
 
-Imports the structural contracts from :mod:`airframe.testing.contracts`
-and exercises them against a no-credentials ``BedrockRuntime`` fixture.
-These contracts never make a live AWS call — behavioural integration
-lives in ``tests/test_bedrock_integration.py``.
+Imports every test function from :mod:`airframe.testing.contracts`
+and runs them against a locally-constructed adapter. Pytest collects
+the imported test functions into this module via the standard
+"import + pytest discovers names starting with ``test_``" mechanism
+— same pattern SQLAlchemy uses in ``sqlalchemy.testing.suite``.
+
+This is the in-tree mirror of what a third-party adapter author
+would write. Treat the structure as the canonical example.
 """
 
 from __future__ import annotations
 
 import pytest
 
-from airframe.adapters.bedrock import BedrockRuntime
+from airframe.adapters.claude_code import ClaudeCodeRuntime
+
+# Importing the test functions makes pytest collect them here, scoped
+# to the ``adapter_runtime`` fixture defined below.
 from airframe.testing.contracts import (  # noqa: F401
     test_close_is_idempotent,
     test_close_on_fresh_runtime,
     test_count_tokens_agrees_with_supports_flag,
     test_emittable_hook_kinds_subset_of_eight_literals,
     test_plain_text_execute_path_is_wired,
+    test_reset_is_idempotent,
+    test_reset_then_close_is_safe,
     test_runtime_result_has_rate_limit_field,
     test_runtime_result_has_reasoning_field,
     test_runtime_transient_error_carries_rate_limit_attr,
@@ -54,8 +63,12 @@ from airframe.testing.contracts import (  # noqa: F401
 
 
 @pytest.fixture
-def adapter_runtime() -> BedrockRuntime:
-    # Region pinned so structural tests don't have to think about
-    # AWS_REGION resolution; no credentials needed — the contracts
-    # don't make live calls.
-    return BedrockRuntime(region_name="us-east-1")
+def adapter_runtime() -> ClaudeCodeRuntime:
+    """A ClaudeCodeRuntime instance — no auth required to construct.
+
+    The runtime defers all SDK import / auth resolution to the first
+    ``execute()`` call. The Phase 0 conformance contracts are
+    structural and don't trigger that path, so a default-constructed
+    runtime is sufficient.
+    """
+    return ClaudeCodeRuntime()

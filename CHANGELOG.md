@@ -6,6 +6,82 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Spec Kit constitution** at `.specify/memory/constitution.md`, with a
+  Sync Impact Report header and semver governance. Eight principles,
+  each naming the command that fails when it is violated — or stating
+  outright that review is the enforcement, rather than being given a
+  decorative CI row. `tests/unit/test_constitution.py` is that
+  enforcement: it pins the `AgentRuntime` surface, proves
+  `import airframe` pulls in no vendor SDK (in a clean subprocess),
+  checks every adapter's discovery ClassVars and that reserved provider
+  IDs stay free, requires a conformance suite per adapter, and asserts
+  CI invokes only the `check` verb.
+- **`mise` as task runner and toolchain pin** (`mise.toml`), replacing
+  the `Makefile`. Implements the portfolio verb contract — `setup`,
+  `build`, `test`, `lint`, `fmt`, `check`, `release` — so CI, the
+  devcontainer and `CLAUDE.md` all name the same surface. Two hidden
+  `_selftest-*` tasks let the constitution suite measure that a failure
+  inside a nested task really propagates out of `check`.
+- **CodeQL, dependency review, and a conventional-commit PR-title
+  check** as new workflows. The repo squash-merges, so the PR title is
+  the commit message on `main`.
+- **`AGENTS.md`** as a five-line pointer at `CLAUDE.md`, and a
+  `CODEOWNERS` covering the protocol, the shared contracts, governance
+  and anything that can publish.
+- **Conformance suites for `OpenCodeGoRuntime` and `OpenRouterRuntime`**,
+  which previously had unit tests but no shared-contract run.
+- **`test_reset_is_idempotent` / `test_reset_then_close_is_safe`** in
+  `airframe.testing.contracts`. `close()` idempotency was already a
+  contract; `reset()` idempotency was an invariant nothing checked.
+  Third-party adapters inherit both.
+- **Python 3.14** in the CI matrix and the classifier list.
+  `requires-python` claimed it; nothing tested it.
+
+### Changed
+
+- **Version is derived from git tags via `hatch-vcs`** instead of a
+  hand-bumped literal. Off-tag builds are stamped
+  `X.Y.Z.devN+g<sha>`, which PyPI rejects outright, so publishing an
+  untagged build becomes impossible rather than merely discouraged.
+  Every checkout in CI now uses `fetch-depth: 0` — a shallow branch
+  clone silently resolves the wrong base version instead of failing.
+  The release ritual changes: tag real releases only, and stop hand-
+  editing the version.
+- **CI runs one step, `mise run check`**, on 3.12 / 3.13 / 3.14. The
+  inline `ruff` / `mypy` / `pytest` list is gone; it agreed with the
+  Makefile but nothing kept it agreeing.
+- **Tests split into `tests/unit/` and `tests/integration/`** with a
+  root `conftest.py` that applies the `integration` marker by
+  directory, so a new integration module cannot forget it and quietly
+  join the default run.
+- **Every GitHub Action is pinned to a full commit SHA**, with the
+  version in a trailing comment, and every workflow declares top-level
+  least-privilege `permissions:` and a `concurrency:` group with
+  `cancel-in-progress: true`.
+- **Ruff: line length 99 → 100**, `ASYNC` added to the rule selection
+  (`ASYNC109` ignored — `timeout` is the protocol's own signature), and
+  `required-imports` now makes `from __future__ import annotations` a
+  lint rule rather than a habit.
+- **Mypy tightened toward `strict = true`.** Everything the tree
+  already satisfied is on globally, so a new module is strict from
+  birth; the remainder is held per-module in `[[tool.mypy.overrides]]`
+  with a count attached, to be cleared a module at a time.
+- **Coverage floor gated at 87%**, the measured number, so it can only
+  ratchet up.
+- **Devcontainer** gains the `github-actions-tools` and `mise`
+  features, a committed `devcontainer-lock.json`, and
+  `MISE_TRUSTED_CONFIG_PATHS` so an agent's first command in a fresh
+  container does not hang on a trust prompt. `postCreateCommand` now
+  runs `mise run setup`.
+- **Dependabot** additionally tracks devcontainer features.
+
+### Removed
+
+- **`Makefile`.** Superseded by `mise.toml`; `make ci` becomes
+  `mise run check`.
+
 ## [0.9.2] — 2026-08-07
 
 ### Fixed

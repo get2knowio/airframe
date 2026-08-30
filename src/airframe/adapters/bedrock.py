@@ -639,9 +639,7 @@ class BedrockRuntime(AgentRuntime):
             expected_type=BedrockOptions,
             adapter_label=self.label,
         )
-        bedrock_options = (
-            provider_options if isinstance(provider_options, BedrockOptions) else None
-        )
+        bedrock_options = provider_options if isinstance(provider_options, BedrockOptions) else None
         model_id = self._resolve_model(model) if model is not None else self._default_model
         return BedrockSession(
             self,

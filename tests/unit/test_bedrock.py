@@ -166,9 +166,7 @@ def test_supports_accepts_model_kwarg() -> None:
 
 def test_validate_binding_accepts_bedrock_with_non_empty_model_id() -> None:
     rt = BedrockRuntime()
-    assert rt.validate_binding(
-        ProviderModel("bedrock", "anthropic.claude-3-5-haiku-20241022-v1:0")
-    )
+    assert rt.validate_binding(ProviderModel("bedrock", "anthropic.claude-3-5-haiku-20241022-v1:0"))
 
 
 def test_validate_binding_accepts_inference_profile_ids() -> None:

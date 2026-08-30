@@ -6,41 +6,46 @@ on:
   pull_request:
     branches: [main]
 
-jobs:
-  lint:
-    name: Lint + typecheck
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v8.2.0
-        with:
-          enable-cache: true
-      - name: Set up Python
-        run: uv python install 3.12
-      - name: Install
-        run: uv sync --all-extras --group dev
-      - name: Ruff check
-        run: uv run ruff check src tests examples
-      - name: Ruff format check
-        run: uv run ruff format --check src tests examples
-      - name: Mypy
-        run: uv run mypy src/airframe
+# Least privilege: CI reads the tree and nothing else.
+permissions:
+  contents: read
 
-  test:
-    name: Test (Python ${{ matrix.python-version }})
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    # The gate is `mise run check` — the same verb a contributor runs
+    # locally. CI must never spell the steps out inline; two lists that
+    # agree today are two lists that drift tomorrow.
+    name: Check (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.12", "3.13"]
+        # The floor and the ceiling of `requires-python`. Both are
+        # tested; neither is claimed without being exercised.
+        python-version: ["3.12", "3.13", "3.14"]
+    env:
+      # Overrides `[tools] python` in mise.toml for this job only.
+      MISE_PYTHON_VERSION: ${{ matrix.python-version }}
+      MISE_TRUSTED_CONFIG_PATHS: ${{ github.workspace }}
     steps:
-      - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v8.2.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          enable-cache: true
-      - name: Set up Python ${{ matrix.python-version }}
-        run: uv python install ${{ matrix.python-version }}
-      - name: Install
-        run: uv sync --all-extras --group dev
-      - name: Run tests
-        run: uv run pytest
+          # hatch-vcs resolves the version from tag history; a shallow
+          # branch clone silently produces a plausible but wrong base
+          # version instead of failing.
+          fetch-depth: 0
+
+      - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
+
+      - name: Setup
+        # `--all-extras`: with `ignore_missing_imports`, an uninstalled
+        # extra degrades those modules to `Any` and mypy passes while
+        # checking nothing.
+        run: mise run setup
+
+      - name: Check
+        run: mise run check

@@ -774,7 +774,7 @@ tests/test_discovery.py                     # +opencode in expected sets
 CLAUDE.md                                   # +opencode in reserved-IDs paragraph
 ```
 
-That should pass `make ci` cleanly with `Feature` flags all False
+That should pass `mise run check` cleanly with `Feature` flags all False
 (no behaviour wired yet). After review, Iteration B adds `execute()`
 + `stream()` + `cancel()` + `session(resume=...)` and flips the
 first four `Feature` flags True.

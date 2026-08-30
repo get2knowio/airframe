@@ -1,0 +1,111 @@
+# Toolchain pinning + the portfolio verb contract.
+#
+# Division of labour (per the build-surface standard): mise owns
+# anything that must exist before `uv` runs; `uv` owns everything
+# after. Dev tools (ruff, mypy, pytest) live in `[dependency-groups]`
+# in pyproject.toml and are pinned by uv.lock — never here, because
+# splitting tool versions across two lockfiles is the failure mode
+# this split exists to avoid.
+
+[tools]
+uv = "latest"
+python = "3.12"
+
+[settings]
+# Opt-in, otherwise mise silently ignores .python-version and local
+# drifts from CI.
+idiomatic_version_file_enable_tools = ["python"]
+
+[env]
+_.python.venv = { path = ".venv", create = true }
+
+# ---------------------------------------------------------------------
+# The verb contract: setup, build, test, lint, fmt, check, release.
+# CI invokes exactly this surface — never a parallel list of steps.
+# `check` returns a non-zero exit code; nothing here swallows failures.
+# ---------------------------------------------------------------------
+
+[tasks.setup]
+description = "Install all deps (every extra + dev group)"
+run = "uv sync --all-extras --group dev"
+
+[tasks.build]
+description = "Build the sdist + wheel"
+run = "uv build"
+
+[tasks.test]
+description = "Run the full test suite"
+run = "uv run pytest"
+
+[tasks.test-fast]
+description = "Run tests excluding the `integration` marker"
+run = "uv run pytest -m 'not integration'"
+
+[tasks.test-cov]
+description = "Run tests with coverage, enforcing the floor in pyproject"
+run = "uv run pytest --cov=airframe --cov-report=term-missing"
+
+[tasks.lint]
+description = "ruff check + mypy over src, tests and examples"
+run = [
+  "uv run ruff check src tests examples",
+  "uv run mypy src/airframe",
+]
+
+[tasks.fmt]
+description = "Apply ruff formatting and safe fixes"
+run = [
+  "uv run ruff format src tests examples",
+  "uv run ruff check --fix src tests examples",
+]
+
+[tasks.fmt-check]
+description = "Verify formatting without editing"
+run = "uv run ruff format --check src tests examples"
+
+[tasks.check]
+description = "The gate: format + lint + types + tests with coverage floor"
+# Serialised deliberately: mise runs `depends` in parallel by default,
+# and a lint failure should be readable rather than interleaved.
+run = [
+  "mise run fmt-check",
+  "mise run lint",
+  "mise run test-cov",
+]
+
+[tasks.release]
+description = "Tag a release; the tag is the version (hatch-vcs derives it)"
+run = '''
+set -euo pipefail
+if [ -z "${TAG:-}" ]; then
+  echo "usage: TAG=v1.2.3 mise run release" >&2
+  exit 2
+fi
+git tag -a "$TAG" -m "release: ${TAG#v}"
+git push origin "$TAG"
+'''
+
+[tasks.clean]
+description = "Remove build artifacts and caches"
+run = '''
+rm -rf build dist ./*.egg-info .pytest_cache .mypy_cache .ruff_cache htmlcov .coverage
+find . -type d -name __pycache__ -not -path "./.venv/*" -exec rm -rf {} + 2>/dev/null || true
+'''
+
+# ---------------------------------------------------------------------
+# Gate self-test. `check` is a list of nested `mise run` calls, so the
+# thing worth proving is that a failure inside a nested task propagates
+# out. These two hidden tasks exist only so
+# tests/unit/test_constitution.py can measure that rather than assume
+# it. They are never run by hand.
+# ---------------------------------------------------------------------
+
+[tasks."_selftest-fail"]
+description = "Always exits 1 — fixture for the gate self-test"
+hide = true
+run = "exit 1"
+
+[tasks."_selftest-nested"]
+description = "Calls a failing task the way `check` calls its steps"
+hide = true
+run = "mise run _selftest-fail"

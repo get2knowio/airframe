@@ -1,16 +1,23 @@
-"""Conformance contract suite for :class:`CopilotRuntime`."""
+"""Conformance contract suite for :class:`OpenCodeGoRuntime`.
+
+``opencode-go`` is a separate provider from ``opencode-zen`` — flat-fee
+subscription gateway rather than per-token — so it earns its own
+conformance run rather than inheriting Zen's by association.
+"""
 
 from __future__ import annotations
 
 import pytest
 
-from airframe.adapters.copilot import CopilotRuntime
+from airframe.adapters.opencode_go import OpenCodeGoRuntime
 from airframe.testing.contracts import (  # noqa: F401
     test_close_is_idempotent,
     test_close_on_fresh_runtime,
     test_count_tokens_agrees_with_supports_flag,
     test_emittable_hook_kinds_subset_of_eight_literals,
     test_plain_text_execute_path_is_wired,
+    test_reset_is_idempotent,
+    test_reset_then_close_is_safe,
     test_runtime_result_has_rate_limit_field,
     test_runtime_result_has_reasoning_field,
     test_runtime_transient_error_carries_rate_limit_attr,
@@ -48,5 +55,7 @@ from airframe.testing.contracts import (  # noqa: F401
 
 
 @pytest.fixture
-def adapter_runtime() -> CopilotRuntime:
-    return CopilotRuntime()
+def adapter_runtime() -> OpenCodeGoRuntime:
+    # Dummy key satisfies ``OpenAICompatibleRuntime`` construction;
+    # the structural contracts don't make any HTTP calls.
+    return OpenCodeGoRuntime(api_key="dummy-key-for-conformance")

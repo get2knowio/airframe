@@ -542,9 +542,7 @@ class CopilotRuntime(AgentRuntime):
         # Phase 6 — PROMPT_CACHE_CONTROL soft contract: Copilot's SDK
         # has no explicit cache-key channel. Silently drop.
         del cache
-        copilot_options = (
-            provider_options if isinstance(provider_options, CopilotOptions) else None
-        )
+        copilot_options = provider_options if isinstance(provider_options, CopilotOptions) else None
         model_id = self._resolve_model(model) if model is not None else self._default_model
         return CopilotAgentSession(
             self,
@@ -1566,9 +1564,7 @@ def _translate_thinking_for_copilot(thinking: ThinkingMode) -> str | None:
         return None
     if isinstance(thinking, str):
         if thinking == "minimal":
-            logger.debug(
-                "copilot: thinking='minimal' has no Copilot equivalent; coercing to 'low'"
-            )
+            logger.debug("copilot: thinking='minimal' has no Copilot equivalent; coercing to 'low'")
             return "low"
         if thinking in ("low", "medium", "high"):
             return thinking

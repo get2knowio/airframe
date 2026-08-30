@@ -125,8 +125,7 @@ async def main() -> int:
         "--provider",
         default="claude",
         help=(
-            "Provider ID (default: claude — richest emittable-kind set). "
-            "Any from list_providers()."
+            "Provider ID (default: claude — richest emittable-kind set). Any from list_providers()."
         ),
     )
     parser.add_argument(

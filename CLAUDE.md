@@ -14,20 +14,25 @@ aioboto3, OpenAI-compatible HTTP). The PyPI distribution name is
 
 ## Common commands
 
-This project uses `uv` and a `Makefile`.
+`mise` is the task runner and toolchain pin (`mise.toml`); `uv` does
+the actual work. The verbs are the portfolio contract — the same ones
+every repo in `get2knowio` answers to, and the same ones CI invokes.
+There is no second list of steps anywhere.
 
 ```bash
-make install     # uv sync --all-extras --group dev
-make test        # full pytest suite (quiet)
-make test-fast   # excludes the `integration` pytest marker
-make lint        # ruff check
-make typecheck   # mypy on src/airframe
-make format-fix  # apply ruff formatting
-make ci          # lint + format-check + typecheck + test (pre-push gate)
+mise run setup      # uv sync --all-extras --group dev
+mise run test       # full pytest suite
+mise run test-fast  # excludes the `integration` marker
+mise run lint       # ruff check + mypy
+mise run fmt        # apply ruff formatting and safe fixes
+mise run check      # fmt-check + lint + tests w/ coverage floor — the gate
+mise run build      # uv build
 ```
 
-Run one test: `uv run pytest tests/test_claude_code.py::test_name -q`.
-Set `VERBOSE=1 make test` for non-quiet pytest/ruff output.
+`mise run check` is what CI runs, and it exits non-zero on any failure.
+Run it before pushing.
+
+Run one test: `uv run pytest tests/unit/test_claude_code.py::test_name -q`.
 
 Live probes (require real vendor credentials, kept out of the unit
 suite because pytest collects only `test_*.py`):
@@ -118,11 +123,18 @@ per-model `_METADATA`, and `_resolve_api_key()`. `opencode_zen.py` is
 the canonical example. SDK-based vendors (subprocess / native types)
 inherit `AgentRuntime` directly; see `claude_code.py`.
 
+### Test layout
+
+`tests/unit/` is the default suite; `tests/integration/` talks to real
+vendor endpoints and is marked `integration` automatically by
+`tests/conftest.py`, so a new integration module cannot forget the
+marker and quietly join the default run.
+
 ### Conformance contracts
 
 `src/airframe/testing/contracts.py` holds shared pytest test functions
 every adapter must satisfy. The in-tree tests
-(`tests/test_*_conformance.py`) import them and provide an
+(`tests/unit/test_*_conformance.py`) import them and provide an
 `adapter_runtime` fixture. Third-party adapters do the same via
 `pip install airframe-agents[testing]`. When adding adapter behaviour
 that's contract-worthy, add the test to `contracts.py` so every
@@ -143,11 +155,19 @@ populate them only when the corresponding feature phase lands. Today
 only `Feature.STRUCTURED_OUTPUT_JSON_SCHEMA` returns `True`; other
 enum members exist to lock the names, and return `False`.
 
+## Governance
+
+`.specify/memory/constitution.md` carries the project's non-negotiable
+principles, each with the command that fails when it is violated.
+`tests/unit/test_constitution.py` is that enforcement — a principle
+that isn't a test is a suggestion. Amending the constitution means
+bumping its semver and updating the Sync Impact Report at its top.
+
 ## Style
 
 Python 3.12+, type hints on every public function, Google-style
 docstrings (Args / Returns / Raises). Ruff config in `pyproject.toml`
-sets line length 99 and enables `E W F I N UP B C4 SIM`. Mypy runs
+sets line length 100 and enables `E W F I N UP B C4 SIM ASYNC`. Mypy runs
 non-strict but with `strict_equality`, `warn_redundant_casts`,
 `no_implicit_optional`. Most modules under `src/airframe/` are <500
 LOC by convention.

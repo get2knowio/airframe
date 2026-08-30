@@ -5,33 +5,45 @@ on:
     tags:
       - "v*"
 
+# Least privilege at the top; the two jobs that need more escalate
+# locally.
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  test:
-    name: Test (Python ${{ matrix.python-version }})
+  check:
+    name: Check (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.12", "3.13"]
+        python-version: ["3.12", "3.13", "3.14"]
+    env:
+      MISE_PYTHON_VERSION: ${{ matrix.python-version }}
+      MISE_TRUSTED_CONFIG_PATHS: ${{ github.workspace }}
     steps:
-      - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v8.2.0
-      - name: Set up Python ${{ matrix.python-version }}
-        run: uv python install ${{ matrix.python-version }}
-      - name: Install
-        run: uv sync --all-extras --group dev --python ${{ matrix.python-version }}
-      - name: Run tests
-        run: uv run --python ${{ matrix.python-version }} pytest --tb=short -q
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
+      - name: Setup
+        run: mise run setup
+      - name: Check
+        run: mise run check
 
   release:
     name: Create GitHub Release
-    needs: test
+    needs: check
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
 
@@ -129,7 +141,7 @@ jobs:
           fi
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v3
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           tag_name: ${{ steps.tag.outputs.tag }}
           name: ${{ steps.tag.outputs.tag }}
@@ -139,15 +151,41 @@ jobs:
 
   publish:
     name: Publish to PyPI
-    needs: [test, release]
+    needs: [check, release]
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
+      contents: read
+      # Trusted Publishing — no long-lived PyPI token anywhere.
       id-token: write
     steps:
-      - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v8.2.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # hatch-vcs reads the tag from git to stamp the version. A
+          # shallow clone at a tag happens to work; setting this anyway
+          # so whoever adds a branch build later does not get a
+          # silently wrong version.
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
       - name: Build package
         run: uv build
+      - name: Verify the built version matches the tag
+        # Tautological now that the version is derived from the tag
+        # rather than hand-set — kept as a backstop, not as the
+        # mechanism. Compared as PEP 440 versions so the dashed tag
+        # form (v0.9.0-rc1) and the canonical one (v0.9.0rc1) agree.
+        run: |
+          uv run --with packaging --no-project python - <<'PY'
+          import glob, os, re, sys
+          from packaging.version import Version
+
+          tag = os.environ["GITHUB_REF"].removeprefix("refs/tags/")
+          expected = Version(tag.removeprefix("v"))
+          wheel = os.path.basename(glob.glob("dist/*.whl")[0])
+          built = Version(re.match(r"airframe_agents-(.+?)-py3", wheel).group(1))
+          if built != expected:
+              sys.exit(f"::error::tag {tag} expects {expected} but the wheel is {built}")
+          print(f"ok: {tag} -> {built}")
+          PY
       - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
