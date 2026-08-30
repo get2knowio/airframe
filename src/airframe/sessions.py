@@ -265,9 +265,7 @@ def _resolve_native_tools(
     """
     if not native_tools:
         return []
-    relevant = [
-        t for t in native_tools if t.capability is not None or t.provider_id == provider_id
-    ]
+    relevant = [t for t in native_tools if t.capability is not None or t.provider_id == provider_id]
     if not relevant:
         return []
     if not feature_supported:

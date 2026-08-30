@@ -754,7 +754,7 @@ tests/test_discovery.py                     # +mistral in expected sets
 CLAUDE.md                                   # +mistral; reserve mistral-completions + mistral-vertex
 ```
 
-That should pass `make ci` cleanly with `Feature` flags all False
+That should pass `mise run check` cleanly with `Feature` flags all False
 (no behaviour wired yet). After review, Iteration B adds
 `execute()` (against `agents.complete()`) + `session()` (against
 `beta.conversations.*`) + `stream()` + `cancel()` and flips the

@@ -661,7 +661,7 @@ list — same forcing pattern as today, just sharing the slot.
 
 ### Iteration breakdown
 
-Phase 3 lands in four iterations, each ending with a `make ci`-green
+Phase 3 lands in four iterations, each ending with a `mise run check`-green
 stopping point. Same shape as Phase 2 Iterations A–D. Status: **Phase
 3 complete** on the `phase-3-function-tools` branch — Iterations A
 through D all green.

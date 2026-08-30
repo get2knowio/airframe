@@ -407,9 +407,7 @@ async def main() -> int:
         authed, detail = credential_status(pid)
         if pid not in installed:
             extra = EXTRA_FOR.get(pid, pid)
-            print(
-                f"  SKIP  {pid:<16} adapter not installed (pip install airframe-agents[{extra}])"
-            )
+            print(f"  SKIP  {pid:<16} adapter not installed (pip install airframe-agents[{extra}])")
         elif not authed:
             print(f"  SKIP  {pid:<16} no credentials — {detail}")
         else:

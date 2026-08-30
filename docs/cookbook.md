@@ -5,7 +5,8 @@ exercises one feature end-to-end against a real CLI / HTTP
 endpoint and prints the resulting events / cost / errors so you
 can see exactly what production traffic would look like.
 
-They're not part of `make test` (pytest collects `test_*.py` only).
+They're not part of `mise run test` (pytest collects `test_*.py` under
+`tests/` only).
 Auth issues surface as classified `Runtime*Error` so a
 mis-configured credential reports usefully rather than hanging.
 
@@ -94,7 +95,7 @@ The probes' behavioural assertions also live in
 
 ```bash
 pytest -m integration                                    # all adapters; self-skip on missing creds
-pytest -m integration tests/test_claude_code_integration.py  # one adapter
+pytest -m integration tests/integration/test_claude_code_integration.py  # one adapter
 ```
 
 See [adapters/third-party.md](./adapters/third-party.md) for the

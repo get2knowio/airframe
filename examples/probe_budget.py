@@ -128,8 +128,7 @@ async def _probe_turn_cap(rt: Any, prompt: str) -> int:  # type: ignore[no-untyp
             except RuntimeBudgetExceededError as exc:
                 fired = True
                 print(
-                    f"  turn {i} tripped cap: kind={exc.kind!r} "
-                    f"cap={exc.cap} current={exc.current}"
+                    f"  turn {i} tripped cap: kind={exc.kind!r} cap={exc.cap} current={exc.current}"
                 )
                 break
     finally:

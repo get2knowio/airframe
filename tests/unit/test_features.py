@@ -597,9 +597,7 @@ def test_session_mcp_servers_kwarg_raises_on_openai_compat(
 
     cases: list[tuple[McpServerRef, Feature]] = [
         (
-            McpServerRef(
-                name="local", transport="stdio", command=["uvx", "mcp-server-everything"]
-            ),
+            McpServerRef(name="local", transport="stdio", command=["uvx", "mcp-server-everything"]),
             Feature.TOOLS_MCP_STDIO,
         ),
         (
@@ -844,8 +842,7 @@ def test_budget_turn_cap_universal_except_copilot(adapters: list) -> None:
             )
         else:
             assert adapter.supports(Feature.BUDGET_TURN_CAP), (
-                f"{type(adapter).__name__} should declare BUDGET_TURN_CAP "
-                f"after Phase 5 Iteration D"
+                f"{type(adapter).__name__} should declare BUDGET_TURN_CAP after Phase 5 Iteration D"
             )
 
 

@@ -1380,9 +1380,7 @@ async def test_mcp_external_name_colliding_with_in_process_raises(
     rt = ClaudeCodeRuntime()
     sess = rt.session(
         tools=[_build_tool()],
-        mcp_servers=[
-            McpServerRef(name=AIRFRAME_MCP_SERVER_NAME, transport="stdio", command=["x"])
-        ],
+        mcp_servers=[McpServerRef(name=AIRFRAME_MCP_SERVER_NAME, transport="stdio", command=["x"])],
     )
     try:
         with pytest.raises(ValueError, match="reserved"):

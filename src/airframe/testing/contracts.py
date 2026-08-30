@@ -60,6 +60,31 @@ async def test_close_on_fresh_runtime(adapter_runtime: Any) -> None:
     await adapter_runtime.close()
 
 
+async def test_reset_is_idempotent(adapter_runtime: Any) -> None:
+    """``reset()`` may be called repeatedly without raising.
+
+    ``reset()`` drops scope-bound state (sessions, threads) but keeps
+    runtime-wide resources — the subprocess pool, the HTTP client,
+    auth tokens. Calling it on a runtime that has no scope-bound state
+    yet, or twice in a row, is a no-op rather than an error.
+    """
+    await adapter_runtime.reset()
+    await adapter_runtime.reset()
+    await adapter_runtime.reset()
+
+
+async def test_reset_then_close_is_safe(adapter_runtime: Any) -> None:
+    """``reset()`` must not leave the runtime un-closable.
+
+    Because ``reset()`` deliberately keeps runtime-wide resources
+    alive, a subsequent ``close()`` still has real teardown to do.
+    That ordering runs in any consumer that recycles a runtime across
+    scopes, so it is contract surface rather than an adapter detail.
+    """
+    await adapter_runtime.reset()
+    await adapter_runtime.close()
+
+
 # ---------------------------------------------------------------------------
 # unwrap() escape-hatch contracts
 # ---------------------------------------------------------------------------

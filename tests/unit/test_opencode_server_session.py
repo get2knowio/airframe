@@ -769,9 +769,9 @@ async def test_execute_image_path_reads_and_encodes(mock_client: MagicMock, tmp_
     assert parts[1]["type"] == "file"
     assert parts[1]["mime"] == "image/png"
     assert parts[1]["filename"] == "photo.png"
-    expected = "data:image/png;base64," + _b64.b64encode(
-        b"\x89PNG\r\n\x1a\n-bytes-on-disk"
-    ).decode("ascii")
+    expected = "data:image/png;base64," + _b64.b64encode(b"\x89PNG\r\n\x1a\n-bytes-on-disk").decode(
+        "ascii"
+    )
     assert parts[1]["url"] == expected
 
 
@@ -792,9 +792,9 @@ async def test_execute_file_path_reads_and_encodes(mock_client: MagicMock, tmp_p
     assert parts[1]["type"] == "file"
     assert parts[1]["mime"] == "application/pdf"
     assert parts[1]["filename"] == "doc.pdf"
-    expected = "data:application/pdf;base64," + _b64.b64encode(
-        b"%PDF-1.4\n-not-a-real-pdf"
-    ).decode("ascii")
+    expected = "data:application/pdf;base64," + _b64.b64encode(b"%PDF-1.4\n-not-a-real-pdf").decode(
+        "ascii"
+    )
     assert parts[1]["url"] == expected
 
 

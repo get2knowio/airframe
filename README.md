@@ -381,7 +381,7 @@ types raise `TypeError`. Runtime-level types via
 
 `examples/probe_*.py` exercise each adapter end-to-end against a
 real CLI / HTTP endpoint. They're runnable demos, not part of
-`make test`. Auth issues surface as classified `Runtime*Error`.
+`mise run test`. Auth issues surface as classified `Runtime*Error`.
 
 ```bash
 uv run python examples/probe_supports.py        # capability matrix
@@ -425,11 +425,11 @@ Full list with one-line descriptions in
 
 ```bash
 uv sync --all-extras --group dev
-make test          # full suite (incl. integration tests, which self-skip without creds)
-make test-fast     # exclude `integration` marker
-make lint          # ruff
-make typecheck     # mypy
-make ci            # lint + format + typecheck + test
+mise run setup     # install every extra + the dev group
+mise run test      # full suite (incl. integration tests, which self-skip without creds)
+mise run test-fast # exclude `integration` marker
+mise run lint      # ruff check + mypy
+mise run check     # the gate CI runs: format + lint + types + coverage floor
 ```
 
 Integration tests run automatically when credentials for an

@@ -1,29 +1,37 @@
-"""Conformance contract suite for :class:`ClaudeCodeRuntime`.
+"""Conformance contract suite for :class:`OpenCodeServerRuntime`.
 
-Imports every test function from :mod:`airframe.testing.contracts`
-and runs them against a locally-constructed adapter. Pytest collects
-the imported test functions into this module via the standard
-"import + pytest discovers names starting with ``test_``" mechanism
-— same pattern SQLAlchemy uses in ``sqlalchemy.testing.suite``.
+Imports the structural contracts from :mod:`airframe.testing.contracts`
+and exercises them against a no-credentials ``OpenCodeServerRuntime``
+fixture. These contracts never make a live OpenCode call —
+behavioural integration lives in
+``tests/test_opencode_server_integration.py``.
 
-This is the in-tree mirror of what a third-party adapter author
-would write. Treat the structure as the canonical example.
+**Deliberately omitted contract**:
+:func:`test_supports_structured_output_json_schema_is_true`. The
+opencode-ai 0.1.0a36 SDK does not surface an ``client.mcp`` resource,
+so the forced-tool shim that other adapters use to deliver
+``Feature.STRUCTURED_OUTPUT_JSON_SCHEMA`` cannot be wired. OpenCode
+the *server* supports MCP at the config-file level; the limitation
+is the SDK's coverage. Once the SDK exposes runtime MCP
+registration, this adapter will flip the feature True and this
+omission can be removed. See the Iteration D section of
+``src/airframe/adapters/opencode_server.py``'s module docstring for
+the full rationale.
 """
 
 from __future__ import annotations
 
 import pytest
 
-from airframe.adapters.claude_code import ClaudeCodeRuntime
-
-# Importing the test functions makes pytest collect them here, scoped
-# to the ``adapter_runtime`` fixture defined below.
+from airframe.adapters.opencode_server import OpenCodeServerRuntime
 from airframe.testing.contracts import (  # noqa: F401
     test_close_is_idempotent,
     test_close_on_fresh_runtime,
     test_count_tokens_agrees_with_supports_flag,
     test_emittable_hook_kinds_subset_of_eight_literals,
     test_plain_text_execute_path_is_wired,
+    test_reset_is_idempotent,
+    test_reset_then_close_is_safe,
     test_runtime_result_has_rate_limit_field,
     test_runtime_result_has_reasoning_field,
     test_runtime_transient_error_carries_rate_limit_attr,
@@ -53,7 +61,6 @@ from airframe.testing.contracts import (  # noqa: F401
     test_supports_accepts_model_kwarg,
     test_supports_is_idempotent,
     test_supports_returns_bool_for_every_feature,
-    test_supports_structured_output_json_schema_is_true,
     test_unwrap_returns_self,
     test_unwrap_unrelated_type_raises_typeerror,
     test_validate_binding_returns_bool,
@@ -61,12 +68,8 @@ from airframe.testing.contracts import (  # noqa: F401
 
 
 @pytest.fixture
-def adapter_runtime() -> ClaudeCodeRuntime:
-    """A ClaudeCodeRuntime instance — no auth required to construct.
-
-    The runtime defers all SDK import / auth resolution to the first
-    ``execute()`` call. The Phase 0 conformance contracts are
-    structural and don't trigger that path, so a default-constructed
-    runtime is sufficient.
-    """
-    return ClaudeCodeRuntime()
+def adapter_runtime() -> OpenCodeServerRuntime:
+    # No credentials needed — the default base URL is loopback, which
+    # the auth chain treats as the documented unauthenticated path.
+    # The contracts don't make live calls.
+    return OpenCodeServerRuntime()

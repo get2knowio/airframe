@@ -28,8 +28,8 @@ properties:
   :class:`RuntimeBudgetExceededError`.
 
 **Gating.** Every test in this module is decorated with
-:func:`pytest.mark.integration`. The default ``make test`` /
-``make test-fast`` runs exclude the marker, so the suite passes
+:func:`pytest.mark.integration`. The ``mise run test-fast`` run
+excludes the marker, so the suite passes
 without credentials. Run integration tests explicitly with::
 
     pytest -m integration                            # all providers

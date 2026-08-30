@@ -171,9 +171,7 @@ async def test_execute_schema_missing_tool_use_raises_structured_output(
 ) -> None:
     rt, client = runtime_with_mock_client
     # Model returns text only, never calls the tool.
-    client.converse = AsyncMock(
-        return_value=_converse_response(text="I'm just going to say words")
-    )
+    client.converse = AsyncMock(return_value=_converse_response(text="I'm just going to say words"))
     sess = rt.session()
     with pytest.raises(RuntimeStructuredOutputError) as exc:
         await sess.execute("answer", schema=_Schema)

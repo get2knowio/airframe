@@ -2,7 +2,8 @@
 
 Imports every test from :mod:`airframe.testing.integration` and runs
 it against a real :class:`ClaudeCodeRuntime`. Gated by the
-``integration`` pytest marker; the default ``make test`` excludes it.
+``integration`` pytest marker, applied to everything under
+``tests/integration/`` by the root conftest.
 
 Run explicitly::
 

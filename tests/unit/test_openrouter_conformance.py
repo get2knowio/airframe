@@ -1,23 +1,23 @@
-"""Conformance contract suite for :class:`OpenCodeZenRuntime`.
+"""Conformance contract suite for :class:`OpenRouterRuntime`.
 
-Also exercises the :class:`OpenAICompatibleRuntime` base class — the
-contracts here pass through to the base methods. A future
-``Together`` / ``Groq`` / ``Fireworks`` adapter will get the same
-coverage by writing a near-identical conformance file with its own
-constructor in the fixture.
+Every concrete adapter runs the shared contracts, including the thin
+``OpenAICompatibleRuntime`` subclasses — a subclass that overrides one
+method badly is exactly what these contracts exist to catch.
 """
 
 from __future__ import annotations
 
 import pytest
 
-from airframe.adapters.opencode_zen import OpenCodeZenRuntime
+from airframe.adapters.openrouter import OpenRouterRuntime
 from airframe.testing.contracts import (  # noqa: F401
     test_close_is_idempotent,
     test_close_on_fresh_runtime,
     test_count_tokens_agrees_with_supports_flag,
     test_emittable_hook_kinds_subset_of_eight_literals,
     test_plain_text_execute_path_is_wired,
+    test_reset_is_idempotent,
+    test_reset_then_close_is_safe,
     test_runtime_result_has_rate_limit_field,
     test_runtime_result_has_reasoning_field,
     test_runtime_transient_error_carries_rate_limit_attr,
@@ -55,7 +55,7 @@ from airframe.testing.contracts import (  # noqa: F401
 
 
 @pytest.fixture
-def adapter_runtime() -> OpenCodeZenRuntime:
+def adapter_runtime() -> OpenRouterRuntime:
     # Dummy key satisfies ``OpenAICompatibleRuntime`` construction;
     # the structural contracts don't make any HTTP calls.
-    return OpenCodeZenRuntime(api_key="dummy-key-for-conformance")
+    return OpenRouterRuntime(api_key="dummy-key-for-conformance")

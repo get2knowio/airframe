@@ -843,9 +843,7 @@ async def test_handler_exception_becomes_is_error_tool_message(
     mock_openai.chat.completions.create = AsyncMock(
         side_effect=[
             _make_tool_call_response(
-                tool_calls=[
-                    _make_tool_call(call_id="c1", name="add", arguments='{"a": 1, "b": 2}')
-                ]
+                tool_calls=[_make_tool_call(call_id="c1", name="add", arguments='{"a": 1, "b": 2}')]
             ),
             _make_response(content="apologies, the tool failed."),
         ]
@@ -944,9 +942,7 @@ async def test_tool_loop_failure_rolls_back_buffer(mock_openai: MagicMock) -> No
     mock_openai.chat.completions.create = AsyncMock(
         side_effect=[
             _make_tool_call_response(
-                tool_calls=[
-                    _make_tool_call(call_id="c1", name="add", arguments='{"a": 1, "b": 2}')
-                ]
+                tool_calls=[_make_tool_call(call_id="c1", name="add", arguments='{"a": 1, "b": 2}')]
             ),
             RuntimeError("vendor hiccup"),
             _make_response(content="hello"),
@@ -1371,9 +1367,7 @@ async def test_on_event_tool_round_trip_emits_pre_and_post_tool_use(
     mock_openai.chat.completions.create = AsyncMock(
         side_effect=[
             _make_tool_call_response(
-                tool_calls=[
-                    _make_tool_call(call_id="c1", name="add", arguments='{"a": 1, "b": 2}')
-                ]
+                tool_calls=[_make_tool_call(call_id="c1", name="add", arguments='{"a": 1, "b": 2}')]
             ),
             _make_response(content="3"),
         ]
@@ -1412,9 +1406,7 @@ async def test_on_event_tool_failure_translates_to_tool_failure_kind(
     mock_openai.chat.completions.create = AsyncMock(
         side_effect=[
             _make_tool_call_response(
-                tool_calls=[
-                    _make_tool_call(call_id="c1", name="add", arguments='{"a": 1, "b": 2}')
-                ]
+                tool_calls=[_make_tool_call(call_id="c1", name="add", arguments='{"a": 1, "b": 2}')]
             ),
             _make_response(content="apologies"),
         ]
@@ -1537,9 +1529,7 @@ async def test_no_on_event_skips_hook_emission(mock_openai: MagicMock) -> None:
     mock_openai.chat.completions.create = AsyncMock(
         side_effect=[
             _make_tool_call_response(
-                tool_calls=[
-                    _make_tool_call(call_id="c1", name="add", arguments='{"a": 1, "b": 2}')
-                ]
+                tool_calls=[_make_tool_call(call_id="c1", name="add", arguments='{"a": 1, "b": 2}')]
             ),
             _make_response(content="3"),
         ]

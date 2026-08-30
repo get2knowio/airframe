@@ -86,9 +86,7 @@ _METADATA: dict[str, ModelMeta] = {
     "meta-llama/llama-3.1-8b-instruct": ModelMeta(
         "Llama 3.1 8B Instruct (via OpenRouter)", 131_072, 0.00002, 0.00005
     ),
-    "deepseek/deepseek-chat": ModelMeta(
-        "DeepSeek Chat (via OpenRouter)", 64_000, 0.00014, 0.00028
-    ),
+    "deepseek/deepseek-chat": ModelMeta("DeepSeek Chat (via OpenRouter)", 64_000, 0.00014, 0.00028),
     "mistralai/mistral-large": ModelMeta("Mistral Large (via OpenRouter)", 128_000, 0.002, 0.006),
 }
 

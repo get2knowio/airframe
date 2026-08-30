@@ -18,7 +18,12 @@
     "ghcr.io/get2knowio/devcontainer-features/modern-cli-tools:2": {},
     "ghcr.io/get2knowio/devcontainer-features/python-tools:2": {
       "omit": "poetry"
-    }
+    },
+    "ghcr.io/get2knowio/devcontainer-features/github-actions-tools:2": {},
+    // mise is container fabric, not a project tool: it has to exist
+    // before `uv` runs, so it belongs to the feature layer while the
+    // runtimes it pins belong to mise.toml.
+    "ghcr.io/devcontainers-extra/features/mise:1": {}
   },
   "remoteEnv": {
     "GH_PAGER": ""
@@ -31,7 +36,11 @@
       // to the inode, so the first atomic rewrite orphans the container's view
       // and silently discards writes. Relocating into the directory mount avoids
       // that entirely and shares auth across every devcontainer on the host.
-      "CLAUDE_CONFIG_DIR": "/home/vscode/.claude"
+      "CLAUDE_CONFIG_DIR": "/home/vscode/.claude",
+      // mise refuses to read an untrusted config and prompts for it.
+      // An agent starting in a fresh container would hang on that
+      // prompt before its first command, so trust the workspace root.
+      "MISE_TRUSTED_CONFIG_PATHS": "/workspaces"
   },
   "customizations": {
     "vscode": {
@@ -63,5 +72,5 @@
     "source=${localEnv:HOME}/.config/gh,target=/home/vscode/.config/gh,type=bind,consistency=cached",
     "source=${localWorkspaceFolder}/../site,target=/workspaces/site,type=bind,consistency=cached"
   ],
-  "postCreateCommand": "python3 --version && uv --version && node --version"
+  "postCreateCommand": "mise trust --all && mise run setup"
 }

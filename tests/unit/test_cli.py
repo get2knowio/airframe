@@ -192,9 +192,7 @@ def test_run_no_prompt(monkeypatch: pytest.MonkeyPatch, capsys: Any) -> None:
 
 
 def test_providers_text(monkeypatch: pytest.MonkeyPatch, capsys: Any) -> None:
-    monkeypatch.setattr(
-        airframe, "list_providers", lambda *, installed_only: ["claude", "bedrock"]
-    )
+    monkeypatch.setattr(airframe, "list_providers", lambda *, installed_only: ["claude", "bedrock"])
     code = cli.main(["providers"])
     assert code == cli.EXIT_OK
     assert capsys.readouterr().out.split() == ["claude", "bedrock"]
