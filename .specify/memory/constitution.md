@@ -168,8 +168,10 @@ The verbs are the portfolio contract: `setup`, `build`, `test`,
 `lint`, `fmt`, `check`, `release`.
 
 *Enforced by:* `mise run check` →
-`tests/unit/test_constitution.py::test_ci_invokes_only_the_check_verb` and
-`::test_no_task_swallows_failure`.
+`tests/unit/test_constitution.py::test_gating_workflows_invoke_only_the_check_verb`
+(over every workflow that gates — `ci.yml` and `release.yml` both),
+`::test_no_task_swallows_failure`, and
+`::test_check_composition_propagates_failure`.
 
 ## Quality Gates
 

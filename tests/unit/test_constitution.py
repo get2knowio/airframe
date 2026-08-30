@@ -341,23 +341,44 @@ def test_contracts_module_exports_only_test_functions() -> None:
 WORKFLOWS = REPO_ROOT / ".github" / "workflows"
 
 
-def test_ci_invokes_only_the_check_verb() -> None:
-    """CI's gating job runs ``mise run check`` and nothing hand-written.
+#: Workflows that carry a gating job. Both must reach the gate through
+#: the verb: `ci.yml` on every push and PR, `release.yml` as the job the
+#: publish depends on. A third workflow that starts gating belongs here.
+GATING_WORKFLOWS = ("ci.yml", "release.yml")
+
+#: Tools that constitute a hand-written gate step. Their presence
+#: anywhere in a gating workflow — a `run:` line, a block scalar, a step
+#: name — means the workflow is describing the gate rather than invoking
+#: it.
+GATE_TOOLS = ("ruff", "mypy", "pytest")
+
+
+@pytest.mark.parametrize("workflow_name", GATING_WORKFLOWS)
+def test_gating_workflows_invoke_only_the_check_verb(workflow_name: str) -> None:
+    """Each gating workflow runs ``mise run check`` and nothing inline.
 
     The failure this prevents is the one the portfolio standard calls
     out by name: a CI step list that agrees with the local gate today
-    and drifts from it tomorrow.
-    """
-    ci = (WORKFLOWS / "ci.yml").read_text()
-    assert "mise run check" in ci, "ci.yml must invoke `mise run check`"
+    and drifts from it tomorrow. Checked per workflow rather than for
+    ``ci.yml`` alone, because ``release.yml`` gates the publish and can
+    drift the same way.
 
-    run_steps = re.findall(r"^\s*run:\s*(.+)$", ci, flags=re.MULTILINE)
-    inline = [
-        step for step in run_steps if any(tool in step for tool in ("ruff", "mypy", "pytest"))
-    ]
+    Args:
+        workflow_name: One gating workflow, supplied by parametrisation.
+    """
+    workflow = (WORKFLOWS / workflow_name).read_text()
+    assert "mise run check" in workflow, (
+        f"{workflow_name} must invoke `mise run check` — it gates something."
+    )
+
+    # Comments are prose. Everything else is the workflow describing
+    # what it does, so a gate tool named there is a gate step.
+    code = "\n".join(line for line in workflow.splitlines() if not line.lstrip().startswith("#"))
+    inline = sorted({tool for tool in GATE_TOOLS if re.search(rf"\b{tool}\b", code)})
     assert not inline, (
-        f"ci.yml spells gate steps out inline: {inline}. Principle VIII: CI "
-        "invokes the verb, never a parallel list that can drift from it."
+        f"{workflow_name} names {inline} outside a comment. Principle VIII: "
+        "a gating workflow invokes the verb, never a parallel list of steps "
+        "that can drift from it."
     )
 
 
